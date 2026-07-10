@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#171815">
+    <meta
+      name="description"
+      content="Altas Control Center for managed dealership AI workers."
+    >
+    <title>Altas Control Center</title>
+    <link rel="icon" href="/static/altas-mark.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#workspace">Skip to control center</a>
+
+    <div class="app-shell">
+      <aside class="rail" id="primary-rail" aria-label="Primary navigation">
+        <div class="brand-lockup" aria-label="Altas Control Center">
+          <svg
+            class="brand-mark"
+            viewBox="0 0 54 48"
+            role="img"
+            aria-label="Altas A mark"
+          >
+            <path d="M5 42 22 6h9L49 42h-9l-4-9H17l-4 9H5Zm15-17h13l-6.6-15L20 25Z" />
+            <path class="brand-cut" d="m8 37 38-25v8L8 45v-8Z" />
+          </svg>
+          <div>
+            <p class="wordmark">ALTAS</p>
+            <p class="brand-subtitle">Control center</p>
+          </div>
+          <button
+            class="rail-close icon-button"
+            id="rail-close"
+            type="button"
+            aria-label="Close navigation"
+          >
+            <span></span><span></span>
+          </button>
+        </div>
+
+        <div class="environment-stamp" aria-label="Environment: local prototype">
+          <span class="environment-index">L/01</span>
+          <span>
+            Local prototype
+            <small>Managed worker plane</small>
+          </span>
+        </div>
+
+        <nav class="section-nav" aria-label="Control center sections">
+          <button class="nav-item is-active" type="button" data-view="overview" aria-current="page">
+            <span class="nav-index" aria-hidden="true">01</span>
+            <span>Overview</span>
+            <span class="nav-marker" aria-hidden="true"></span>
+          </button>
+          <button class="nav-item" type="button" data-view="fleet">
+            <span class="nav-index" aria-hidden="true">02</span>
+            <span>Fleet</span>
+            <span class="nav-marker" aria-hidden="true"></span>
+          </button>
+          <button class="nav-item" type="button" data-view="stores">
+            <span class="nav-index" aria-hidden="true">03</span>
+            <span>Stores</span>
+            <span class="nav-marker" aria-hidden="true"></span>
+          </button>
+          <button class="nav-item" type="button" data-view="jobs">
+            <span class="nav-index" aria-hidden="true">04</span>
+            <span>Jobs</span>
+            <span class="nav-marker" aria-hidden="true"></span>
+          </button>
+          <button class="nav-item" type="button" data-view="audit">
+            <span class="nav-index" aria-hidden="true">05</span>
+            <span>Audit</span>
+            <span class="nav-marker" aria-hidden="true"></span>
+          </button>
+        </nav>
+
+        <div class="rail-readout">
+          <p class="micro-label">Runtime doctrine</p>
+          <p class="doctrine">Local execution.<br>Cloud control.</p>
+          <div class="rail-rule" aria-hidden="true"></div>
+          <dl class="rail-meta">
+            <div>
+              <dt>Build</dt>
+              <dd>Prototype 0.1</dd>
+            </div>
+            <div>
+              <dt>Source</dt>
+              <dd>Tekion fixture</dd>
+            </div>
+          </dl>
+        </div>
+      </aside>
+
+      <button
+        class="rail-scrim"
+        id="rail-scrim"
+        type="button"
+        aria-label="Dismiss navigation overlay"
+        tabindex="-1"
+      ></button>
+
+      <main class="workspace" id="workspace" tabindex="-1">
+        <header class="command-bar">
+          <div class="command-context">
+            <button
+              class="rail-toggle icon-button"
+              id="rail-toggle"
+              type="button"
+              aria-controls="primary-rail"
+              aria-expanded="false"
+              aria-label="Open navigation"
+            >
+              <span></span><span></span><span></span>
+            </button>
+            <div>
+              <p class="eyebrow" id="view-kicker">Operations / network</p>
+              <h1 id="view-title">Fleet overview</h1>
+            </div>
+          </div>
+
+          <div class="command-actions">
+            <div class="sync-readout" aria-live="polite">
+              <span id="connection-dot" class="connection-dot is-pending" aria-hidden="true"></span>
+              <span>
+                <strong id="connection-label">Connecting</strong>
+                <small id="last-sync">No sync yet</small>
+              </span>
+            </div>
+            <button class="text-button" id="auth-button" type="button">
+              Dev auth
+            </button>
+            <button class="refresh-button" id="refresh-button" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20 11a8 8 0 1 0-2.34 5.66L20 14.32M20 6v5h-5" />
+              </svg>
+              <span>Refresh</span>
+            </button>
+          </div>
+        </header>
+
+        <div class="dev-warning" role="note">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3 2.5 20h19L12 3Zm0 6v5m0 3v.1" />
+          </svg>
+          <p>
+            <strong>Development authentication</strong>
+            Admin bearer access is stored only for this browser tab. This fixture control plane is not production hardened.
+          </p>
+          <span class="warning-tag">DEV ONLY</span>
+        </div>
+
+        <div class="global-error" id="global-error" role="alert" hidden>
+          <div>
+            <strong>Control plane unavailable</strong>
+            <p id="global-error-message">The last refresh did not complete.</p>
+          </div>
+          <button class="text-button" id="error-retry" type="button">Retry connection</button>
+        </div>
+
+        <section class="view is-visible" id="view-overview" data-view-panel="overview" aria-labelledby="overview-heading">
+          <div class="hero-band reveal-block">
+            <div class="hero-copy">
+              <p class="section-code">ALTAS / OPS LEDGER / 001</p>
+              <h2 id="overview-heading">Every worker.<br><em>Under orders.</em></h2>
+              <p class="hero-summary">
+                A live operational record of licensed workers, assigned rooftops, policy-bound jobs, and model usage.
+              </p>
+            </div>
+            <div class="hero-signal" aria-label="Prototype data source">
+              <div class="signal-orbit" aria-hidden="true">
+                <span></span><span></span><span></span>
+                <b>A</b>
+              </div>
+              <div>
+                <span class="status-chip is-fixture">Tekion fixture</span>
+                <p>Read-only dealership<br>operations snapshot</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="metric-ledger reveal-block" id="overview-metrics" aria-live="polite" aria-busy="true">
+            <div class="metric-skeleton"></div>
+            <div class="metric-skeleton"></div>
+            <div class="metric-skeleton"></div>
+            <div class="metric-skeleton"></div>
+            <div class="metric-skeleton"></div>
+            <div class="metric-skeleton"></div>
+          </div>
+
+          <div class="overview-grid">
+            <article class="ledger-panel network-panel reveal-block">
+              <header class="panel-heading">
+                <div>
+                  <p class="micro-label">Worker network</p>
+                  <h3>Readiness signal</h3>
+                </div>
+                <span class="panel-index">A—01</span>
+              </header>
+              <div id="network-readiness" class="loading-region" aria-live="polite" aria-busy="true">
+                <div class="loading-line"></div>
+                <div class="loading-line is-short"></div>
+              </div>
+            </article>
+
+            <article class="ledger-panel usage-panel reveal-block">
+              <header class="panel-heading">
+                <div>
+                  <p class="micro-label">Model gateway</p>
+                  <h3>Token activity</h3>
+                </div>
+                <span class="status-chip is-mock">Mock route</span>
+              </header>
+              <div id="usage-signal" class="loading-region" aria-live="polite" aria-busy="true">
+                <div class="loading-line"></div>
+                <div class="loading-line is-short"></div>
+              </div>
+            </article>
+
+            <article class="ledger-panel recent-panel reveal-block">
+              <header class="panel-heading">
+                <div>
+                  <p class="micro-label">Dispatch ledger</p>
+                  <h3>Recent jobs</h3>
+                </div>
+                <button class="inline-link" type="button" data-go-view="jobs">Open all jobs</button>
+              </header>
+              <div class="table-wrap" id="overview-jobs" aria-live="polite" aria-busy="true">
+                <div class="loading-table" aria-hidden="true">
+                  <span></span><span></span><span></span>
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" id="view-fleet" data-view-panel="fleet" aria-labelledby="fleet-heading" hidden>
+          <div class="section-intro reveal-block">
+            <div>
+              <p class="section-code">WORKER FLEET / DEVICE AUTHORITY</p>
+              <h2 id="fleet-heading">Managed machines,<br><em>visible by default.</em></h2>
+            </div>
+            <p>
+              Device posture and agent assignments share one ledger. Disable a worker here and the runtime loses authorization for paid work.
+            </p>
+          </div>
+
+          <div class="section-statline" id="fleet-statline" aria-live="polite"></div>
+
+          <article class="ledger-panel table-panel reveal-block">
+            <header class="panel-heading">
+              <div>
+                <p class="micro-label">Registered devices</p>
+                <h3>Worker inventory</h3>
+              </div>
+              <span class="panel-index" id="device-count">— devices</span>
+            </header>
+            <div class="table-wrap" id="fleet-devices" aria-live="polite" aria-busy="true"></div>
+          </article>
+
+          <article class="ledger-panel table-panel reveal-block">
+            <header class="panel-heading">
+              <div>
+                <p class="micro-label">Agent bindings</p>
+                <h3>Assigned workers</h3>
+              </div>
+              <span class="panel-index" id="agent-count">— agents</span>
+            </header>
+            <div class="table-wrap" id="fleet-agents" aria-live="polite" aria-busy="true"></div>
+          </article>
+        </section>
+
+        <section class="view" id="view-stores" data-view-panel="stores" aria-labelledby="stores-heading" hidden>
+          <div class="section-intro reveal-block">
+            <div>
+              <p class="section-code">ROOFTOP DIRECTORY / ENTITLEMENT SCOPE</p>
+              <h2 id="stores-heading">Access follows<br><em>the rooftop.</em></h2>
+            </div>
+            <p>
+              Tekion authorization and Altas entitlement are separate controls. This prototype uses a labeled fixture adapter for dealership data.
+            </p>
+          </div>
+
+          <div class="store-directory" id="store-directory" aria-live="polite" aria-busy="true">
+            <div class="store-skeleton"></div>
+            <div class="store-skeleton"></div>
+          </div>
+        </section>
+
+        <section class="view" id="view-jobs" data-view-panel="jobs" aria-labelledby="jobs-heading" hidden>
+          <div class="section-intro reveal-block">
+            <div>
+              <p class="section-code">DISPATCH / POLICY-GATED EXECUTION</p>
+              <h2 id="jobs-heading">Queue work with<br><em>explicit context.</em></h2>
+            </div>
+            <p>
+              Every dispatch names its tenant, store, agent, and capability. The control plane rejects work outside active subscriptions and entitlements.
+            </p>
+          </div>
+
+          <div class="jobs-layout">
+            <article class="ledger-panel queue-panel reveal-block">
+              <header class="panel-heading">
+                <div>
+                  <p class="micro-label">New dispatch</p>
+                  <h3>Queue a job</h3>
+                </div>
+                <span class="status-chip is-policy">Policy checked</span>
+              </header>
+
+              <form id="job-form" class="job-form" novalidate>
+                <div class="field-row">
+                  <label class="field">
+                    <span>Tenant</span>
+                    <select name="tenant_id" id="job-tenant" required>
+                      <option value="">Select tenant</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>Store</span>
+                    <select name="store_id" id="job-store" required disabled>
+                      <option value="">Select store</option>
+                    </select>
+                  </label>
+                </div>
+
+                <div class="field-row">
+                  <label class="field">
+                    <span>Agent</span>
+                    <select name="agent_id" id="job-agent" required disabled>
+                      <option value="">Select agent</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>Device <small>optional</small></span>
+                    <select name="device_id" id="job-device" disabled>
+                      <option value="">Any assigned device</option>
+                    </select>
+                  </label>
+                </div>
+
+                <label class="field">
+                  <span>Capability</span>
+                  <input
+                    name="capability"
+                    id="job-capability"
+                    type="text"
+                    value="fixed_ops.daily_report"
+                    maxlength="160"
+                    list="capability-options"
+                    autocomplete="off"
+                    required
+                  >
+                  <datalist id="capability-options">
+                    <option value="fixed_ops.daily_report"></option>
+                    <option value="reports.advisor.performance"></option>
+                    <option value="reports.parts_labor.summary"></option>
+                  </datalist>
+                </label>
+
+                <label class="field">
+                  <span>Payload <small>JSON object</small></span>
+                  <textarea
+                    name="payload"
+                    id="job-payload"
+                    rows="6"
+                    spellcheck="false"
+                    required
+                  >{
+  "report_date": "2026-07-08",
+  "source": "tekion_fixture"
+}</textarea>
+                </label>
+
+                <label class="field">
+                  <span>Idempotency key <small>optional</small></span>
+                  <input
+                    name="idempotency_key"
+                    id="job-idempotency"
+                    type="text"
+                    maxlength="160"
+                    autocomplete="off"
+                    placeholder="daily-fixed-ops-2026-07-09"
+                  >
+                </label>
+
+                <div class="form-error" id="job-form-error" role="alert" hidden></div>
+
+                <button class="primary-action" id="queue-job-button" type="submit">
+                  <span>Queue approved job</span>
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M5 12h14m-5-5 5 5-5 5" />
+                  </svg>
+                </button>
+              </form>
+            </article>
+
+            <article class="ledger-panel jobs-panel reveal-block">
+              <header class="panel-heading panel-heading-wrap">
+                <div>
+                  <p class="micro-label">Execution history</p>
+                  <h3>Job ledger</h3>
+                </div>
+                <div class="segmented-filter" id="job-filter" aria-label="Filter jobs by status">
+                  <button type="button" class="is-active" data-job-filter="all">All</button>
+                  <button type="button" data-job-filter="queued">Queued</button>
+                  <button type="button" data-job-filter="running">Running</button>
+                  <button type="button" data-job-filter="failed">Failed</button>
+                </div>
+              </header>
+              <div class="table-wrap" id="jobs-ledger" aria-live="polite" aria-busy="true"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" id="view-audit" data-view-panel="audit" aria-labelledby="audit-heading" hidden>
+          <div class="section-intro reveal-block">
+            <div>
+              <p class="section-code">IMMUTABLE RECORD / OPERATOR ACCOUNTABILITY</p>
+              <h2 id="audit-heading">Nothing important<br><em>happens quietly.</em></h2>
+            </div>
+            <p>
+              Policy evaluations, dispatches, state changes, and worker actions appear here with their originating context and outcome.
+            </p>
+          </div>
+
+          <div class="audit-toolbar reveal-block">
+            <label class="search-field">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="11" cy="11" r="6"></circle>
+                <path d="m16 16 4 4"></path>
+              </svg>
+              <span class="sr-only">Search audit events</span>
+              <input id="audit-search" type="search" placeholder="Search action, actor, outcome, resource…" autocomplete="off">
+            </label>
+            <p id="audit-result-count" aria-live="polite">— events</p>
+          </div>
+
+          <div class="audit-ledger" id="audit-ledger" aria-live="polite" aria-busy="true"></div>
+        </section>
+
+        <footer class="workspace-footer">
+          <p>ALTAS CONTROL CENTER <span>/</span> LOCAL-FIRST PROTOTYPE</p>
+          <p>Fixture data <span>•</span> Not for production operations</p>
+        </footer>
+      </main>
+    </div>
+
+    <dialog class="auth-dialog" id="auth-dialog" aria-labelledby="auth-dialog-title">
+      <form id="auth-form" class="auth-form">
+        <div class="dialog-number" aria-hidden="true">AUTH / 01</div>
+        <button class="dialog-close" id="auth-close" type="button" aria-label="Close authentication dialog">×</button>
+        <p class="micro-label">Local administrator access</p>
+        <h2 id="auth-dialog-title">Connect this tab.</h2>
+        <p class="dialog-copy">
+          Enter the bearer configured by <code>ALTAS_ADMIN_TOKEN</code>. It is held in session storage only and is never written into the page or logs.
+        </p>
+        <label class="field">
+          <span>Admin bearer token</span>
+          <input
+            id="admin-token"
+            name="admin_token"
+            type="password"
+            autocomplete="off"
+            placeholder="Leave blank to use the demo token"
+          >
+        </label>
+        <p class="dialog-note">
+          The default is for this local prototype only. Rotate it before exposing the service to any network.
+        </p>
+        <div class="dialog-actions">
+          <button class="secondary-action" id="reset-demo-token" type="button">Use demo token</button>
+          <button class="primary-action" type="submit">
+            <span>Save &amp; reconnect</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 12h14m-5-5 5 5-5 5" />
+            </svg>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+    <div class="sr-only" id="route-announcer" aria-live="polite"></div>
+  </body>
+</html>

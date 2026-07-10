@@ -1,3 +1,8 @@
+> [!IMPORTANT]
+> Traducción histórica del proyecto upstream Hermes, conservada para
+> atribución y mantenimiento del motor. El producto de este repositorio es
+> Altas; consulta [README.md](README.md) para la documentación actual.
+
 <p align="center">
   <img src="assets/banner.png" alt="Hermes Agent" width="100%">
 </p>

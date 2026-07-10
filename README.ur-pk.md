@@ -1,3 +1,8 @@
+> [!IMPORTANT]
+> This is a historical translation of the upstream Hermes engine README,
+> retained for attribution and engine maintenance. The product in this
+> repository is Altas; see [README.md](README.md) for current documentation.
+
 <div dir="rtl">
 
 <p align="center">

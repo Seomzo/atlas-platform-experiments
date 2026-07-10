@@ -280,6 +280,30 @@ def _run_agent_tool_execution_middleware(
     tool_call_id: str,
     execute,
 ) -> tuple[Any, dict]:
+    # Agent-owned tools (memory, session recall, delegation, desktop terminal
+    # reads, context-engine tools, and memory-provider tools) do not pass
+    # through model_tools.handle_function_call(). Keep their mandatory Altas
+    # authorization at this shared boundary so neither sequential nor
+    # concurrent dispatch can bypass it. Check before execution middleware;
+    # the guard is a no-op for ordinary upstream development sessions.
+    from agent.agent_runtime_helpers import agent_runtime_owns_post_tool_hook
+
+    if agent_runtime_owns_post_tool_hook(agent, function_name):
+        from altas.managed.policy_guard import guard_tool_call
+
+        decision = guard_tool_call(function_name, function_args)
+        if not decision.allowed:
+            return (
+                json.dumps(
+                    {
+                        "error": decision.message,
+                        "reason_code": decision.reason_code,
+                    },
+                    ensure_ascii=False,
+                ),
+                function_args,
+            )
+
     observed_args = function_args
 
     def _execute(next_args: dict) -> Any:

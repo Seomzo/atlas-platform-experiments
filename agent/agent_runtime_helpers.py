@@ -2311,19 +2311,22 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 tool_request_middleware_trace=list(_tool_middleware_trace),
             )
 
-    from hermes_cli.middleware import run_tool_execution_middleware
+    # Reuse the same execution-middleware boundary as the sequential agent
+    # loop. In Altas managed mode that boundary performs the mandatory policy
+    # check for agent-owned tools before their handler can run.
+    from agent.tool_executor import _run_agent_tool_execution_middleware
 
-    return run_tool_execution_middleware(
-        function_name,
-        function_args,
-        lambda next_args: _execute(next_args if isinstance(next_args, dict) else function_args),
-        original_args=function_args,
-        task_id=effective_task_id or "",
-        session_id=getattr(agent, "session_id", "") or "",
+    result, _observed_args = _run_agent_tool_execution_middleware(
+        agent,
+        function_name=function_name,
+        function_args=function_args,
+        effective_task_id=effective_task_id,
         tool_call_id=tool_call_id or "",
-        turn_id=getattr(agent, "_current_turn_id", "") or "",
-        api_request_id=getattr(agent, "_current_api_request_id", "") or "",
+        execute=lambda next_args: _execute(
+            next_args if isinstance(next_args, dict) else function_args
+        ),
     )
+    return result
 
 
 

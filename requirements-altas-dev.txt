@@ -1,0 +1,12 @@
+# Minimal, reproducible dependency set for the Altas walking skeleton.
+# Versions align with the pinned upstream uv.lock where applicable.
+fastapi==0.133.1
+httpx==0.28.1
+build==1.3.0
+keyring==25.7.0
+pydantic==2.13.4
+pytest==9.0.2
+pytest-asyncio==1.3.0
+requests==2.33.0
+ruff==0.15.10
+uvicorn[standard]==0.41.0

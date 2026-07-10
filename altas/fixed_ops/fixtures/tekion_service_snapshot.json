@@ -1,0 +1,124 @@
+{
+  "fixture_version": "1.0",
+  "notice": "Synthetic data for Altas prototype testing. Not exported from a dealership.",
+  "stores": {
+    "store-sunrise-vw": {
+      "store_name": "Sunrise Volkswagen",
+      "business_date": "2026-07-08",
+      "repair_orders": [
+        {
+          "ro_id": "RO-4101",
+          "advisor_id": "advisor-avery",
+          "advisor_name": "Avery",
+          "status": "closed",
+          "opened_at": "2026-07-08T08:12:00-07:00",
+          "closed_at": "2026-07-08T12:40:00-07:00",
+          "labor_sales": 684.0,
+          "parts_sales": 392.0,
+          "gross_profit": 642.0,
+          "hours_sold": 4.8,
+          "declined_value": 0.0,
+          "comeback": false
+        },
+        {
+          "ro_id": "RO-4102",
+          "advisor_id": "advisor-avery",
+          "advisor_name": "Avery",
+          "status": "closed",
+          "opened_at": "2026-07-08T08:35:00-07:00",
+          "closed_at": "2026-07-08T15:08:00-07:00",
+          "labor_sales": 930.0,
+          "parts_sales": 815.0,
+          "gross_profit": 996.0,
+          "hours_sold": 6.2,
+          "declined_value": 440.0,
+          "comeback": false
+        },
+        {
+          "ro_id": "RO-4103",
+          "advisor_id": "advisor-jordan",
+          "advisor_name": "Jordan",
+          "status": "closed",
+          "opened_at": "2026-07-08T09:03:00-07:00",
+          "closed_at": "2026-07-08T11:55:00-07:00",
+          "labor_sales": 405.0,
+          "parts_sales": 188.0,
+          "gross_profit": 361.0,
+          "hours_sold": 3.0,
+          "declined_value": 0.0,
+          "comeback": false
+        },
+        {
+          "ro_id": "RO-4104",
+          "advisor_id": "advisor-jordan",
+          "advisor_name": "Jordan",
+          "status": "closed",
+          "opened_at": "2026-07-08T09:18:00-07:00",
+          "closed_at": "2026-07-08T16:31:00-07:00",
+          "labor_sales": 1128.0,
+          "parts_sales": 1274.0,
+          "gross_profit": 1316.0,
+          "hours_sold": 7.1,
+          "declined_value": 780.0,
+          "comeback": false
+        },
+        {
+          "ro_id": "RO-4105",
+          "advisor_id": "advisor-morgan",
+          "advisor_name": "Morgan",
+          "status": "closed",
+          "opened_at": "2026-07-08T10:02:00-07:00",
+          "closed_at": "2026-07-08T13:20:00-07:00",
+          "labor_sales": 512.0,
+          "parts_sales": 306.0,
+          "gross_profit": 488.0,
+          "hours_sold": 3.7,
+          "declined_value": 190.0,
+          "comeback": true
+        },
+        {
+          "ro_id": "RO-4106",
+          "advisor_id": "advisor-morgan",
+          "advisor_name": "Morgan",
+          "status": "closed",
+          "opened_at": "2026-07-08T10:38:00-07:00",
+          "closed_at": "2026-07-08T17:04:00-07:00",
+          "labor_sales": 846.0,
+          "parts_sales": 604.0,
+          "gross_profit": 851.0,
+          "hours_sold": 5.6,
+          "declined_value": 0.0,
+          "comeback": false
+        },
+        {
+          "ro_id": "RO-4107",
+          "advisor_id": "advisor-avery",
+          "advisor_name": "Avery",
+          "status": "open",
+          "opened_at": "2026-07-06T14:22:00-07:00",
+          "closed_at": null,
+          "labor_sales": 390.0,
+          "parts_sales": 940.0,
+          "gross_profit": 0.0,
+          "hours_sold": 2.1,
+          "declined_value": 620.0,
+          "comeback": false
+        },
+        {
+          "ro_id": "RO-4108",
+          "advisor_id": "advisor-jordan",
+          "advisor_name": "Jordan",
+          "status": "open",
+          "opened_at": "2026-07-08T13:45:00-07:00",
+          "closed_at": null,
+          "labor_sales": 225.0,
+          "parts_sales": 110.0,
+          "gross_profit": 0.0,
+          "hours_sold": 1.5,
+          "declined_value": 0.0,
+          "comeback": false
+        }
+      ]
+    }
+  }
+}

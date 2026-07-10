@@ -1,0 +1,1050 @@
+"""FastAPI application factory for the Altas local control plane."""
+
+from __future__ import annotations
+
+import hmac
+from pathlib import Path
+from typing import Any, Literal
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    status,
+)
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.staticfiles import StaticFiles
+
+from .config import ControlPlaneSettings
+from .database import Database
+from .model_gateway import ModelGateway, ModelGatewayError
+from .policy import PolicyDecision, PolicyDenied, PolicyEngine, not_expired
+from .repository import (
+    ControlPlaneRepository,
+    DemoSeed,
+    IdempotencyConflict,
+    InvalidJobClaim,
+    ModelUsageLimitExceeded,
+)
+from .schemas import (
+    ChatCompletionRequest,
+    HeartbeatRequest,
+    JobCompletionRequest,
+    PolicyEvaluationRequest,
+    QueueJobRequest,
+    RequeueJobRequest,
+    ToggleRequest,
+)
+from .security import LeaseSigner, hash_secret
+
+
+AdminResource = Literal[
+    "tenants",
+    "stores",
+    "subscriptions",
+    "devices",
+    "agents",
+    "entitlements",
+    "jobs",
+    "usage_events",
+    "audit_logs",
+]
+ToggleResource = Literal["stores", "subscriptions", "devices", "agents", "entitlements"]
+
+# Dependencies are intentionally static and narrow. A job grants its own
+# capability plus only the infrastructure capability explicitly required by
+# that workflow; an arbitrary entitled capability is never enough.
+JOB_CAPABILITY_DEPENDENCIES: dict[str, frozenset[str]] = {
+    "fixed_ops.daily_report": frozenset({"model.chat"}),
+}
+
+
+def _job_allows_capability(job_capability: str, requested_capability: str) -> bool:
+    return requested_capability == job_capability or requested_capability in (
+        JOB_CAPABILITY_DEPENDENCIES.get(job_capability, frozenset())
+    )
+
+
+def _policy_error(decision: PolicyDecision) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={"code": decision.code, "message": "control-plane policy denied"},
+    )
+
+
+def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
+    """Create an isolated control-plane application.
+
+    Supplying settings makes tests and embedded deployments deterministic. The
+    no-argument factory reads process environment configuration.
+    """
+
+    settings = settings or ControlPlaneSettings.from_env()
+    database = Database(settings.database_path)
+    database.initialize()
+    repository = ControlPlaneRepository(database)
+    demo_seed: DemoSeed | None = (
+        repository.seed_demo() if settings.seed_demo_data else None
+    )
+    lease_signer = LeaseSigner(settings.lease_signing_key)
+    policy = PolicyEngine(
+        repository,
+        lease_signer,
+        lease_ttl_seconds=settings.lease_ttl_seconds,
+    )
+    model_gateway = ModelGateway(settings)
+    expected_admin_hash = hash_secret(settings.admin_token)
+
+    app = FastAPI(
+        title="Altas Control Plane",
+        version="0.1.0",
+        description=(
+            "Local-first control plane for licensed, policy-bound Altas managed workers."
+        ),
+    )
+    app.state.settings = settings
+    app.state.database = database
+    app.state.repository = repository
+    app.state.lease_signer = lease_signer
+    app.state.policy = policy
+    app.state.demo_seed = demo_seed
+    static_directory = Path(__file__).with_name("static")
+
+    @app.middleware("http")
+    async def add_security_headers(request: Request, call_next):
+        client_host = request.client.host if request.client else ""
+        loopback_hosts = {
+            "127.0.0.1",
+            "::1",
+            "localhost",
+            "testclient",
+        }
+        is_loopback = client_host in loopback_hosts
+        path = request.url.path
+        is_admin_surface = (
+            path == "/"
+            or path == "/static"
+            or path.startswith("/static/")
+            or path == "/api/v1/admin"
+            or path.startswith("/api/v1/admin/")
+        )
+        if settings.seed_demo_data and not is_loopback:
+            response = JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": {"code": "demo_loopback_only"}},
+            )
+        elif is_admin_surface and not is_loopback:
+            response = JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": {"code": "admin_loopback_only"}},
+            )
+        else:
+            response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault(
+            "Permissions-Policy",
+            "camera=(), microphone=(), geolocation=()",
+        )
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            (
+                "default-src 'self'; "
+                "base-uri 'none'; "
+                "connect-src 'self'; "
+                "font-src 'self'; "
+                "form-action 'self'; "
+                "frame-ancestors 'none'; "
+                "img-src 'self' data:; "
+                "object-src 'none'; "
+                "script-src 'self'; "
+                "style-src 'self' 'unsafe-inline'"
+            ),
+        )
+        if request.url.path.startswith(("/api/", "/v1/")):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+    device_bearer = HTTPBearer(auto_error=False, scheme_name="AltasDeviceBearer")
+    admin_bearer = HTTPBearer(auto_error=False, scheme_name="AltasAdminBearer")
+
+    def require_device(
+        credentials: HTTPAuthorizationCredentials | None = Depends(device_bearer),
+    ) -> dict[str, Any]:
+        if credentials is None or credentials.scheme.lower() != "bearer":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="device_bearer_required",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        device = repository.authenticate_device(credentials.credentials)
+        if device is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="device_authentication_failed",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return device
+
+    def require_admin(
+        credentials: HTTPAuthorizationCredentials | None = Depends(admin_bearer),
+    ) -> None:
+        if credentials is None or credentials.scheme.lower() != "bearer":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="admin_bearer_required",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        supplied_hash = hash_secret(credentials.credentials)
+        if not hmac.compare_digest(expected_admin_hash, supplied_hash):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="admin_authentication_failed",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+    def authorize(
+        *,
+        device: dict[str, Any],
+        store_id: str,
+        agent_id: str,
+        capability: str,
+        lease_token: str,
+        audit_action: str,
+        job_id: str | None = None,
+    ) -> PolicyDecision:
+        decision = policy.evaluate(
+            authenticated_device=device,
+            store_id=store_id,
+            agent_id=agent_id,
+            capability=capability,
+            lease_token=lease_token,
+            audit_action=audit_action,
+            job_id=job_id,
+        )
+        if not decision.allowed:
+            raise _policy_error(decision)
+        return decision
+
+    def audit_worker_denial(
+        *,
+        action: str,
+        device: dict[str, Any],
+        store_id: str | None,
+        agent_id: str | None,
+        reason: str,
+        resource_type: str | None = None,
+        resource_id: str | None = None,
+        job_id: str | None = None,
+    ) -> None:
+        repository.record_audit(
+            actor_type="worker",
+            action=action,
+            outcome="denied",
+            tenant_id=device.get("tenant_id"),
+            store_id=store_id,
+            agent_id=agent_id,
+            device_id=device.get("id"),
+            job_id=job_id,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            details={"reason": reason},
+        )
+
+    @app.get("/health", tags=["system"])
+    def health() -> dict[str, Any]:
+        healthy = database.healthy()
+        return {
+            "status": "ok" if healthy else "degraded",
+            "database": "connected" if healthy else "unavailable",
+            "model_mode": "mock" if settings.mock_model else "upstream",
+        }
+
+    @app.get("/", include_in_schema=False)
+    def control_center() -> FileResponse:
+        return FileResponse(
+            static_directory / "index.html",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    worker = APIRouter(prefix="/api/v1/worker", tags=["worker"])
+
+    @worker.post("/heartbeat")
+    def heartbeat(
+        request: HeartbeatRequest,
+        device: dict[str, Any] = Depends(require_device),
+    ) -> dict[str, Any]:
+        # Tenant identity always originates from bearer authentication. The
+        # duplicated body field protects callers from accidentally crossing
+        # contexts and is never trusted as authority.
+        if request.tenant_id != device["tenant_id"]:
+            repository.record_audit(
+                actor_type="worker",
+                action="lease.issue",
+                outcome="denied",
+                tenant_id=device["tenant_id"],
+                store_id=request.store_id,
+                agent_id=request.agent_id,
+                device_id=device["id"],
+                resource_type="lease",
+                details={"reason": "tenant_context_mismatch"},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "tenant_context_mismatch"},
+            )
+        try:
+            lease_token, claims = policy.issue_lease(
+                authenticated_device=device,
+                store_id=request.store_id,
+                agent_id=request.agent_id,
+            )
+        except PolicyDenied as exc:
+            raise _policy_error(exc.decision) from exc
+        updated_device = repository.update_heartbeat(
+            device["id"],
+            worker_version=request.worker_version,
+            health_status=request.health_status,
+            metadata=request.metadata,
+        )
+        return {
+            "device": updated_device,
+            "lease": {
+                "token": lease_token,
+                "issued_at": claims.issued_at,
+                "expires_at": claims.expires_at,
+                "expires_in": claims.expires_at - claims.issued_at,
+                "capabilities": list(claims.capabilities),
+            },
+        }
+
+    @worker.post("/policy/evaluate")
+    def evaluate_policy(
+        request: PolicyEvaluationRequest,
+        device: dict[str, Any] = Depends(require_device),
+        lease_token: str = Header(..., alias="X-Altas-Lease"),
+        job_id: str = Header(..., alias="X-Altas-Job-ID"),
+        claim_token: str = Header(
+            ..., min_length=32, max_length=256, alias="X-Altas-Claim-Token"
+        ),
+    ) -> dict[str, Any]:
+        """Managed-runtime policy decision point.
+
+        Tenant identity is intentionally absent from the request model and is
+        derived exclusively from the authenticated device.
+        """
+
+        job = repository.get_job(job_id)
+        if (
+            not job
+            or job["status"] != "running"
+            or job["tenant_id"] != device["tenant_id"]
+            or job["store_id"] != request.store_id
+            or job["agent_id"] != request.agent_id
+            or job["claimed_by_device_id"] != device["id"]
+        ):
+            audit_worker_denial(
+                action="policy.evaluate",
+                device=device,
+                store_id=request.store_id,
+                agent_id=request.agent_id,
+                reason="job_context_mismatch",
+                resource_type="job",
+                resource_id=job_id,
+                job_id=job_id,
+            )
+            return {
+                "allowed": False,
+                "code": "job_context_mismatch",
+                "tenant_id": device["tenant_id"],
+                "store_id": request.store_id,
+                "agent_id": request.agent_id,
+                "capability": request.capability,
+            }
+        if not repository.validate_job_claim(
+            job_id,
+            device_id=device["id"],
+            claim_token=claim_token,
+        ):
+            audit_worker_denial(
+                action="policy.evaluate",
+                device=device,
+                store_id=request.store_id,
+                agent_id=request.agent_id,
+                reason="job_claim_invalid",
+                resource_type="job",
+                resource_id=job_id,
+                job_id=job_id,
+            )
+            return {
+                "allowed": False,
+                "code": "job_claim_invalid",
+                "tenant_id": device["tenant_id"],
+                "store_id": request.store_id,
+                "agent_id": request.agent_id,
+                "capability": request.capability,
+            }
+        if not _job_allows_capability(job["capability"], request.capability):
+            audit_worker_denial(
+                action="policy.evaluate",
+                device=device,
+                store_id=request.store_id,
+                agent_id=request.agent_id,
+                reason="job_capability_mismatch",
+                resource_type="capability",
+                resource_id=request.capability,
+                job_id=job_id,
+            )
+            return {
+                "allowed": False,
+                "code": "job_capability_mismatch",
+                "tenant_id": device["tenant_id"],
+                "store_id": request.store_id,
+                "agent_id": request.agent_id,
+                "capability": request.capability,
+            }
+        decision = policy.evaluate(
+            authenticated_device=device,
+            store_id=request.store_id,
+            agent_id=request.agent_id,
+            capability=request.capability,
+            lease_token=lease_token,
+            audit_action="policy.evaluate",
+            job_id=job_id,
+        )
+        if not decision.allowed and request.capability == job["capability"]:
+            repository.release_job(
+                job_id,
+                device_id=device["id"],
+                claim_token=claim_token,
+            )
+        return {
+            "allowed": decision.allowed,
+            "code": decision.code,
+            "tenant_id": device["tenant_id"],
+            "store_id": request.store_id,
+            "agent_id": request.agent_id,
+            "capability": request.capability,
+        }
+
+    @worker.get("/jobs/next")
+    def next_job(
+        device: dict[str, Any] = Depends(require_device),
+        tenant_id: str = Header(..., alias="X-Altas-Tenant-ID"),
+        store_id: str = Header(..., alias="X-Altas-Store-ID"),
+        agent_id: str = Header(..., alias="X-Altas-Agent-ID"),
+        lease_token: str = Header(..., alias="X-Altas-Lease"),
+    ) -> dict[str, Any]:
+        if tenant_id != device["tenant_id"]:
+            audit_worker_denial(
+                action="jobs.poll",
+                device=device,
+                store_id=store_id,
+                agent_id=agent_id,
+                reason="tenant_context_mismatch",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "tenant_context_mismatch"},
+            )
+        poll_decision = authorize(
+            device=device,
+            store_id=store_id,
+            agent_id=agent_id,
+            capability="jobs.poll",
+            lease_token=lease_token,
+            audit_action="jobs.poll",
+        )
+        claims = poll_decision.lease_claims
+        allowed_capabilities = claims.capabilities if claims else ()
+        job = repository.claim_next_job(
+            tenant_id=device["tenant_id"],
+            store_id=store_id,
+            agent_id=agent_id,
+            device_id=device["id"],
+            allowed_capabilities=allowed_capabilities,
+            visibility_timeout_seconds=settings.job_visibility_timeout_seconds,
+        )
+        if job is None:
+            return {"job": None}
+        decision = policy.evaluate(
+            authenticated_device=device,
+            store_id=store_id,
+            agent_id=agent_id,
+            capability=job["capability"],
+            lease_token=lease_token,
+            audit_action="jobs.dispatch",
+            job_id=job["id"],
+        )
+        if not decision.allowed:
+            repository.release_job(
+                job["id"],
+                device_id=device["id"],
+                claim_token=job["claim_token"],
+            )
+            raise _policy_error(decision)
+        repository.record_audit(
+            actor_type="worker",
+            action="job.claim",
+            outcome="succeeded",
+            tenant_id=device["tenant_id"],
+            store_id=store_id,
+            agent_id=agent_id,
+            device_id=device["id"],
+            job_id=job["id"],
+            resource_type="job",
+            resource_id=job["id"],
+            details={"capability": job["capability"]},
+        )
+        return {"job": job}
+
+    @worker.post("/jobs/{job_id}/complete")
+    def complete_job(
+        job_id: str,
+        request: JobCompletionRequest,
+        device: dict[str, Any] = Depends(require_device),
+        lease_token: str = Header(..., alias="X-Altas-Lease"),
+    ) -> dict[str, Any]:
+        job = repository.get_job(job_id)
+        expected_context = (
+            request.tenant_id == device["tenant_id"]
+            and job is not None
+            and job["tenant_id"] == device["tenant_id"]
+            and job["store_id"] == request.store_id
+            and job["agent_id"] == request.agent_id
+            and job["claimed_by_device_id"] == device["id"]
+        )
+        if not expected_context:
+            audit_worker_denial(
+                action="job.complete",
+                device=device,
+                store_id=request.store_id,
+                agent_id=request.agent_id,
+                reason="job_context_mismatch",
+                resource_type="job",
+                resource_id=job_id,
+                job_id=job_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="job_not_found"
+            )
+        try:
+            authorize(
+                device=device,
+                store_id=request.store_id,
+                agent_id=request.agent_id,
+                capability="jobs.complete",
+                lease_token=lease_token,
+                audit_action="jobs.complete",
+                job_id=job_id,
+            )
+            authorize(
+                device=device,
+                store_id=request.store_id,
+                agent_id=request.agent_id,
+                capability=job["capability"],
+                lease_token=lease_token,
+                audit_action="jobs.complete_capability",
+                job_id=job_id,
+            )
+        except HTTPException:
+            # A claim must never remain running after its holder receives a
+            # policy denial. The token check prevents a different caller from
+            # releasing another attempt.
+            repository.release_job(
+                job_id,
+                device_id=device["id"],
+                claim_token=request.claim_token,
+            )
+            raise
+        try:
+            completed = repository.complete_job(
+                job_id,
+                device_id=device["id"],
+                claim_token=request.claim_token,
+                status=request.status,
+                result=request.result,
+                error=request.error,
+            )
+        except ValueError as exc:
+            audit_worker_denial(
+                action="job.complete",
+                device=device,
+                store_id=request.store_id,
+                agent_id=request.agent_id,
+                reason=str(exc),
+                resource_type="job",
+                resource_id=job_id,
+                job_id=job_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+            ) from exc
+        repository.record_audit(
+            actor_type="worker",
+            action="job.complete",
+            outcome=request.status,
+            tenant_id=device["tenant_id"],
+            store_id=request.store_id,
+            agent_id=request.agent_id,
+            device_id=device["id"],
+            job_id=job_id,
+            resource_type="job",
+            resource_id=job_id,
+            details={"capability": job["capability"]},
+        )
+        return {"job": completed}
+
+    app.include_router(worker)
+
+    admin = APIRouter(
+        prefix="/api/v1/admin",
+        tags=["admin"],
+        dependencies=[Depends(require_admin)],
+    )
+
+    @admin.get("/overview")
+    def admin_overview() -> dict[str, Any]:
+        return repository.overview()
+
+    @admin.post("/jobs", status_code=status.HTTP_201_CREATED)
+    def queue_job(request: QueueJobRequest) -> dict[str, Any]:
+        tenant = repository.get_tenant(request.tenant_id)
+        store = repository.get_store(request.store_id)
+        agent = repository.get_agent(request.agent_id)
+        subscription = repository.get_active_subscription(request.tenant_id)
+        entitlement = repository.get_entitlement(
+            request.tenant_id, request.store_id, request.capability
+        )
+        device_id = request.device_id or (agent or {}).get("device_id")
+        device = repository.get_device(device_id) if device_id else None
+        invalid_code: str | None = None
+        if not tenant or tenant["status"] != "active":
+            invalid_code = "tenant_inactive"
+        elif (
+            not store
+            or store["tenant_id"] != request.tenant_id
+            or store["status"] != "active"
+        ):
+            invalid_code = "store_inactive"
+        elif (
+            not agent
+            or agent["tenant_id"] != request.tenant_id
+            or agent["store_id"] != request.store_id
+            or agent["status"] != "active"
+        ):
+            invalid_code = "agent_inactive"
+        elif not subscription or not not_expired(
+            subscription.get("current_period_end")
+        ):
+            invalid_code = "subscription_inactive"
+        elif (
+            not entitlement
+            or entitlement["status"] != "active"
+            or not not_expired(entitlement.get("expires_at"))
+        ):
+            invalid_code = "entitlement_inactive"
+        elif agent.get("device_id") and agent["device_id"] != device_id:
+            invalid_code = "agent_device_mismatch"
+        elif device_id and (
+            not device
+            or device["tenant_id"] != request.tenant_id
+            or device["store_id"] != request.store_id
+            or device["status"] != "active"
+        ):
+            invalid_code = "device_inactive"
+        if invalid_code:
+            repository.record_audit(
+                actor_type="admin",
+                action="job.queue",
+                outcome="denied",
+                tenant_id=request.tenant_id,
+                store_id=request.store_id,
+                agent_id=request.agent_id,
+                device_id=device_id,
+                resource_type="capability",
+                resource_id=request.capability,
+                details={"reason": invalid_code},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": invalid_code},
+            )
+        try:
+            job, created = repository.queue_job(
+                tenant_id=request.tenant_id,
+                store_id=request.store_id,
+                agent_id=request.agent_id,
+                device_id=device_id,
+                capability=request.capability,
+                payload=request.payload,
+                requested_by="local-admin",
+                idempotency_key=request.idempotency_key,
+            )
+        except IdempotencyConflict as exc:
+            repository.record_audit(
+                actor_type="admin",
+                action="job.queue",
+                outcome="denied",
+                tenant_id=request.tenant_id,
+                store_id=request.store_id,
+                agent_id=request.agent_id,
+                device_id=device_id,
+                resource_type="idempotency_key",
+                resource_id=request.idempotency_key,
+                details={"reason": str(exc)},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": str(exc)},
+            ) from exc
+        repository.record_audit(
+            actor_type="admin",
+            action="job.queue",
+            outcome="created" if created else "deduplicated",
+            tenant_id=request.tenant_id,
+            store_id=request.store_id,
+            agent_id=request.agent_id,
+            device_id=device_id,
+            job_id=job["id"],
+            resource_type="job",
+            resource_id=job["id"],
+            details={"capability": request.capability},
+        )
+        return {"job": job, "created": created}
+
+    @admin.post("/jobs/{job_id}/requeue")
+    def requeue_job(job_id: str, request: RequeueJobRequest) -> dict[str, Any]:
+        existing = repository.get_job(job_id)
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="job_not_found"
+            )
+        try:
+            job = repository.requeue_job(job_id)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": str(exc)},
+            ) from exc
+        repository.record_audit(
+            actor_type="admin",
+            action="job.requeue",
+            outcome="succeeded",
+            tenant_id=job["tenant_id"],
+            store_id=job["store_id"],
+            agent_id=job["agent_id"],
+            device_id=job.get("device_id"),
+            job_id=job_id,
+            resource_type="job",
+            resource_id=job_id,
+            details={"reason": request.reason, "prior_status": existing["status"]},
+        )
+        return {"job": job}
+
+    @admin.post("/{resource}/{resource_id}/toggle")
+    def toggle_resource(
+        resource: ToggleResource,
+        resource_id: str,
+        request: ToggleRequest,
+    ) -> dict[str, Any]:
+        try:
+            updated = repository.toggle(resource, resource_id, request.enabled)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="resource_not_found",
+            ) from exc
+        repository.record_audit(
+            actor_type="admin",
+            action=f"{resource}.toggle",
+            outcome="succeeded",
+            tenant_id=updated.get("tenant_id"),
+            store_id=updated.get("store_id"),
+            device_id=updated.get("id") if resource == "devices" else None,
+            resource_type=resource,
+            resource_id=resource_id,
+            details={
+                "status": updated["status"],
+                "reason": request.reason,
+                "terminated_job_count": updated.get("terminated_job_count", 0),
+            },
+        )
+        return {"resource": updated}
+
+    @admin.get("/{resource}")
+    def list_admin_records(
+        resource: AdminResource,
+        tenant_id: str | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict[str, Any]:
+        items = repository.list_records(resource, tenant_id=tenant_id, limit=limit)
+        return {"items": items, "count": len(items)}
+
+    app.include_router(admin)
+
+    model_api = APIRouter(tags=["model-gateway"])
+
+    @model_api.get("/v1/models")
+    def list_models(
+        device: dict[str, Any] = Depends(require_device),
+        tenant_id: str = Header(..., alias="X-Altas-Tenant-ID"),
+        store_id: str = Header(..., alias="X-Altas-Store-ID"),
+        agent_id: str = Header(..., alias="X-Altas-Agent-ID"),
+        lease_token: str = Header(..., alias="X-Altas-Lease"),
+    ) -> dict[str, Any]:
+        if tenant_id != device["tenant_id"]:
+            audit_worker_denial(
+                action="model.list",
+                device=device,
+                store_id=store_id,
+                agent_id=agent_id,
+                reason="tenant_context_mismatch",
+                resource_type="model",
+                resource_id=settings.model_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "tenant_context_mismatch"},
+            )
+        authorize(
+            device=device,
+            store_id=store_id,
+            agent_id=agent_id,
+            capability="model.chat",
+            lease_token=lease_token,
+            audit_action="model.list",
+        )
+        return {
+            "object": "list",
+            "data": [
+                {
+                    "id": settings.model_id,
+                    "object": "model",
+                    "created": 1_767_225_600,
+                    "owned_by": "altas",
+                }
+            ],
+        }
+
+    @model_api.post("/v1/chat/completions")
+    async def chat_completions(
+        request: ChatCompletionRequest,
+        device: dict[str, Any] = Depends(require_device),
+        tenant_id: str = Header(..., alias="X-Altas-Tenant-ID"),
+        store_id: str = Header(..., alias="X-Altas-Store-ID"),
+        agent_id: str = Header(..., alias="X-Altas-Agent-ID"),
+        lease_token: str = Header(..., alias="X-Altas-Lease"),
+        job_id: str = Header(..., alias="X-Altas-Job-ID"),
+        claim_token: str = Header(
+            ..., min_length=32, max_length=256, alias="X-Altas-Claim-Token"
+        ),
+    ) -> dict[str, Any]:
+        if tenant_id != device["tenant_id"]:
+            audit_worker_denial(
+                action="model.chat",
+                device=device,
+                store_id=store_id,
+                agent_id=agent_id,
+                reason="tenant_context_mismatch",
+                resource_type="model",
+                resource_id=request.model,
+                job_id=job_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "tenant_context_mismatch"},
+            )
+        job = repository.get_job(job_id)
+        if (
+            not job
+            or job["status"] != "running"
+            or job["tenant_id"] != device["tenant_id"]
+            or job["store_id"] != store_id
+            or job["agent_id"] != agent_id
+            or job["claimed_by_device_id"] != device["id"]
+        ):
+            audit_worker_denial(
+                action="model.chat",
+                device=device,
+                store_id=store_id,
+                agent_id=agent_id,
+                reason="job_context_mismatch",
+                resource_type="job",
+                resource_id=job_id,
+                job_id=job_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "job_context_mismatch"},
+            )
+        if not repository.validate_job_claim(
+            job_id,
+            device_id=device["id"],
+            claim_token=claim_token,
+        ):
+            audit_worker_denial(
+                action="model.chat",
+                device=device,
+                store_id=store_id,
+                agent_id=agent_id,
+                reason="job_claim_invalid",
+                resource_type="job",
+                resource_id=job_id,
+                job_id=job_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "job_claim_invalid"},
+            )
+        if not _job_allows_capability(job["capability"], "model.chat"):
+            audit_worker_denial(
+                action="model.chat",
+                device=device,
+                store_id=store_id,
+                agent_id=agent_id,
+                reason="job_capability_mismatch",
+                resource_type="job",
+                resource_id=job_id,
+                job_id=job_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "job_capability_mismatch"},
+            )
+        authorize(
+            device=device,
+            store_id=store_id,
+            agent_id=agent_id,
+            capability="model.chat",
+            lease_token=lease_token,
+            audit_action="model.chat",
+            job_id=job_id,
+        )
+        if request.model != settings.model_id:
+            audit_worker_denial(
+                action="model.request",
+                device=device,
+                store_id=store_id,
+                agent_id=agent_id,
+                reason="model_not_allowed",
+                resource_type="model",
+                resource_id=request.model,
+                job_id=job_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "model_not_allowed"},
+            )
+        requested_token_values = [
+            value
+            for value in (request.max_tokens, request.max_completion_tokens)
+            if value is not None
+        ]
+        requested_tokens = (
+            max(requested_token_values)
+            if requested_token_values
+            else settings.default_model_max_tokens
+        )
+        effective_request = request
+        if not requested_token_values:
+            effective_request = request.model_copy(
+                update={"max_tokens": requested_tokens}
+            )
+        try:
+            reservation = repository.reserve_model_usage(
+                tenant_id=device["tenant_id"],
+                store_id=store_id,
+                agent_id=agent_id,
+                device_id=device["id"],
+                job_id=job_id,
+                claim_token=claim_token,
+                model=request.model,
+                requested_tokens=requested_tokens,
+                request_limit=settings.max_model_requests_per_job,
+                requested_token_limit=settings.max_requested_tokens_per_job,
+            )
+        except (InvalidJobClaim, ModelUsageLimitExceeded) as exc:
+            audit_worker_denial(
+                action="model.request",
+                device=device,
+                store_id=store_id,
+                agent_id=agent_id,
+                reason=str(exc),
+                resource_type="job",
+                resource_id=job_id,
+                job_id=job_id,
+            )
+            error_status = (
+                status.HTTP_403_FORBIDDEN
+                if isinstance(exc, InvalidJobClaim)
+                else status.HTTP_429_TOO_MANY_REQUESTS
+            )
+            raise HTTPException(
+                status_code=error_status, detail={"code": str(exc)}
+            ) from exc
+        try:
+            result = await model_gateway.complete(effective_request)
+        except ModelGatewayError as exc:
+            repository.fail_model_usage(reservation["id"])
+            repository.record_audit(
+                actor_type="model-gateway",
+                action="model.response",
+                outcome="failed",
+                tenant_id=device["tenant_id"],
+                store_id=store_id,
+                agent_id=agent_id,
+                device_id=device["id"],
+                job_id=job_id,
+                resource_type="model",
+                resource_id=request.model,
+                details={"reason": str(exc)},
+            )
+            error_status = (
+                status.HTTP_400_BAD_REQUEST
+                if str(exc) == "streaming_not_supported"
+                else status.HTTP_502_BAD_GATEWAY
+            )
+            raise HTTPException(
+                status_code=error_status, detail={"code": str(exc)}
+            ) from exc
+        repository.finalize_model_usage(
+            reservation["id"],
+            request_id=result.request_id,
+            provider=result.provider,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+        )
+        repository.record_audit(
+            actor_type="model-gateway",
+            action="model.response",
+            outcome="succeeded",
+            tenant_id=device["tenant_id"],
+            store_id=store_id,
+            agent_id=agent_id,
+            device_id=device["id"],
+            job_id=job_id,
+            resource_type="model",
+            resource_id=request.model,
+            details={
+                "provider": result.provider,
+                "request_id": result.request_id,
+                "input_tokens": result.input_tokens,
+                "output_tokens": result.output_tokens,
+            },
+        )
+        return result.response
+
+    app.include_router(model_api)
+    app.mount(
+        "/static",
+        StaticFiles(directory=static_directory),
+        name="altas-control-center-static",
+    )
+    return app
