@@ -67,6 +67,21 @@ HERMES_HOME=/tmp/throwaway npm run dev
 npm run dev:fake-boot   # exercise the startup overlay with deterministic delays
 ```
 
+To preview the true first-run setup on macOS without touching existing Atlas
+settings, isolate the agent home, Electron browser storage, and any credentials
+auto-discovered from the normal macOS home directory:
+
+```bash
+preview_root=$(mktemp -d /tmp/atlas-first-run.XXXXXX)
+mkdir -p "$preview_root/macos-home" "$preview_root/atlas-home" "$preview_root/user-data"
+HOME="$preview_root/macos-home" \
+HERMES_HOME="$preview_root/atlas-home" \
+HERMES_DESKTOP_USER_DATA_DIR="$preview_root/user-data" \
+HERMES_DESKTOP_HERMES_ROOT=/path/to/clone \
+GIT_TERMINAL_PROMPT=0 \
+npm run dev
+```
+
 ### Building installers
 
 ```bash

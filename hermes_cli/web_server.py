@@ -272,7 +272,8 @@ app.include_router(_memory_oauth_router)
 # injected into the SPA HTML so only the legitimate web UI can use it.
 # ---------------------------------------------------------------------------
 _SESSION_TOKEN = os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN") or secrets.token_urlsafe(32)
-_SESSION_HEADER_NAME = "X-Hermes-Session-Token"
+_SESSION_HEADER_NAME = "X-Atlas-Session-Token"
+_LEGACY_SESSION_HEADER_NAME = "X-Hermes-Session-Token"
 
 # In-browser Chat tab (/chat, /api/pty, /api/ws, …).  Always enabled: the
 # desktop app and the dashboard's own Chat tab both drive the agent over the
@@ -324,12 +325,16 @@ def _has_valid_session_token(request: Request) -> bool:
     accept the legacy Bearer path for backward compatibility with older
     dashboard bundles.
     """
-    session_header = request.headers.get(_SESSION_HEADER_NAME, "")
-    if session_header and hmac.compare_digest(
-        session_header.encode(),
-        _SESSION_TOKEN.encode(),
-    ):
-        return True
+    # Atlas clients use the rebranded header. Keep accepting the historical
+    # Hermes header so the embedded upstream dashboard and existing installs
+    # continue to authenticate during the transition.
+    for header_name in (_SESSION_HEADER_NAME, _LEGACY_SESSION_HEADER_NAME):
+        session_header = request.headers.get(header_name, "")
+        if session_header and hmac.compare_digest(
+            session_header.encode(),
+            _SESSION_TOKEN.encode(),
+        ):
+            return True
 
     auth = request.headers.get("authorization", "")
     expected = f"Bearer {_SESSION_TOKEN}"
@@ -356,7 +361,8 @@ def _require_token(request: Request) -> None:
 
     * **Loopback / ``--insecure`` mode** (``auth_required`` False): the
       ephemeral ``_SESSION_TOKEN`` is injected into the SPA HTML and echoed
-      back via ``X-Hermes-Session-Token`` (or the legacy ``Bearer`` header).
+      back via ``X-Atlas-Session-Token`` (or the compatible Hermes/Bearer
+      headers).
       Validate it here.
     * **Gated / OAuth mode** (``auth_required`` True): ``_SESSION_TOKEN`` is
       NOT injected (the SPA authenticates with a session cookie), so there is
