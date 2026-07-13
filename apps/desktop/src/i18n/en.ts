@@ -1883,8 +1883,9 @@ export const en: Translations = {
   },
 
   onboarding: {
-    headerTitle: "Let's get you setup with Atlas Agent",
-    headerDesc: 'Connect a model provider to start chatting. Most options take one click.',
+    headerTitle: 'Connect Atlas intelligence',
+    headerDesc:
+      'Choose the model connection for this development workstation. Atlas-managed routing replaces this step in customer deployments.',
     preparingInstall: 'Atlas is finishing install. This usually takes under a minute on first run.',
     starting: 'Starting Atlas…',
     lookingUpProviders: 'Looking up providers...',

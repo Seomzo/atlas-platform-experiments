@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { $desktopOnboarding, type DesktopOnboardingState, type OnboardingContext } from '@/store/onboarding'
 import type { OAuthProvider } from '@/types/hermes'
 
-import { Picker } from '.'
+import { Picker, SetupBlueprint } from '.'
 
 function provider(id: string, name = id): OAuthProvider {
   return {
@@ -89,7 +89,7 @@ describe('onboarding Picker', () => {
     fireEvent.click(skip)
 
     expect($desktopOnboarding.get().firstRunSkipped).toBe(true)
-    expect(window.localStorage.getItem('hermes-onboarding-skipped-v1')).toBe('1')
+    expect(window.localStorage.getItem('atlas-onboarding-skipped-v1')).toBe('1')
   })
 
   it('hides "choose later" in manual (add-provider) mode', () => {
@@ -98,5 +98,21 @@ describe('onboarding Picker', () => {
     render(<Picker ctx={ctx} />)
 
     expect(screen.queryByRole('button', { name: "I'll choose a provider later" })).toBeNull()
+  })
+})
+
+describe('Atlas setup blueprint', () => {
+  it('explains managed defaults before continuing to provider setup', () => {
+    let continued = false
+
+    render(<SetupBlueprint onContinue={() => (continued = true)} />)
+
+    expect(screen.getByText('Configure the workstation once.')).toBeTruthy()
+    expect(screen.getByText('Dedicated persistent profile')).toBeTruthy()
+    expect(screen.getByText('Atlas Core + Jay Premium')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Connect intelligence' }))
+
+    expect(continued).toBe(true)
   })
 })

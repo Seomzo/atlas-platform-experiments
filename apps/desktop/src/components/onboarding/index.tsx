@@ -29,8 +29,10 @@ import type { ModelOptionProvider, OAuthProvider } from '@/types/hermes'
 
 import { DocsLink, FlowPanel, Status } from './flow'
 import { FeaturedProviderRow, KeyProviderRow, ProviderRow, sortProviders } from './providers'
+import { SetupBlueprint } from './setup-blueprint'
 
 export { FeaturedProviderRow, KeyProviderRow, ProviderRow, providerTitle, sortProviders } from './providers'
+export { SetupBlueprint } from './setup-blueprint'
 
 interface DesktopOnboardingOverlayProps {
   enabled: boolean
@@ -174,6 +176,7 @@ export function DesktopOnboardingOverlay({ enabled, onCompleted, requestGateway 
   // behind), THEN finalize so the unmount lands after the fade — mirrors the
   // connecting overlay's exit choreography instead of cutting instantly.
   const [leaving, setLeaving] = useState(false)
+  const [blueprintOpen, setBlueprintOpen] = useState(true)
 
   const finalizeOnboarding = () => {
     if (leaving) {
@@ -263,6 +266,7 @@ export function DesktopOnboardingOverlay({ enabled, onCompleted, requestGateway 
   // check (configured === false) before showing the picker.
   const ready = onboarding.manual || (enabled && onboarding.configured === false)
   const showPicker = flow.status === 'idle' || flow.status === 'success'
+  const showBlueprint = ready && showPicker && blueprintOpen && !onboarding.manual && !onboarding.localEndpoint
   // The final "you're in" screen drops the card chrome and floats centered on
   // the surface — same bare, cinematic treatment as the connecting overlay.
   const bare = ready && !showPicker && flow.status === 'confirming_model'
@@ -279,7 +283,8 @@ export function DesktopOnboardingOverlay({ enabled, onCompleted, requestGateway 
     >
       <div
         className={cn(
-          'relative w-full max-w-[45rem] transition-all duration-500 ease-out',
+          'relative w-full transition-all duration-500 ease-out',
+          showBlueprint ? 'max-w-[59rem]' : 'max-w-[45rem]',
           bare
             ? ''
             : 'overflow-hidden rounded-xl border border-(--stroke-nous) bg-(--ui-chat-bubble-background) shadow-nous',
@@ -290,7 +295,7 @@ export function DesktopOnboardingOverlay({ enabled, onCompleted, requestGateway 
             : 'translate-y-0 scale-100 opacity-100 blur-0'
         )}
       >
-        {showPicker || !ready ? <Header /> : null}
+        {!showBlueprint && (showPicker || !ready) ? <Header /> : null}
         {onboarding.manual ? (
           <Button
             aria-label={t.common.close}
@@ -302,18 +307,22 @@ export function DesktopOnboardingOverlay({ enabled, onCompleted, requestGateway 
             <Codicon name="close" size="1rem" />
           </Button>
         ) : null}
-        <div className="grid gap-3 p-5">
-          {reason ? <ReasonNotice reason={reason} /> : null}
-          {ready ? (
-            showPicker ? (
-              <Picker ctx={ctx} />
+        {showBlueprint ? (
+          <SetupBlueprint onContinue={() => setBlueprintOpen(false)} />
+        ) : (
+          <div className="grid gap-3 p-5">
+            {reason ? <ReasonNotice reason={reason} /> : null}
+            {ready ? (
+              showPicker ? (
+                <Picker ctx={ctx} />
+              ) : (
+                <FlowPanel ctx={ctx} flow={flow} leaving={leaving} onBegin={finalizeOnboarding} />
+              )
             ) : (
-              <FlowPanel ctx={ctx} flow={flow} leaving={leaving} onBegin={finalizeOnboarding} />
-            )
-          ) : (
-            <Preparing boot={boot} />
-          )}
-        </div>
+              <Preparing boot={boot} />
+            )}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -371,11 +380,12 @@ function Header() {
 }
 
 export const FEATURED_ID = 'nous'
-const SHOW_ALL_KEY = 'hermes-onboarding-show-all-v1'
+const SHOW_ALL_KEY = 'atlas-onboarding-show-all-v1'
+const LEGACY_SHOW_ALL_KEY = 'hermes-onboarding-show-all-v1'
 
 const readShowAll = () => {
   try {
-    return window.localStorage.getItem(SHOW_ALL_KEY) === '1'
+    return window.localStorage.getItem(SHOW_ALL_KEY) === '1' || window.localStorage.getItem(LEGACY_SHOW_ALL_KEY) === '1'
   } catch {
     return false
   }
@@ -384,6 +394,7 @@ const readShowAll = () => {
 const persistShowAll = (value: boolean) => {
   try {
     window.localStorage.setItem(SHOW_ALL_KEY, value ? '1' : '0')
+    window.localStorage.removeItem(LEGACY_SHOW_ALL_KEY)
   } catch {
     // localStorage unavailable — degrade silently.
   }

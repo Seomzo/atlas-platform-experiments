@@ -79,8 +79,10 @@ export interface OnboardingContext {
   requestGateway: <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>
 }
 
-const CONFIGURED_CACHE_KEY = 'hermes-desktop-onboarded-v1'
-const SKIP_CACHE_KEY = 'hermes-onboarding-skipped-v1'
+const CONFIGURED_CACHE_KEY = 'atlas-desktop-onboarded-v1'
+const SKIP_CACHE_KEY = 'atlas-onboarding-skipped-v1'
+const LEGACY_CONFIGURED_CACHE_KEY = 'hermes-desktop-onboarded-v1'
+const LEGACY_SKIP_CACHE_KEY = 'hermes-onboarding-skipped-v1'
 const POLL_MS = 2000
 const COPY_FLASH_MS = 1500
 export const DEFAULT_ONBOARDING_REASON = 'No inference provider is configured.'
@@ -92,7 +94,10 @@ function readCachedConfigured(): boolean | null {
   }
 
   try {
-    return window.localStorage.getItem(CONFIGURED_CACHE_KEY) === '1' ? true : null
+    return window.localStorage.getItem(CONFIGURED_CACHE_KEY) === '1' ||
+      window.localStorage.getItem(LEGACY_CONFIGURED_CACHE_KEY) === '1'
+      ? true
+      : null
   } catch {
     return null
   }
@@ -109,6 +114,7 @@ function writeCachedConfigured(value: boolean) {
     } else {
       window.localStorage.removeItem(CONFIGURED_CACHE_KEY)
     }
+    window.localStorage.removeItem(LEGACY_CONFIGURED_CACHE_KEY)
   } catch {
     // localStorage unavailable — degrade silently.
   }
@@ -120,7 +126,9 @@ function readCachedSkipped(): boolean {
   }
 
   try {
-    return window.localStorage.getItem(SKIP_CACHE_KEY) === '1'
+    return (
+      window.localStorage.getItem(SKIP_CACHE_KEY) === '1' || window.localStorage.getItem(LEGACY_SKIP_CACHE_KEY) === '1'
+    )
   } catch {
     return false
   }
@@ -137,6 +145,7 @@ function writeCachedSkipped(value: boolean) {
     } else {
       window.localStorage.removeItem(SKIP_CACHE_KEY)
     }
+    window.localStorage.removeItem(LEGACY_SKIP_CACHE_KEY)
   } catch {
     // localStorage unavailable — degrade silently.
   }
