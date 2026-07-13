@@ -6,16 +6,16 @@ import model_tools
 
 
 def test_managed_guard_blocks_before_upstream_tool_dispatch(monkeypatch) -> None:
-    monkeypatch.setenv("ALTAS_MANAGED_MODE", "1")
+    monkeypatch.setenv("ATLAS_MANAGED_MODE", "1")
     for name in (
-        "ALTAS_CONTROL_PLANE_URL",
-        "ALTAS_DEVICE_TOKEN",
-        "ALTAS_LEASE_TOKEN",
-        "ALTAS_TENANT_ID",
-        "ALTAS_STORE_ID",
-        "ALTAS_DEVICE_ID",
-        "ALTAS_AGENT_ID",
-        "ALTAS_JOB_ID",
+        "ATLAS_CONTROL_PLANE_URL",
+        "ATLAS_DEVICE_TOKEN",
+        "ATLAS_LEASE_TOKEN",
+        "ATLAS_TENANT_ID",
+        "ATLAS_STORE_ID",
+        "ATLAS_DEVICE_ID",
+        "ATLAS_AGENT_ID",
+        "ATLAS_JOB_ID",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -29,6 +29,6 @@ def test_managed_guard_blocks_before_upstream_tool_dispatch(monkeypatch) -> None
     )
 
     assert result == {
-        "error": "Altas could not verify permission for this action. No tool was run.",
+        "error": "Atlas could not verify permission for this action. No tool was run.",
         "reason_code": "POLICY_UNAVAILABLE",
     }

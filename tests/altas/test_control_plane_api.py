@@ -75,10 +75,10 @@ def _heartbeat(client: TestClient) -> str:
 def _worker_headers(lease: str) -> dict[str, str]:
     return {
         **_device_auth(),
-        "X-Altas-Lease": lease,
-        "X-Altas-Tenant-ID": DEMO_TENANT_ID,
-        "X-Altas-Store-ID": DEMO_STORE_ID,
-        "X-Altas-Agent-ID": DEMO_AGENT_ID,
+        "X-Atlas-Lease": lease,
+        "X-Atlas-Tenant-ID": DEMO_TENANT_ID,
+        "X-Atlas-Store-ID": DEMO_STORE_ID,
+        "X-Atlas-Agent-ID": DEMO_AGENT_ID,
     }
 
 
@@ -93,17 +93,17 @@ def _claim_job(client: TestClient, lease: str) -> dict[str, Any]:
 def _policy_headers(lease: str, job: dict[str, Any]) -> dict[str, str]:
     return {
         **_device_auth(),
-        "X-Altas-Lease": lease,
-        "X-Altas-Job-ID": str(job["id"]),
-        "X-Altas-Claim-Token": str(job["claim_token"]),
+        "X-Atlas-Lease": lease,
+        "X-Atlas-Job-ID": str(job["id"]),
+        "X-Atlas-Claim-Token": str(job["claim_token"]),
     }
 
 
 def _model_headers(lease: str, job: dict[str, Any]) -> dict[str, str]:
     return {
         **_worker_headers(lease),
-        "X-Altas-Job-ID": str(job["id"]),
-        "X-Altas-Claim-Token": str(job["claim_token"]),
+        "X-Atlas-Job-ID": str(job["id"]),
+        "X-Atlas-Claim-Token": str(job["claim_token"]),
     }
 
 
@@ -399,7 +399,7 @@ def test_device_has_one_claim_and_stale_claim_invalidates_old_token(
 
     stale_completion = client.post(
         f"/api/v1/worker/jobs/{first['id']}/complete",
-        headers={**_device_auth(), "X-Altas-Lease": lease},
+        headers={**_device_auth(), "X-Atlas-Lease": lease},
         json={
             "tenant_id": DEMO_TENANT_ID,
             "store_id": DEMO_STORE_ID,
@@ -490,7 +490,7 @@ def test_worker_job_lifecycle_and_admin_idempotent_queue(client: TestClient) -> 
 
     completed = client.post(
         f"/api/v1/worker/jobs/{seeded_job['id']}/complete",
-        headers={**_device_auth(), "X-Altas-Lease": lease},
+        headers={**_device_auth(), "X-Atlas-Lease": lease},
         json={
             "tenant_id": DEMO_TENANT_ID,
             "store_id": DEMO_STORE_ID,
@@ -531,8 +531,8 @@ def test_mock_chat_is_deterministic_and_records_usage(client: TestClient) -> Non
     lease = _heartbeat(client)
     headers = _worker_headers(lease)
     job = client.get("/api/v1/worker/jobs/next", headers=headers).json()["job"]
-    headers["X-Altas-Job-ID"] = job["id"]
-    headers["X-Altas-Claim-Token"] = job["claim_token"]
+    headers["X-Atlas-Job-ID"] = job["id"]
+    headers["X-Atlas-Claim-Token"] = job["claim_token"]
     payload = {
         "model": "altas-fixed-ops",
         "messages": [{"role": "user", "content": "Summarize today's ROs."}],

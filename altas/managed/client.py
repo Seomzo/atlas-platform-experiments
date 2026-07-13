@@ -1,4 +1,4 @@
-"""HTTP client for the Altas worker/control-plane contract."""
+"""HTTP client for the Atlas worker/control-plane contract."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ class AltasControlPlaneClient:
             base_url=base_url.rstrip("/"),
             timeout=timeout_seconds,
             transport=transport,
-            headers={"User-Agent": "altas-worker/0.1"},
+            headers={"User-Agent": "atlas-worker/0.1"},
         )
 
     def close(self) -> None:
@@ -69,9 +69,9 @@ class AltasControlPlaneClient:
     ) -> dict[str, str]:
         headers = {"Authorization": f"Bearer {self._device_token}"}
         if lease:
-            headers["X-Altas-Lease"] = lease
+            headers["X-Atlas-Lease"] = lease
         if claim_token:
-            headers["X-Altas-Claim-Token"] = claim_token
+            headers["X-Atlas-Claim-Token"] = claim_token
         if context:
             headers.update(context.request_headers())
         return headers
@@ -80,12 +80,12 @@ class AltasControlPlaneClient:
         try:
             response = self._client.request(method, path, **kwargs)
         except httpx.HTTPError as exc:
-            raise ControlPlaneUnavailable("Altas Control Plane is unavailable") from exc
+            raise ControlPlaneUnavailable("Atlas Control Plane is unavailable") from exc
         if response.status_code in {401, 403}:
-            raise DeviceAuthenticationError("Altas device authorization was rejected")
+            raise DeviceAuthenticationError("Atlas device authorization was rejected")
         if response.status_code >= 500:
             raise ControlPlaneUnavailable(
-                f"Altas Control Plane returned {response.status_code}"
+                f"Atlas Control Plane returned {response.status_code}"
             )
         return response
 
@@ -190,9 +190,9 @@ class AltasControlPlaneClient:
             "/api/v1/worker/jobs/next",
             headers={
                 **self._headers(lease=lease),
-                "X-Altas-Tenant-ID": tenant_id,
-                "X-Altas-Store-ID": store_id,
-                "X-Altas-Agent-ID": agent_id,
+                "X-Atlas-Tenant-ID": tenant_id,
+                "X-Atlas-Store-ID": store_id,
+                "X-Atlas-Agent-ID": agent_id,
             },
         )
         response.raise_for_status()

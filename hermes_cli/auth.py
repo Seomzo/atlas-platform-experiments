@@ -43,6 +43,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 
+from hermes_cli.brand import brand_text
 from hermes_cli.config import (
     get_hermes_home,
     get_config_path,
@@ -3222,7 +3223,7 @@ def _read_codex_tokens(*, _lock: bool = True) -> Dict[str, Any]:
     state = _load_provider_state(auth_store, "openai-codex")
     if not state:
         raise AuthError(
-            "No Codex credentials stored. Run `hermes auth` to authenticate.",
+            brand_text("No Codex credentials stored. Run `hermes auth` to authenticate."),
             provider="openai-codex",
             code="codex_auth_missing",
             relogin_required=True,
@@ -3687,7 +3688,7 @@ def resolve_codex_runtime_credentials(
         if read_error is not None:
             raise read_error
         raise AuthError(
-            "No Codex credentials stored. Run `hermes auth` to authenticate.",
+            brand_text("No Codex credentials stored. Run `hermes auth` to authenticate."),
             provider="openai-codex",
             code="codex_auth_missing",
             relogin_required=True,
@@ -3907,7 +3908,10 @@ def _read_xai_oauth_tokens(*, _lock: bool = True) -> Dict[str, Any]:
             state = global_state
     if not state:
         raise AuthError(
-            "No xAI OAuth credentials stored. Select xAI Grok OAuth (SuperGrok / Premium+) in `hermes model`.",
+            brand_text(
+                "No xAI OAuth credentials stored. Select xAI Grok OAuth "
+                "(SuperGrok / Premium+) in `hermes model`."
+            ),
             provider="xai-oauth",
             code="xai_auth_missing",
             relogin_required=True,
@@ -7862,7 +7866,7 @@ def _nous_device_code_login(
     if _is_remote_session():
         open_browser = False
 
-    print(f"Starting Hermes login via {pconfig.name}...")
+    print(brand_text(f"Starting Hermes login via {pconfig.name}..."))
     print(f"Portal: {portal_base_url}")
     if insecure:
         print("TLS verification: disabled (--insecure)")
@@ -7964,7 +7968,7 @@ def _nous_device_code_login(
             print(message)
             print(f"  Subscribe here: {portal_url}/billing")
             print()
-            print("After subscribing, run `hermes model` again to finish setup.")
+            print(brand_text("After subscribing, run `hermes model` again to finish setup."))
             raise SystemExit(1)
         raise
 
@@ -8239,7 +8243,7 @@ def _login_nous(args, pconfig: ProviderConfig) -> None:
                 _save_auth_store(auth_store)
             print()
             print("No provider change. Nous credentials saved for future use.")
-            print("  Run `hermes model` again to switch to Nous Portal.")
+            print(brand_text("  Run `hermes model` again to switch to Nous Portal."))
             return
 
         config_path = _update_config_for_provider(

@@ -8,16 +8,16 @@ from altas.managed.policy_guard import guard_tool_call
 
 def _managed_env() -> dict[str, str]:
     return {
-        "ALTAS_MANAGED_MODE": "true",
-        "ALTAS_CONTROL_PLANE_URL": "http://control.test",
-        "ALTAS_DEVICE_TOKEN": "device-token",
-        "ALTAS_LEASE_TOKEN": "lease-token",
-        "ALTAS_TENANT_ID": "tenant-a",
-        "ALTAS_STORE_ID": "store-a",
-        "ALTAS_DEVICE_ID": "device-a",
-        "ALTAS_AGENT_ID": "agent-a",
-        "ALTAS_JOB_ID": "job-a",
-        "ALTAS_CLAIM_TOKEN": "claim-token-with-more-than-thirty-two-characters",
+        "ATLAS_MANAGED_MODE": "true",
+        "ATLAS_CONTROL_PLANE_URL": "http://control.test",
+        "ATLAS_DEVICE_TOKEN": "device-token",
+        "ATLAS_LEASE_TOKEN": "lease-token",
+        "ATLAS_TENANT_ID": "tenant-a",
+        "ATLAS_STORE_ID": "store-a",
+        "ATLAS_DEVICE_ID": "device-a",
+        "ATLAS_AGENT_ID": "agent-a",
+        "ATLAS_JOB_ID": "job-a",
+        "ATLAS_CLAIM_TOKEN": "claim-token-with-more-than-thirty-two-characters",
     }
 
 
@@ -43,7 +43,7 @@ def test_missing_managed_context_fails_closed() -> None:
     result = guard_tool_call(
         "run_daily_fixed_ops_report",
         {},
-        environ={"ALTAS_MANAGED_MODE": "1"},
+        environ={"ATLAS_MANAGED_MODE": "1"},
     )
 
     assert result.allowed is False

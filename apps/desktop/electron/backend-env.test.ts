@@ -11,7 +11,7 @@ import {
   POSIX_SANE_PATH_ENTRIES
 } from './backend-env'
 
-test('desktop backend PATH adds Hermes-managed bins and missing POSIX sane entries', () => {
+test('desktop backend PATH adds Atlas-managed bins and missing POSIX sane entries', () => {
   const result = buildDesktopBackendPath({
     hermesHome: '/Users/test/.hermes',
     venvRoot: '/Users/test/.hermes/hermes-agent/venv',
@@ -67,7 +67,7 @@ test('buildDesktopBackendEnv extends PYTHONPATH and backend PATH together', () =
   assert.ok(env.PATH.includes('/opt/homebrew/bin'))
 })
 
-test('normalizeHermesHomeRoot maps profile homes back to the global Hermes root', () => {
+test('normalizeHermesHomeRoot maps profile homes back to the global Atlas root', () => {
   assert.equal(
     normalizeHermesHomeRoot('/Users/test/.hermes/profiles/oracle', { pathModule: path.posix }),
     '/Users/test/.hermes'

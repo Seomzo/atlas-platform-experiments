@@ -12,6 +12,8 @@ because its dispatch is tightly coupled to module-level ``cmd_*`` functions.
 
 import argparse
 
+from hermes_cli.brand import brand_text, command_name, product_name
+
 
 # `--profile` / `-p` is consumed by ``main._apply_profile_override`` before
 # argparse runs (it sets ``HERMES_HOME`` and strips itself from ``sys.argv``),
@@ -90,10 +92,10 @@ def build_top_level_parser():
     other subparsers via ``subparsers.add_parser(...)``.
     """
     parser = argparse.ArgumentParser(
-        prog="hermes",
-        description="Hermes Agent - AI assistant with tool-calling capabilities",
+        prog=command_name(),
+        description=f"{product_name()} - AI assistant with tool-calling capabilities",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=_EPILOGUE,
+        epilog=brand_text(_EPILOGUE),
     )
 
     parser.add_argument(
@@ -141,7 +143,7 @@ def build_top_level_parser():
         parser,
         "--provider",
         default=None,
-        help=(
+        help=brand_text(
             "Provider override for this invocation (e.g. openrouter, anthropic). "
             "Applies to -z/--oneshot and --tui. The persistent provider lives in config.yaml "
             "under model.provider — use `hermes setup` or edit the file to change it."
@@ -216,7 +218,7 @@ def build_top_level_parser():
         "--ignore-user-config",
         action="store_true",
         default=False,
-        help="Ignore ~/.hermes/config.yaml and fall back to built-in defaults (credentials in .env are still loaded)",
+        help=brand_text("Ignore ~/.hermes/config.yaml and fall back to built-in defaults (credentials in .env are still loaded)"),
     )
     _inherited_flag(
         parser,
@@ -263,7 +265,7 @@ def build_top_level_parser():
     chat_parser = subparsers.add_parser(
         "chat",
         help="Interactive chat with the agent",
-        description="Start an interactive chat session with Hermes Agent",
+        description=f"Start an interactive chat session with {product_name()}",
     )
     chat_parser.add_argument(
         "-q", "--query", help="Single query (non-interactive mode)"
@@ -376,7 +378,7 @@ def build_top_level_parser():
         "--ignore-user-config",
         action="store_true",
         default=argparse.SUPPRESS,
-        help="Ignore ~/.hermes/config.yaml and fall back to built-in defaults (credentials in .env are still loaded). Useful for isolated CI runs, reproduction, and third-party integrations.",
+        help=brand_text("Ignore ~/.hermes/config.yaml and fall back to built-in defaults (credentials in .env are still loaded). Useful for isolated CI runs, reproduction, and third-party integrations."),
     )
     _inherited_flag(
         chat_parser,
@@ -390,7 +392,7 @@ def build_top_level_parser():
         "--safe-mode",
         action="store_true",
         default=argparse.SUPPRESS,
-        help="Troubleshooting mode: disable ALL customizations — user config, AGENTS.md/memory injection, plugins, and MCP servers (implies --ignore-user-config and --ignore-rules). Use to isolate whether a problem comes from your setup or from Hermes itself.",
+        help=brand_text("Troubleshooting mode: disable ALL customizations — user config, AGENTS.md/memory injection, plugins, and MCP servers (implies --ignore-user-config and --ignore-rules). Use to isolate whether a problem comes from your setup or from Hermes itself."),
     )
     chat_parser.add_argument(
         "--source",

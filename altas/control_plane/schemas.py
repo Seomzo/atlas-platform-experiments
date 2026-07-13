@@ -84,7 +84,7 @@ def _json_size(value: Any) -> int:
 
 
 class ChatMessage(StrictModel):
-    """Explicit OpenAI-compatible message fields accepted by Altas.
+    """Explicit OpenAI-compatible message fields accepted by Atlas.
 
     ``content`` and tool-call payloads remain structurally compatible with the
     OpenAI SDK/Hermes, while per-message and whole-request limits keep those

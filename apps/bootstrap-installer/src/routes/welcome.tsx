@@ -1,12 +1,12 @@
-import { type CSSProperties } from 'react'
-import { HackeryButton } from '../components/hackery-button'
-import { startInstall } from '../store'
+import { type CSSProperties } from "react";
+import { HackeryButton } from "../components/hackery-button";
+import { startInstall } from "../store";
 
 /*
  * Welcome screen.
  *
  * Mirrors the desktop's chat intro (apps/desktop/src/components/chat/intro.tsx):
- *   - HERMES AGENT wordmark rendered in Collapse Bold, uppercase, tracked
+ *   - ATLAS wordmark rendered in Collapse Bold, uppercase, tracked
  *   - mix-blend-plus-lighter so the type "glows" on the canvas
  *   - fit-text utility so the wordmark sizes itself to the column
  *
@@ -23,16 +23,16 @@ export default function Welcome() {
           className="fit-text mx-auto mb-4 w-full font-['Collapse'] font-bold uppercase leading-[0.9] tracking-[0.08em] text-midground mix-blend-plus-lighter dark:text-foreground/90"
           style={
             {
-              '--fit-text-line-height': '0.9',
-              '--fit-text-max': '6rem',
-              '--fit-text-min': '2.5rem'
+              "--fit-text-line-height": "0.9",
+              "--fit-text-max": "6rem",
+              "--fit-text-min": "2.5rem",
             } as CSSProperties
           }
         >
           <span>
-            <span>HERMES AGENT</span>
+            <span>ATLAS</span>
           </span>
-          <span aria-hidden="true">HERMES AGENT</span>
+          <span aria-hidden="true">ATLAS</span>
         </p>
 
         <p className="m-0 text-center text-base leading-normal tracking-tight text-muted-foreground">
@@ -43,5 +43,5 @@ export default function Welcome() {
 
       <HackeryButton label="Install" onClick={() => void startInstall()} />
     </div>
-  )
+  );
 }

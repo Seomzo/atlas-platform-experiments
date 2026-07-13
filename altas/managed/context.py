@@ -37,9 +37,9 @@ class ManagedContext:
         """Return non-secret scope headers for the control plane."""
 
         return {
-            "X-Altas-Tenant-ID": self.tenant_id,
-            "X-Altas-Store-ID": self.store_id,
-            "X-Altas-Agent-ID": self.agent_id,
-            "X-Altas-Job-ID": self.job_id,
-            "X-Altas-Correlation-ID": self.correlation_id,
+            "X-Atlas-Tenant-ID": self.tenant_id,
+            "X-Atlas-Store-ID": self.store_id,
+            "X-Atlas-Agent-ID": self.agent_id,
+            "X-Atlas-Job-ID": self.job_id,
+            "X-Atlas-Correlation-ID": self.correlation_id,
         }

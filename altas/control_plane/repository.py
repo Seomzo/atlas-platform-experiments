@@ -21,8 +21,8 @@ DEMO_STORE_ID = "store-sunrise-vw"
 DEMO_UNENTITLED_STORE_ID = "store-harbor-toyota"
 DEMO_SUBSCRIPTION_ID = "subscription_demo_professional"
 DEMO_DEVICE_ID = "device_demo_local_worker"
-DEMO_AGENT_ID = "agent_demo_altas"
-DEMO_DEVICE_SECRET = "altas-demo-device-secret-v1"
+DEMO_AGENT_ID = "agent_demo_atlas"
+DEMO_DEVICE_SECRET = "atlas-demo-device-secret-v1"
 
 DEMO_CAPABILITIES = (
     "jobs.complete",
@@ -121,8 +121,8 @@ class ControlPlaneRepository:
                 """,
                 (
                     DEMO_TENANT_ID,
-                    "Altas Demo Dealer Group",
-                    "altas-demo",
+                    "Atlas Demo Dealer Group",
+                    "atlas-demo",
                     timestamp,
                     timestamp,
                 ),
@@ -192,7 +192,7 @@ class ControlPlaneRepository:
                 """
                 INSERT OR IGNORE INTO agents
                     (id, tenant_id, store_id, device_id, name, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, 'Altas Fixed Ops', 'active', ?, ?)
+                VALUES (?, ?, ?, ?, 'Atlas Fixed Ops', 'active', ?, ?)
                 """,
                 (
                     DEMO_AGENT_ID,

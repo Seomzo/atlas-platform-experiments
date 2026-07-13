@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -26,12 +27,19 @@ def _b64encode(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
 
-def _b64decode(value: str) -> bytes:
+def _b64decode(value: str, *, error_code: str = "lease_encoding_invalid") -> bytes:
     padding = "=" * (-len(value) % 4)
     try:
-        return base64.urlsafe_b64decode(value + padding)
-    except (ValueError, TypeError) as exc:
-        raise InvalidLease("lease_encoding_invalid") from exc
+        decoded = base64.b64decode(
+            value + padding,
+            altchars=b"-_",
+            validate=True,
+        )
+    except (binascii.Error, ValueError, TypeError) as exc:
+        raise InvalidLease(error_code) from exc
+    if _b64encode(decoded) != value:
+        raise InvalidLease(error_code)
+    return decoded
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,12 +57,12 @@ class LeaseClaims:
 class LeaseSigner:
     """Small, dependency-free HMAC lease format.
 
-    The format is ``altas-v1.<base64url-json>.<base64url-hmac>``. The signed
+    The format is ``atlas-v1.<base64url-json>.<base64url-hmac>``. The signed
     payload carries only identity and authorization claims; it never contains
     credentials or dealership data.
     """
 
-    _PREFIX = "altas-v1"
+    _PREFIX = "atlas-v1"
 
     def __init__(
         self,
@@ -82,12 +90,12 @@ class LeaseSigner:
         unique_capabilities = tuple(sorted(set(capabilities)))
         payload: dict[str, Any] = {
             "agent_id": agent_id,
-            "aud": "altas-worker",
+            "aud": "atlas-worker",
             "capabilities": unique_capabilities,
             "device_id": device_id,
             "exp": issued_at + ttl_seconds,
             "iat": issued_at,
-            "iss": "altas-control-plane",
+            "iss": "atlas-control-plane",
             "nonce": nonce,
             "store_id": store_id,
             "tenant_id": tenant_id,
@@ -109,11 +117,13 @@ class LeaseSigner:
             raise InvalidLease("lease_format_invalid")
         signing_input = f"{parts[0]}.{parts[1]}".encode("ascii")
         expected = hmac.new(self._key, signing_input, hashlib.sha256).digest()
-        supplied = _b64decode(parts[2])
+        supplied = _b64decode(parts[2], error_code="lease_signature_invalid")
         if not hmac.compare_digest(expected, supplied):
             raise InvalidLease("lease_signature_invalid")
         try:
-            payload = json.loads(_b64decode(parts[1]))
+            payload = json.loads(
+                _b64decode(parts[1], error_code="lease_payload_invalid")
+            )
         except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as exc:
             raise InvalidLease("lease_payload_invalid") from exc
         if not isinstance(payload, dict):
@@ -129,8 +139,8 @@ class LeaseSigner:
     def _claims_from_payload(payload: dict[str, Any]) -> LeaseClaims:
         if (
             payload.get("typ") != "lease"
-            or payload.get("iss") != "altas-control-plane"
-            or payload.get("aud") != "altas-worker"
+            or payload.get("iss") != "atlas-control-plane"
+            or payload.get("aud") != "atlas-worker"
         ):
             raise InvalidLease("lease_claims_invalid")
         required_strings = (

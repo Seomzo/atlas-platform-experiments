@@ -11,7 +11,7 @@ on:
       - "agent/tool_executor.py"
       - "model_tools.py"
       - "pyproject.toml"
-      - "requirements-altas-dev.txt"
+      - "requirements-atlas-dev.txt"
       - ".github/workflows/altas-ci.yml"
   push:
     branches:
@@ -25,7 +25,7 @@ on:
       - "agent/tool_executor.py"
       - "model_tools.py"
       - "pyproject.toml"
-      - "requirements-altas-dev.txt"
+      - "requirements-atlas-dev.txt"
       - ".github/workflows/altas-ci.yml"
   workflow_dispatch:
 
@@ -55,7 +55,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: requirements-altas-dev.txt
+          cache-dependency-path: requirements-atlas-dev.txt
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -63,7 +63,7 @@ jobs:
           node-version: "22"
 
       - name: Install focused dependencies
-        run: python -m pip install -r requirements-altas-dev.txt
+        run: python -m pip install -r requirements-atlas-dev.txt
 
       - name: Compile Altas modules
         run: python -m compileall -q altas scripts/altas-smoke.py

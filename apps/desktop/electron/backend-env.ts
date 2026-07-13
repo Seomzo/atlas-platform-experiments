@@ -100,6 +100,8 @@ function buildDesktopBackendEnv({
   const key = pathEnvKey(currentEnv, platform)
 
   return {
+    HERMES_PUBLIC_BRAND: 'atlas',
+    HERMES_BIN: 'atlas',
     PYTHONPATH: appendUniquePathEntries([...pythonPathEntries, currentPythonPath], { delimiter }),
     [key]: buildDesktopBackendPath({
       hermesHome,

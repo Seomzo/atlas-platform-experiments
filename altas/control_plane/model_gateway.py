@@ -65,7 +65,7 @@ class ModelGateway:
         if not isinstance(last_input, str):
             last_input = json.dumps(last_input, sort_keys=True, separators=(",", ":"))
         content = (
-            f"Altas mock response {digest[:12]}. Validated request: {last_input[:1000]}"
+            f"Atlas mock response {digest[:12]}. Validated request: {last_input[:1000]}"
         )
         input_tokens = _estimate_tokens(canonical)
         output_tokens = _estimate_tokens(content)
@@ -126,7 +126,7 @@ class ModelGateway:
             key: value for key, value in serialized.items() if key in allowed_fields
         }
         # Never trust a downstream-compatible model/schema change to preserve
-        # this invariant: one Altas request can purchase exactly one choice.
+        # this invariant: one Atlas request can purchase exactly one choice.
         payload["n"] = 1
         payload["stream"] = False
         try:

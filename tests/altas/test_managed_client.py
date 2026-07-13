@@ -10,7 +10,7 @@ def test_policy_and_model_requests_send_claim_token_header() -> None:
     observed: list[tuple[str, str | None]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        observed.append((request.url.path, request.headers.get("X-Altas-Claim-Token")))
+        observed.append((request.url.path, request.headers.get("X-Atlas-Claim-Token")))
         if request.url.path.endswith("/policy/evaluate"):
             return httpx.Response(200, json={"allowed": True, "code": "allowed"})
         return httpx.Response(

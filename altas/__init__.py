@@ -1,6 +1,6 @@
-"""Altas managed AI worker platform.
+"""Atlas managed AI worker platform.
 
-Altas-owned code lives in this namespace. The upstream Hermes Agent engine
+Atlas-owned code lives in this namespace. The upstream Hermes Agent engine
 remains an implementation detail behind the managed adapter.
 """
 

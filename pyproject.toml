@@ -305,6 +305,9 @@ all = [
 ]
 
 [project.scripts]
+atlas = "hermes_cli.main:main"
+atlas-control = "altas.cli:main"
+# Compatibility alias for prototype automation; public docs use atlas-control.
 altas = "altas.cli:main"
 hermes = "hermes_cli.main:main"
 hermes-agent = "run_agent:main"

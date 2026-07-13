@@ -81,6 +81,7 @@ fn main() {
     }
     println!("cargo:rerun-if-env-changed=HERMES_BUILD_PIN_COMMIT");
     println!("cargo:rerun-if-env-changed=HERMES_BUILD_PIN_BRANCH");
+    println!("cargo:rerun-if-env-changed=ATLAS_GITHUB_REPOSITORY");
 
     // -----------------------------------------------------------------
     // Tauri windows manifest. See hermes-setup.manifest for rationale —

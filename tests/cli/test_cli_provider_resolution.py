@@ -308,6 +308,23 @@ def test_model_flow_nous_prints_subscription_guidance_without_mutating_explicit_
     assert config["browser"]["cloud_provider"] == "browser-use"
 
 
+def test_model_flow_nous_propagates_login_cancel_for_setup(monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.auth.get_provider_auth_state",
+        lambda _provider: None,
+    )
+
+    def _cancelled_login(*_args, **_kwargs):
+        raise SystemExit(130)
+
+    monkeypatch.setattr("hermes_cli.auth._login_nous", _cancelled_login)
+
+    with pytest.raises(SystemExit) as exc_info:
+        hermes_main._model_flow_nous({}, propagate_login_abort=True)
+
+    assert exc_info.value.code == 130
+
+
 def test_model_flow_nous_does_not_restore_stale_custom_api_key(tmp_path, monkeypatch):
     import yaml
 

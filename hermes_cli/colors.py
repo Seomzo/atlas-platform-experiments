@@ -3,6 +3,8 @@
 import os
 import sys
 
+from hermes_cli.brand import brand_text
+
 
 def should_use_color() -> bool:
     """Return True when colored output is appropriate.
@@ -29,10 +31,18 @@ class Colors:
     BLUE = "\033[34m"
     MAGENTA = "\033[35m"
     CYAN = "\033[36m"
+    # Atlas' public terminal palette. True-color escapes keep the brand
+    # distinct from the upstream Hermes gold/magenta treatment while the
+    # existing no-color/TTY behavior remains unchanged.
+    ATLAS_INDIGO = "\033[38;2;79;70;229m"
+    ATLAS_BLUE = "\033[38;2;37;99;235m"
+    ATLAS_SKY = "\033[38;2;14;165;233m"
+    ATLAS_CYAN = "\033[38;2;56;189;248m"
 
 
 def color(text: str, *codes) -> str:
     """Apply color codes to text (only when color output is appropriate)."""
+    text = brand_text(text)
     if not should_use_color():
         return text
     return "".join(codes) + text + Colors.RESET

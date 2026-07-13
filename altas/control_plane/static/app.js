@@ -2,7 +2,7 @@
   "use strict";
 
   const API_BASE = "/api/v1/admin";
-  const DEMO_ADMIN_TOKEN = "altas-demo-admin-token-v1";
+  const DEMO_ADMIN_TOKEN = "atlas-demo-admin-token-v1";
   const TOKEN_STORAGE_KEY = "altas.control-center.admin-token";
   const REFRESH_INTERVAL_MS = 30_000;
 
@@ -244,7 +244,7 @@
     dom.viewTitle.textContent = VIEW_META[viewName].title;
     dom.viewKicker.textContent = VIEW_META[viewName].kicker;
     dom.routeAnnouncer.textContent = `${VIEW_META[viewName].title} section selected`;
-    document.title = `${VIEW_META[viewName].title} — Altas Control Center`;
+    document.title = `${VIEW_META[viewName].title} — Atlas Control Center`;
     if (options.updateHash !== false) {
       window.history.replaceState(null, "", `#${viewName}`);
     }
@@ -637,7 +637,7 @@
     }
 
     const table = buildTable(
-      "Recent Altas jobs",
+      "Recent Atlas jobs",
       [
         ["Job", (job) => primarySecondary(shortId(job.id), textValue(job.requested_by) || "control plane")],
         ["Capability", (job) => codeCell(job.capability)],
@@ -687,7 +687,7 @@
       renderEmptyState(
         dom.fleetDevices,
         "No device registrations",
-        "Install and approve an Altas worker to populate this inventory.",
+        "Install and approve an Atlas worker to populate this inventory.",
         "D0",
       );
       dom.fleetDevices.setAttribute("aria-busy", "false");
@@ -695,7 +695,7 @@
     }
 
     const table = buildTable(
-      "Registered Altas worker devices",
+      "Registered Atlas worker devices",
       [
         ["Device", (device) => primarySecondary(device.name, shortId(device.id))],
         ["Rooftop", (device) => entityCell(findById(state.data.stores, device.store_id), device.store_id)],
@@ -729,7 +729,7 @@
       renderEmptyState(
         dom.fleetAgents,
         "No agent assignments",
-        "Bind an Altas agent to an entitled rooftop and device.",
+        "Bind an Atlas agent to an entitled rooftop and device.",
         "A0",
       );
       dom.fleetAgents.setAttribute("aria-busy", "false");
@@ -737,7 +737,7 @@
     }
 
     const table = buildTable(
-      "Assigned Altas agents",
+      "Assigned Atlas agents",
       [
         ["Agent", (agent) => primarySecondary(agent.name, shortId(agent.id))],
         ["Rooftop", (agent) => entityCell(findById(state.data.stores, agent.store_id), agent.store_id)],
@@ -1013,7 +1013,7 @@
     }
 
     const table = buildTable(
-      "Altas dispatch and execution history",
+      "Atlas dispatch and execution history",
       [
         ["Job", (job) => primarySecondary(shortId(job.id), textValue(job.requested_by) || "local admin")],
         ["Capability", (job) => codeCell(job.capability)],
@@ -1186,7 +1186,7 @@
           method: "POST",
           body: JSON.stringify({
             enabled: shouldEnable,
-            reason: "Altas Control Center operator action",
+            reason: "Atlas Control Center operator action",
           }),
         },
       );

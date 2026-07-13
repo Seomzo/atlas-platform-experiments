@@ -546,7 +546,9 @@ def recommended_update_command_for_method(method: str) -> str:
         if shutil.which("uv"):
             return "uv pip install --upgrade hermes-agent"
         return "pip install --upgrade hermes-agent"
-    return "hermes update"
+    from hermes_cli.brand import command_name
+
+    return f"{command_name()} update"
 
 
 def recommended_update_command() -> str:

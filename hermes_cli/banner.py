@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 from hermes_constants import get_hermes_home
+from hermes_cli.brand import is_atlas_branded, product_name
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 # rich and prompt_toolkit are imported lazily (inside the functions that use
@@ -66,6 +67,21 @@ HERMES_AGENT_LOGO = """[bold #FFD700]██╗  ██╗███████�
 [#FFBF00]██╔══██║██╔══╝  ██╔══██╗██║╚██╔╝██║██╔══╝  ╚════██║╚════╝██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║[/]
 [#CD7F32]██║  ██║███████╗██║  ██║██║ ╚═╝ ██║███████╗███████║      ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║[/]
 [#CD7F32]╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝╚══════╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝[/]"""
+
+ATLAS_LOGO = """[bold #7DD3FC] █████╗ ████████╗██╗      █████╗ ███████╗[/]
+[bold #38BDF8]██╔══██╗╚══██╔══╝██║     ██╔══██╗██╔════╝[/]
+[#0EA5E9]███████║   ██║   ██║     ███████║███████╗[/]
+[#0284C7]██╔══██║   ██║   ██║     ██╔══██║╚════██║[/]
+[#2563EB]██║  ██║   ██║   ███████╗██║  ██║███████║[/]
+[#4F46E5]╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚══════╝[/]"""
+
+ATLAS_HERO = """[bold #7DD3FC]              ╱╲              [/]
+[bold #38BDF8]             ╱  ╲             [/]
+[#0EA5E9]            ╱ ╱╲ ╲            [/]
+[#0284C7]           ╱ ╱  ╲ ╲           [/]
+[#2563EB]          ╱ ╱────╲ ╲          [/]
+[#4F46E5]         ╱──────────╲         [/]
+[#1E3A8A]        LOCAL • SECURE         [/]"""
 
 HERMES_CADUCEUS = """[#CD7F32]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⡀⠀⣀⣀⠀⢀⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
 [#CD7F32]⠀⠀⠀⠀⠀⠀⢀⣠⣴⣾⣿⣿⣇⠸⣿⣿⠇⣸⣿⣿⣷⣦⣄⡀⠀⠀⠀⠀⠀⠀[/]
@@ -505,7 +521,7 @@ def get_latest_release_tag(repo_dir: Optional[Path] = None) -> Optional[tuple]:
 
 def format_banner_version_label() -> str:
     """Return the version label shown in the startup banner title."""
-    base = f"Hermes Agent v{VERSION} ({RELEASE_DATE})"
+    base = f"{product_name()} v{VERSION} ({RELEASE_DATE})"
     state = get_git_banner_state()
     if not state:
         return base
@@ -640,19 +656,28 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
     layout_table.add_column("right", justify="left")
 
     # Resolve skin colors once for the entire banner
-    accent = _skin_color("banner_accent", "#FFBF00")
-    dim = _skin_color("banner_dim", "#B8860B")
-    text = _skin_color("banner_text", "#FFF8DC")
-    session_color = _skin_color("session_border", "#8B8682")
+    if is_atlas_branded():
+        accent = "#38BDF8"
+        dim = "#2563EB"
+        text = "#E0F2FE"
+        session_color = "#60A5FA"
+    else:
+        accent = _skin_color("banner_accent", "#FFBF00")
+        dim = _skin_color("banner_dim", "#B8860B")
+        text = _skin_color("banner_text", "#FFF8DC")
+        session_color = _skin_color("session_border", "#8B8682")
 
     # Use skin's custom caduceus art if provided
     try:
         from hermes_cli.skin_engine import get_active_skin
         _bskin = get_active_skin()
-        _hero = _bskin.banner_hero if hasattr(_bskin, 'banner_hero') and _bskin.banner_hero else HERMES_CADUCEUS
+        if is_atlas_branded():
+            _hero = ATLAS_HERO
+        else:
+            _hero = _bskin.banner_hero if hasattr(_bskin, 'banner_hero') and _bskin.banner_hero else HERMES_CADUCEUS
     except Exception:
         _bskin = None
-        _hero = HERMES_CADUCEUS
+        _hero = ATLAS_HERO if is_atlas_branded() else HERMES_CADUCEUS
     left_lines = ["", _hero, ""]
     if (provider or "").strip().lower() == "moa":
         # MoA virtual provider: ``model`` is a preset name. Show the preset and
@@ -931,7 +956,10 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
     console.print()
     term_width = shutil.get_terminal_size().columns
     if term_width >= 95:
-        _logo = _bskin.banner_logo if _bskin and hasattr(_bskin, 'banner_logo') and _bskin.banner_logo else HERMES_AGENT_LOGO
+        if is_atlas_branded():
+            _logo = ATLAS_LOGO
+        else:
+            _logo = _bskin.banner_logo if _bskin and hasattr(_bskin, 'banner_logo') and _bskin.banner_logo else HERMES_AGENT_LOGO
         console.print(_logo)
         console.print()
     console.print(outer_panel)

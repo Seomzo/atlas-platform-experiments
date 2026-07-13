@@ -138,6 +138,6 @@ def test_non_demo_admin_and_ui_surfaces_are_loopback_only(tmp_path: Path) -> Non
 def test_prototype_cli_refuses_non_loopback_bind(
     monkeypatch: pytest.MonkeyPatch, demo_enabled: str
 ) -> None:
-    monkeypatch.setenv("ALTAS_SEED_DEMO_DATA", demo_enabled)
+    monkeypatch.setenv("ATLAS_SEED_DEMO_DATA", demo_enabled)
     with pytest.raises(ValueError, match="loopback"):
         _serve(Namespace(host="0.0.0.0", port=8787, reload=False))

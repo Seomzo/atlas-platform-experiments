@@ -1,4 +1,4 @@
-"""FastAPI application factory for the Altas local control plane."""
+"""FastAPI application factory for the Atlas local control plane."""
 
 from __future__ import annotations
 
@@ -101,10 +101,10 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
     expected_admin_hash = hash_secret(settings.admin_token)
 
     app = FastAPI(
-        title="Altas Control Plane",
+        title="Atlas Control Plane",
         version="0.1.0",
         description=(
-            "Local-first control plane for licensed, policy-bound Altas managed workers."
+            "Local-first control plane for licensed, policy-bound Atlas managed workers."
         ),
     )
     app.state.settings = settings
@@ -171,8 +171,8 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
             response.headers["Cache-Control"] = "no-store"
         return response
 
-    device_bearer = HTTPBearer(auto_error=False, scheme_name="AltasDeviceBearer")
-    admin_bearer = HTTPBearer(auto_error=False, scheme_name="AltasAdminBearer")
+    device_bearer = HTTPBearer(auto_error=False, scheme_name="AtlasDeviceBearer")
+    admin_bearer = HTTPBearer(auto_error=False, scheme_name="AtlasAdminBearer")
 
     def require_device(
         credentials: HTTPAuthorizationCredentials | None = Depends(device_bearer),
@@ -328,10 +328,10 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
     def evaluate_policy(
         request: PolicyEvaluationRequest,
         device: dict[str, Any] = Depends(require_device),
-        lease_token: str = Header(..., alias="X-Altas-Lease"),
-        job_id: str = Header(..., alias="X-Altas-Job-ID"),
+        lease_token: str = Header(..., alias="X-Atlas-Lease"),
+        job_id: str = Header(..., alias="X-Atlas-Job-ID"),
         claim_token: str = Header(
-            ..., min_length=32, max_length=256, alias="X-Altas-Claim-Token"
+            ..., min_length=32, max_length=256, alias="X-Atlas-Claim-Token"
         ),
     ) -> dict[str, Any]:
         """Managed-runtime policy decision point.
@@ -436,10 +436,10 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
     @worker.get("/jobs/next")
     def next_job(
         device: dict[str, Any] = Depends(require_device),
-        tenant_id: str = Header(..., alias="X-Altas-Tenant-ID"),
-        store_id: str = Header(..., alias="X-Altas-Store-ID"),
-        agent_id: str = Header(..., alias="X-Altas-Agent-ID"),
-        lease_token: str = Header(..., alias="X-Altas-Lease"),
+        tenant_id: str = Header(..., alias="X-Atlas-Tenant-ID"),
+        store_id: str = Header(..., alias="X-Atlas-Store-ID"),
+        agent_id: str = Header(..., alias="X-Atlas-Agent-ID"),
+        lease_token: str = Header(..., alias="X-Atlas-Lease"),
     ) -> dict[str, Any]:
         if tenant_id != device["tenant_id"]:
             audit_worker_denial(
@@ -509,7 +509,7 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
         job_id: str,
         request: JobCompletionRequest,
         device: dict[str, Any] = Depends(require_device),
-        lease_token: str = Header(..., alias="X-Altas-Lease"),
+        lease_token: str = Header(..., alias="X-Atlas-Lease"),
     ) -> dict[str, Any]:
         job = repository.get_job(job_id)
         expected_context = (
@@ -794,10 +794,10 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
     @model_api.get("/v1/models")
     def list_models(
         device: dict[str, Any] = Depends(require_device),
-        tenant_id: str = Header(..., alias="X-Altas-Tenant-ID"),
-        store_id: str = Header(..., alias="X-Altas-Store-ID"),
-        agent_id: str = Header(..., alias="X-Altas-Agent-ID"),
-        lease_token: str = Header(..., alias="X-Altas-Lease"),
+        tenant_id: str = Header(..., alias="X-Atlas-Tenant-ID"),
+        store_id: str = Header(..., alias="X-Atlas-Store-ID"),
+        agent_id: str = Header(..., alias="X-Atlas-Agent-ID"),
+        lease_token: str = Header(..., alias="X-Atlas-Lease"),
     ) -> dict[str, Any]:
         if tenant_id != device["tenant_id"]:
             audit_worker_denial(
@@ -837,13 +837,13 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
     async def chat_completions(
         request: ChatCompletionRequest,
         device: dict[str, Any] = Depends(require_device),
-        tenant_id: str = Header(..., alias="X-Altas-Tenant-ID"),
-        store_id: str = Header(..., alias="X-Altas-Store-ID"),
-        agent_id: str = Header(..., alias="X-Altas-Agent-ID"),
-        lease_token: str = Header(..., alias="X-Altas-Lease"),
-        job_id: str = Header(..., alias="X-Altas-Job-ID"),
+        tenant_id: str = Header(..., alias="X-Atlas-Tenant-ID"),
+        store_id: str = Header(..., alias="X-Atlas-Store-ID"),
+        agent_id: str = Header(..., alias="X-Atlas-Agent-ID"),
+        lease_token: str = Header(..., alias="X-Atlas-Lease"),
+        job_id: str = Header(..., alias="X-Atlas-Job-ID"),
         claim_token: str = Header(
-            ..., min_length=32, max_length=256, alias="X-Altas-Claim-Token"
+            ..., min_length=32, max_length=256, alias="X-Atlas-Claim-Token"
         ),
     ) -> dict[str, Any]:
         if tenant_id != device["tenant_id"]:

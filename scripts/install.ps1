@@ -1,5 +1,5 @@
 # ============================================================================
-# Hermes Agent Installer for Windows
+# Atlas Agent Installer for Windows
 # ============================================================================
 # Installation script for Windows (PowerShell).
 # Uses uv for fast Python provisioning and package management.
@@ -23,8 +23,9 @@ param(
     # exact ref.  Precedence: Commit > Tag > Branch.
     [string]$Commit = "",
     [string]$Tag = "",
-    [string]$HermesHome = $(if ($env:HERMES_HOME) { $env:HERMES_HOME } else { "$env:LOCALAPPDATA\hermes" }),
-    [string]$InstallDir = $(if ($env:HERMES_HOME) { "$env:HERMES_HOME\hermes-agent" } else { "$env:LOCALAPPDATA\hermes\hermes-agent" }),
+    [Alias("AtlasHome")]
+    [string]$HermesHome = $(if ($env:HERMES_HOME) { $env:HERMES_HOME } else { "$env:LOCALAPPDATA\atlas" }),
+    [string]$InstallDir = $(if ($env:HERMES_HOME) { "$env:HERMES_HOME\hermes-agent" } else { "$env:LOCALAPPDATA\atlas\hermes-agent" }),
 
     # --- Stage protocol (additive; default invocation behaves as before) ----
     # See the "Stage protocol" section near the bottom of the file for the
@@ -43,23 +44,25 @@ param(
 
     # --- Desktop GUI build (opt-in) ---
     # When set, install.ps1 includes Stage-Desktop in the manifest and
-    # builds apps/desktop into a launchable Hermes.exe.
+    # builds apps/desktop into a launchable Atlas.exe.
     #
     # Why opt-in:
-    #   * Hermes-Setup.exe (the signed Tauri bootstrap installer) passes
+    #   * Atlas-Setup.exe (the signed Tauri bootstrap installer) passes
     #     -IncludeDesktop so a user who installed via the GUI ends up
     #     with a launchable desktop binary.
     #   * The Electron desktop's own bootstrap-runner.ts runs install.ps1
-    #     from inside an already-launched Hermes.exe; if THAT recursively
-    #     built apps/desktop it would try to overwrite the live Hermes.exe
+    #     from inside an already-launched Atlas.exe; if THAT recursively
+    #     built apps/desktop it would try to overwrite the live Atlas.exe
     #     on disk and fail. The recursive path omits the flag.
     #   * The canonical CLI one-liner (irm | iex) omits the flag too;
     #     terminal users don't need a desktop binary built for them, and
-    #     `hermes desktop` already builds on demand.
+    #     `atlas desktop` already builds on demand.
     [switch]$IncludeDesktop
 )
 
 $ErrorActionPreference = "Stop"
+$env:HERMES_PUBLIC_BRAND = "atlas"
+$env:HERMES_BIN = "atlas"
 
 # Suppress Invoke-WebRequest's per-chunk progress bar.  Windows PowerShell
 # 5.1's progress UI repaints synchronously on every received byte, which
@@ -136,8 +139,11 @@ foreach ($tmpVar in @('TEMP', 'TMP')) {
 # Configuration
 # ============================================================================
 
-$RepoUrlSsh = "git@github.com:NousResearch/hermes-agent.git"
-$RepoUrlHttps = "https://github.com/NousResearch/hermes-agent.git"
+# Release builds override these with the DealerBox Atlas repository. The
+# upstream defaults keep engine-development checkouts installable until the
+# Atlas distribution remote is published.
+$RepoUrlSsh = if ($env:ATLAS_REPO_URL_SSH) { $env:ATLAS_REPO_URL_SSH } else { "git@github.com:NousResearch/hermes-agent.git" }
+$RepoUrlHttps = if ($env:ATLAS_REPO_URL_HTTPS) { $env:ATLAS_REPO_URL_HTTPS } else { "https://github.com/NousResearch/hermes-agent.git" }
 $PythonVersion = "3.11"
 # Minor versions the installer accepts when the requested $PythonVersion isn't
 # available, in preference order.  uv discovers both uv-managed and system
@@ -207,9 +213,9 @@ function Get-WindowsArch {
 function Write-Banner {
     Write-Host ""
     Write-Host "+---------------------------------------------------------+" -ForegroundColor Magenta
-    Write-Host "|             * Hermes Agent Installer                    |" -ForegroundColor Magenta
+    Write-Host "|             * Atlas Agent Installer                    |" -ForegroundColor Magenta
     Write-Host "+---------------------------------------------------------+" -ForegroundColor Magenta
-    Write-Host "|  An open source AI agent by Nous Research.              |" -ForegroundColor Magenta
+    Write-Host "|  An open source AI agent by DealerBox.              |" -ForegroundColor Magenta
     Write-Host "+---------------------------------------------------------+" -ForegroundColor Magenta
     Write-Host ""
 }
@@ -443,10 +449,10 @@ function Get-PowerShellHostExe {
 }
 
 function Install-Uv {
-    # Hermes owns its own uv at $HermesHome\bin\uv.exe.  Always install there —
+    # Atlas owns its own uv at $HermesHome\bin\uv.exe.  Always install there —
     # no PATH probing, no conda guards, no multi-location resolution chains.
     # The runtime update path (hermes_cli/managed_uv.py) looks in the same
-    # place, so install.ps1 and `hermes update` stay in sync.
+    # place, so install.ps1 and `atlas update` stay in sync.
     $managedUv = Join-Path $HermesHome "bin\uv.exe"
 
     if (Test-Path $managedUv) {
@@ -575,7 +581,7 @@ function Resolve-AvailablePythonVersion {
     # when none are available.
     #
     # This is the cross-process-safe counterpart to Test-Python's in-memory
-    # ``$script:PythonVersion = $fallbackVer`` mutation.  Under Hermes-Setup.exe
+    # ``$script:PythonVersion = $fallbackVer`` mutation.  Under Atlas-Setup.exe
     # each ``-Stage NAME`` runs in a *fresh* powershell.exe, so the fallback the
     # ``python`` stage settled on (e.g. 3.12 when 3.11 is absent) does NOT
     # survive into the ``venv`` stage's process -- there $PythonVersion is back
@@ -709,32 +715,32 @@ function Install-Git {
     <#
     .SYNOPSIS
     Ensure Git (and Git Bash) are installed.  Git for Windows bundles bash.exe
-    which Hermes uses to run shell commands.
+    which Atlas uses to run shell commands.
 
     Priority order (deliberately simple -- no winget, no registry, no system
     package manager):
       1. Existing ``git`` on PATH -- use it as-is (the common fast path).
       2. Download **PortableGit** from the official git-for-windows GitHub
          release (self-extracting 7z.exe) and unpack it to
-         ``%LOCALAPPDATA%\hermes\git`` -- never touches system Git, never
+         ``%LOCALAPPDATA%\atlas\git`` -- never touches system Git, never
          requires admin, works even on locked-down machines and machines
          with a broken system Git install.
 
     **Why PortableGit, not MinGit:**  MinGit is the minimal-automation
     distribution and ships ONLY ``git.exe`` -- no bash, no POSIX utilities.
-    Hermes needs ``bash.exe`` to run shell commands.  PortableGit is the
+    Atlas needs ``bash.exe`` to run shell commands.  PortableGit is the
     full Git for Windows distribution without the installer UI; it ships
     ``git.exe`` + ``bash.exe`` + ``sh``, ``awk``, ``sed``, ``grep``, ``curl``,
     ``ssh``, etc. in ``usr\bin\``.
 
     We deliberately skip winget because it fails badly when the system Git
     install is in a half-installed state (partially registered, or uninstall-
-    blocked).  Owning the Hermes copy of Git ourselves is predictable and
-    recoverable: if it ever breaks, ``Remove-Item %LOCALAPPDATA%\hermes\git``
+    blocked).  Owning the Atlas copy of Git ourselves is predictable and
+    recoverable: if it ever breaks, ``Remove-Item %LOCALAPPDATA%\atlas\git``
     and re-running this installer fully recovers.
 
     After install we locate ``bash.exe`` and persist the path in
-    ``HERMES_GIT_BASH_PATH`` (User scope) so Hermes can find it in a fresh
+    ``HERMES_GIT_BASH_PATH`` (User scope) so Atlas can find it in a fresh
     shell without a second PATH refresh.
     #>
     Write-Info "Checking Git..."
@@ -779,7 +785,7 @@ function Install-Git {
         $gitVerTag = "$gitVer.windows.1"
 
         if ($arch -eq "32-bit-mingit") {
-            Write-Warn "32-bit Windows detected -- PortableGit is 64-bit only.  Installing MinGit 32-bit as a last resort; bash-dependent Hermes features (terminal tool, agent-browser) will not work on this machine."
+            Write-Warn "32-bit Windows detected -- PortableGit is 64-bit only.  Installing MinGit 32-bit as a last resort; bash-dependent Atlas features (terminal tool, agent-browser) will not work on this machine."
             $assetName    = "MinGit-$gitVer-32-bit.zip"
             $downloadIsZip = $true
         } elseif ($arch -eq "arm64") {
@@ -859,7 +865,7 @@ function Install-Git {
         Write-Err "Could not install portable Git: $_"
         Write-Info ""
         Write-Info "Fallback: install Git manually from https://git-scm.com/download/win"
-        Write-Info "then re-run this installer.  Hermes needs Git Bash on Windows to run"
+        Write-Info "then re-run this installer.  Atlas needs Git Bash on Windows to run"
         Write-Info "shell commands (same as Claude Code and other coding agents)."
         return $false
     }
@@ -869,7 +875,7 @@ function Set-GitBashEnvVar {
     <#
     .SYNOPSIS
     Locate ``bash.exe`` from an already-installed Git and persist the path in
-    ``HERMES_GIT_BASH_PATH`` (User env scope) so Hermes can find it even before
+    ``HERMES_GIT_BASH_PATH`` (User env scope) so Atlas can find it even before
     PATH propagation completes in a newly-spawned shell.
     #>
     $candidates = @()
@@ -913,7 +919,7 @@ function Set-GitBashEnvVar {
         }
     }
 
-    Write-Warn "Could not locate bash.exe -- Hermes may not find Git Bash."
+    Write-Warn "Could not locate bash.exe -- Atlas may not find Git Bash."
     Write-Info "If needed, set HERMES_GIT_BASH_PATH manually to your bash.exe path."
 }
 
@@ -948,17 +954,17 @@ function Test-Node {
         Write-Warn "Node.js $version is too old for the desktop build (need ^20.19 or >=22.12)"
     }
 
-    # Prefer a Hermes-managed Node from a previous run over a too-old system one.
+    # Prefer a Atlas-managed Node from a previous run over a too-old system one.
     $managedNode = "$HermesHome\node\node.exe"
     if ((Test-Path $managedNode) -and (Test-NodeVersionOk (& $managedNode --version))) {
         $version = & $managedNode --version
         $env:Path = "$HermesHome\node;$env:Path"
-        Write-Success "Node.js $version found (Hermes-managed)"
+        Write-Success "Node.js $version found (Atlas-managed)"
         $script:HasNode = $true
         return $true
     }
 
-    Write-Info "Installing Hermes-managed Node.js $NodeVersion LTS..."
+    Write-Info "Installing Atlas-managed Node.js $NodeVersion LTS..."
 
     # Try the portable-zip path FIRST -- no UAC, no admin, no winget MSI.
     # winget install OpenJS.NodeJS.LTS triggers a system-wide MSI install
@@ -1385,7 +1391,7 @@ function Install-Repository {
                     if ($LASTEXITCODE -ne 0) { throw "git checkout $Branch failed (exit $LASTEXITCODE)" }
                     # Managed installs should follow origin/$Branch exactly. If
                     # the checkout has diverged (or has local-only commits),
-                    # ff-only pull cannot succeed — mirror ``hermes update`` and
+                    # ff-only pull cannot succeed — mirror ``atlas update`` and
                     # reset to the fetched remote so bootstrap/install can recover.
                     git -c windows.appendAtomically=false pull --ff-only origin $Branch
                     if ($LASTEXITCODE -ne 0) {
@@ -1426,7 +1432,7 @@ function Install-Repository {
                         if ($LASTEXITCODE -eq 0) {
                             git -c windows.appendAtomically=false stash drop $autostashRef 2>$null
                             Write-Warn "Local changes were restored on top of the updated codebase."
-                            Write-Warn "Review git diff / git status if Hermes behaves unexpectedly."
+                            Write-Warn "Review git diff / git status if Atlas behaves unexpectedly."
                         } else {
                             Write-Err "Update succeeded, but restoring local changes failed. Your changes are still preserved in git stash."
                             Write-Info "Resolve manually with: git stash apply $autostashRef"
@@ -1466,7 +1472,7 @@ function Install-Repository {
             } catch {
                 Write-Err "Could not move $InstallDir aside : $_"
                 Write-Info "Close any programs that might be using files in $InstallDir (editors,"
-                Write-Info "terminals, running hermes processes) and try again."
+                Write-Info "terminals, running Atlas processes) and try again."
                 throw
             }
         }
@@ -1564,7 +1570,7 @@ function Install-Repository {
     git -c windows.appendAtomically=false config windows.appendAtomically false 2>$null
     # Pin autocrlf=false on the managed clone so git never renormalizes the
     # repo's LF text files to CRLF in the working tree. Without this, the very
-    # next `hermes update` checkout aborts on a "dirty" tree the user never
+    # next `atlas update` checkout aborts on a "dirty" tree the user never
     # touched (see the update path above).
     git -c windows.appendAtomically=false config core.autocrlf false 2>$null
 
@@ -1608,7 +1614,7 @@ function Install-Venv {
         return
     }
 
-    # Re-resolve the interpreter before creating the venv.  Under Hermes-Setup.exe
+    # Re-resolve the interpreter before creating the venv.  Under Atlas-Setup.exe
     # each stage runs in its own powershell.exe, so the fallback the `python`
     # stage picked (e.g. 3.12 when 3.11 is absent) did NOT propagate into this
     # fresh process -- $PythonVersion is back at its "3.11" default.  Trusting it
@@ -1651,7 +1657,9 @@ function Install-Venv {
             # on failure — but only for tasks that were enabled to begin with.
             # Best-effort: a missing task just errors quietly.
             try {
-                schtasks /Query /FO CSV 2>$null | ConvertFrom-Csv | Where-Object { $_.TaskName -like '*Hermes_Gateway*' } | ForEach-Object {
+                schtasks /Query /FO CSV 2>$null | ConvertFrom-Csv | Where-Object {
+                    $_.TaskName -like '*Atlas_Gateway*' -or $_.TaskName -like '*Hermes_Gateway*'
+                } | ForEach-Object {
                     $tn = $_.TaskName
                     if ($_.Status -eq 'Disabled') {
                         Write-Info "  gateway autostart task $tn is already disabled; leaving it that way"
@@ -1665,7 +1673,8 @@ function Install-Venv {
             } catch {
                 Write-Warn "Could not enumerate gateway scheduled tasks: $($_.Exception.Message)"
             }
-            # The launcher CLI (hermes.exe) plus its child tree.
+            # The branded launcher/desktop plus the old compatibility CLI.
+            & taskkill /F /T /IM Atlas.exe /FI "PID ne $myPid" 2>$null | Out-Null
             & taskkill /F /T /IM hermes.exe /FI "PID ne $myPid" 2>$null | Out-Null
             # taskkill /IM hermes.exe is NOT enough: the gateway/agent that a
             # scheduled task or watchdog autostarts runs as
@@ -1779,7 +1788,7 @@ function Install-Venv {
         # user's gateway autostart in the disabled state. Same function scope,
         # so the list survives even under the stage-per-process bootstrap.
         # Deliberately NOT started here — dependencies aren't installed yet;
-        # the task fires normally on next logon and `hermes update` / the
+        # the task fires normally on next logon and `atlas update` / the
         # gateway resume path handles the immediate restart.
         if ($gatewayTasksDisabled -and $gatewayTasksDisabled.Count -gt 0) {
             foreach ($tn in $gatewayTasksDisabled) {
@@ -2010,7 +2019,7 @@ print(','.join(scripts))
     }
 
     # Verify the dashboard deps specifically -- they're the most common thing
-    # users hit and lazy-import errors from `hermes dashboard` are confusing.
+    # users hit and lazy-import errors from `atlas dashboard` are confusing.
     # If tier 1 failed (the common case), [web] was still picked up by tiers
     # 2-3; only tier 4 leaves you without it.
     $pythonExe = if (-not $NoVenv) { "$InstallDir\venv\Scripts\python.exe" } else { (& $UvCmd python find $PythonVersion) }
@@ -2034,11 +2043,11 @@ print(','.join(scripts))
         } catch { }
         $ErrorActionPreference = $prevEAP
         if (-not $webOk) {
-            Write-Warn "fastapi/uvicorn not importable -- `hermes dashboard` will not work."
+            Write-Warn "fastapi/uvicorn not importable -- `atlas dashboard` will not work."
             Write-Info "Attempting targeted install of [web] extra as last resort..."
             & $UvCmd pip install -e ".[web]"
             if ($LASTEXITCODE -eq 0) {
-                Write-Success "[web] extra installed; `hermes dashboard` should now work."
+                Write-Success "[web] extra installed; `atlas dashboard` should now work."
             } else {
                 Write-Warn "Could not install [web] extra. Run manually: uv pip install --python `"$pythonExe`" `"fastapi>=0.104,<1`" `"uvicorn[standard]>=0.24,<1`""
             }
@@ -2054,7 +2063,7 @@ print(','.join(scripts))
 }
 
 function Set-PathVariable {
-    Write-Info "Setting up hermes command..."
+    Write-Info "Setting up atlas command..."
     
     if ($NoVenv) {
         $hermesBin = "$InstallDir"
@@ -2062,8 +2071,8 @@ function Set-PathVariable {
         $hermesBin = "$InstallDir\venv\Scripts"
     }
     
-    # Add the venv Scripts dir to user PATH so hermes is globally available
-    # On Windows, the hermes.exe in venv\Scripts\ has the venv Python baked in
+    # Add the venv Scripts dir to user PATH so atlas is globally available.
+    # The atlas.exe entry point in venv\Scripts\ has the venv Python baked in.
     $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
     
     if ($currentPath -notlike "*$hermesBin*") {
@@ -2078,8 +2087,8 @@ function Set-PathVariable {
     }
     
     # Set HERMES_HOME so the Python code finds config/data in the right place.
-    # Only needed on Windows where we install to %LOCALAPPDATA%\hermes instead
-    # of the Unix default ~/.hermes
+    # Only needed on Windows where we install to %LOCALAPPDATA%\atlas instead
+    # of the Unix default ~/.atlas
     $currentHermesHome = [Environment]::GetEnvironmentVariable("HERMES_HOME", "User")
     if (-not $currentHermesHome -or $currentHermesHome -ne $HermesHome) {
         [Environment]::SetEnvironmentVariable("HERMES_HOME", $HermesHome, "User")
@@ -2090,11 +2099,11 @@ function Set-PathVariable {
     # Update current session
     $env:Path = "$hermesBin;$env:Path"
     
-    Write-Success "hermes command ready"
+    Write-Success "atlas command ready"
 }
 
 function Write-BootstrapMarker {
-    # Writes $InstallDir\.hermes-bootstrap-complete which tells the Hermes
+    # Writes $InstallDir\.hermes-bootstrap-complete which tells the Atlas
     # desktop app (apps/desktop/electron/main.ts) "install.ps1 ran
     # successfully — DON'T trigger the legacy first-launch bootstrap
     # runner."
@@ -2105,10 +2114,10 @@ function Write-BootstrapMarker {
     #   BOOTSTRAP_MARKER_SCHEMA_VERSION = 1 (line 187)
     #
     # Pinned commit/branch come from -Commit + -Branch flags (passed by
-    # Hermes-Setup.exe) or fall back to whatever git resolves in the
+    # Atlas-Setup.exe) or fall back to whatever git resolves in the
     # checkout. The desktop validates schemaVersion + pinnedCommit
     # length but doesn't enforce that HEAD matches the pin (users
-    # update via `hermes update` which moves HEAD legitimately).
+    # update via `atlas update` which moves HEAD legitimately).
     if (-not (Test-Path $InstallDir)) {
         Write-Warn "Skipping bootstrap marker: $InstallDir doesn't exist"
         return
@@ -2173,7 +2182,7 @@ function Write-BootstrapMarker {
 function Copy-ConfigTemplates {
     Write-Info "Setting up configuration files..."
     
-    # Create the HERMES_HOME directory structure ($HermesHome, default %LOCALAPPDATA%\hermes)
+    # Create the HERMES_HOME directory structure ($HermesHome, default %LOCALAPPDATA%\atlas)
     New-Item -ItemType Directory -Force -Path "$HermesHome\cron" | Out-Null
     New-Item -ItemType Directory -Force -Path "$HermesHome\sessions" | Out-Null
     New-Item -ItemType Directory -Force -Path "$HermesHome\logs" | Out-Null
@@ -2215,7 +2224,7 @@ function Copy-ConfigTemplates {
     # Create SOUL.md if it doesn't exist (global persona file).
     # IMPORTANT: write without a BOM.  Windows PowerShell 5.1's
     # ``Set-Content -Encoding UTF8`` writes UTF-8 WITH a byte-order-mark
-    # (the default PS5 behaviour), and Hermes's prompt-injection scanner
+    # (the default PS5 behaviour), and Atlas's prompt-injection scanner
     # flags the BOM as an invisible unicode character and refuses to
     # load the file.  PS7's ``-Encoding utf8NoBOM`` fixes that but we
     # don't control which PowerShell version the user has.  Go direct
@@ -2227,7 +2236,7 @@ function Copy-ConfigTemplates {
         # upgrades the old comment-only scaffold to this text on next run, so
         # drift is self-healing, but keep them in sync to avoid first-run churn.
         $soulContent = @"
-You are Hermes Agent, an intelligent AI assistant created by Nous Research. You are helpful, knowledgeable, and direct. You assist users with a wide range of tasks including answering questions, writing and editing code, analyzing information, creative work, and executing actions via your tools. You communicate clearly, admit uncertainty when appropriate, and prioritize being genuinely useful over being verbose unless otherwise directed below. Be targeted and efficient in your exploration and investigations.
+You are Atlas Agent, an intelligent AI assistant created by DealerBox. You are helpful, knowledgeable, and direct. You assist users with a wide range of tasks including answering questions, writing and editing code, analyzing information, creative work, and executing actions via your tools. You communicate clearly, admit uncertainty when appropriate, and prioritize being genuinely useful over being verbose unless otherwise directed below. Be targeted and efficient in your exploration and investigations.
 "@
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
         [System.IO.File]::WriteAllText($soulPath, $soulContent, $utf8NoBom)
@@ -2257,7 +2266,7 @@ You are Hermes Agent, an intelligent AI assistant created by Nous Research. You 
 
 function Install-NodeDeps {
     if (-not $HasNode) {
-        # Cross-process driver mode (Hermes-Setup.exe runs each -Stage NAME
+        # Cross-process driver mode (Atlas-Setup.exe runs each -Stage NAME
         # in a fresh powershell.exe) means $script:HasNode set by Stage-Node
         # in the previous process isn't visible here. Re-probe rather than
         # trust the stale global — Stage-Node already ran successfully or
@@ -2287,7 +2296,7 @@ function Install-NodeDeps {
     $npmCmd = Get-Command npm -ErrorAction SilentlyContinue
     if (-not $npmCmd) {
         Write-Warn "npm not found on PATH -- skipping Node.js dependencies."
-        Write-Info "Open a new PowerShell window and re-run 'hermes setup tools' later."
+        Write-Info "Open a new PowerShell window and re-run 'atlas setup tools' later."
         return
     }
     $npmExe = $npmCmd.Source
@@ -2490,7 +2499,7 @@ function Install-NodeDeps {
 # the per-user Electron download cache - most often a partial download resumed
 # into the same file, leaving concatenated junk - makes electron-builder's
 # `app-builder unpack-electron` extract a tree MISSING the electron binary, so
-# the final `electron` -> `Hermes` rename dies with ENOENT and every re-run
+# the final `electron` -> `Atlas` rename dies with ENOENT and every re-run
 # repeats the broken extraction forever.
 #
 # We deliberately do not validate the zip ourselves: the common
@@ -2604,7 +2613,7 @@ function Try-RestoreElectronDist {
 }
 
 function Install-Desktop {
-    # Build apps/desktop into a launchable Hermes.exe. Only called from
+    # Build apps/desktop into a launchable Atlas.exe. Only called from
     # Stage-Desktop, which is itself only included in the manifest when
     # -IncludeDesktop was passed to install.ps1.
     #
@@ -2617,13 +2626,13 @@ function Install-Desktop {
     # produces the unpacked binary at apps/desktop/release/<os>-unpacked/.
     #
     # The Tauri bootstrap installer's launch_hermes_desktop command
-    # resolves apps/desktop/release/win-unpacked/Hermes.exe directly,
+    # resolves apps/desktop/release/win-unpacked/Atlas.exe directly,
     # so an "unpacked" build (electron-builder --dir) is enough — we
     # don't need to produce an NSIS/MSI artifact here.
 
     # Always re-resolve Node here. Stages run in separate PowerShell processes,
     # so $script:HasNode from Stage-Node isn't visible; more importantly Test-Node
-    # enforces the build floor (^20.19 || >=22.12) and prepends the Hermes-managed
+    # enforces the build floor (^20.19 || >=22.12) and prepends the Atlas-managed
     # Node to PATH, so the build never runs on a too-old system Node -- the cause
     # of the opaque "Build desktop app ... exit code 1" failure (Vite crashes on
     # old Node).
@@ -2718,7 +2727,7 @@ function Install-Desktop {
     # 2. Build apps/desktop. `npm run pack` runs:
     #      assert-root-install + write-build-stamp + stage-native-deps +
     #      tsc -b + vite build + electron-builder --dir
-    # The --dir mode produces an unpacked Hermes.exe in
+    # The --dir mode produces an unpacked Atlas.exe in
     # apps/desktop/release/win-unpacked/ without bundling NSIS/MSI;
     # we don't need a distributable installer artifact, just a
     # launchable binary the Tauri installer can spawn.
@@ -2728,8 +2737,8 @@ function Install-Desktop {
     # apps/desktop/package.json's build.win block, electron-builder never
     # invokes signtool and therefore never fetches/extracts winCodeSign
     # (whose macOS symlinks crash 7-Zip on non-admin Windows — a dead end we
-    # are NOT trying to work around). The Hermes icon + product name are
-    # stamped onto Hermes.exe by our own rcedit step (Set-DesktopExeIdentity)
+    # are NOT trying to work around). The Atlas icon + product name are
+    # stamped onto Atlas.exe by our own rcedit step (Set-DesktopExeIdentity)
     # AFTER this build, completely decoupled from electron-builder signing.
     #
     # WIN_CSC_LINK and WIN_CSC_KEY_PASSWORD explicitly cleared as
@@ -2810,8 +2819,8 @@ function Install-Desktop {
     # 3. Sanity-check the produced binary. Probe both arches so this works
     # on x64 and arm64 build machines.
     $exeCandidates = @(
-        "$desktopDir\release\win-unpacked\Hermes.exe",
-        "$desktopDir\release\win-arm64-unpacked\Hermes.exe"
+        "$desktopDir\release\win-unpacked\Atlas.exe",
+        "$desktopDir\release\win-arm64-unpacked\Atlas.exe"
     )
     $found = $false
     $desktopExe = $null
@@ -2824,10 +2833,10 @@ function Install-Desktop {
         }
     }
     if (-not $found) {
-        throw "Desktop build completed but no Hermes.exe was found under $desktopDir\release\*-unpacked\"
+        throw "Desktop build completed but no Atlas.exe was found under $desktopDir\release\*-unpacked\"
     }
 
-    # 3b. The Hermes icon + identity are stamped onto Hermes.exe by the
+    # 3b. The Atlas icon + identity are stamped onto Atlas.exe by the
     #     electron-builder `afterPack` hook (apps/desktop/scripts/after-pack.mjs)
     #     during `npm run pack` above — for every build, so the installer's
     #     --update rebuild stays branded too. No separate stamp step needed here.
@@ -2836,7 +2845,7 @@ function Install-Desktop {
     #     unfixable symlink crash; the afterPack hook runs rcedit directly.
 
     # 4. Create Start Menu + Desktop shortcuts pointing DIRECTLY at the packed
-    #    Hermes.exe. We deliberately do NOT point them at `hermes desktop`: that
+    #    Atlas.exe. We deliberately do NOT point them at `atlas desktop`: that
     #    command rebuilds (npm install + electron-builder) on every launch,
     #    which would cost minutes each time. The packed exe is the consumer —
     #    launching it directly is instant, and updates flow through the
@@ -2867,8 +2876,8 @@ function New-DesktopShortcuts {
         }
 
         $targets = @(
-            (Join-Path ([Environment]::GetFolderPath('Programs')) 'Hermes.lnk'),
-            (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Hermes.lnk')
+            (Join-Path ([Environment]::GetFolderPath('Programs')) 'Atlas.lnk'),
+            (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Atlas.lnk')
         )
 
         foreach ($lnkPath in $targets) {
@@ -2881,7 +2890,7 @@ function New-DesktopShortcuts {
                 $sc.TargetPath = $TargetExe
                 $sc.WorkingDirectory = $workDir
                 $sc.IconLocation = $iconLocation
-                $sc.Description = 'Hermes Agent'
+                $sc.Description = 'Atlas Agent'
                 $sc.Save()
                 Write-Success "Shortcut created: $lnkPath"
             } catch {
@@ -2892,7 +2901,7 @@ function New-DesktopShortcuts {
         # Bust the Windows shell icon cache so the desktop/Start-Menu shortcut
         # repaints with the (possibly newly-stamped) icon instead of a stale
         # cached bitmap. Critical on the --update path: the exe was re-stamped
-        # with the Hermes icon, but without this the shortcut can keep drawing
+        # with the Atlas icon, but without this the shortcut can keep drawing
         # the old Electron icon until the user manually refreshes / reboots.
         # Best-effort and silent — never fail the install over a cosmetic cache.
         try {
@@ -2907,7 +2916,7 @@ function New-DesktopShortcuts {
 
 function Install-PlatformSdks {
     # Ensure messaging-platform SDKs matching tokens the user added to
-    # ~/.hermes/.env are importable.  Two problems this solves:
+    # ~/.atlas/.env are importable.  Two problems this solves:
     #
     # 1. The tiered `uv pip install` cascade above can fall through to a
     #    lower tier when the first fails (common when RL git deps choke),
@@ -3024,7 +3033,7 @@ function Invoke-SetupWizard {
         # The setup wizard prompts for API keys, model choice, persona, etc.
         # Non-interactive callers (GUI installer) own that UX themselves; let
         # them drive it after install.ps1 returns.
-        Write-Info "Skipping setup wizard (non-interactive). Configure via the GUI or 'hermes setup'."
+        Write-Info "Skipping setup wizard (non-interactive). Configure via the GUI or 'atlas setup'."
         return
     }
 
@@ -3034,7 +3043,7 @@ function Invoke-SetupWizard {
 
     Push-Location $InstallDir
 
-    # Run hermes setup using the venv Python directly (no activation needed)
+    # Run atlas setup using the venv Python directly (no activation needed)
     if (-not $NoVenv) {
         & ".\venv\Scripts\python.exe" -m hermes_cli.main setup
     } else {
@@ -3057,9 +3066,9 @@ function Start-GatewayIfConfigured {
 
     if (-not $hasMessaging) { return }
 
-    $hermesCmd = "$InstallDir\venv\Scripts\hermes.exe"
+    $hermesCmd = "$InstallDir\venv\Scripts\atlas.exe"
     if (-not (Test-Path $hermesCmd)) {
-        $hermesCmd = "hermes"
+        $hermesCmd = "atlas"
     }
 
     # If WhatsApp is enabled but not yet paired, run foreground for QR scan
@@ -3068,7 +3077,7 @@ function Start-GatewayIfConfigured {
     if ($whatsappEnabled -and -not (Test-Path $whatsappSession)) {
         Write-Host ""
         Write-Info "WhatsApp is enabled but not yet paired."
-        Write-Info "Running 'hermes whatsapp' to pair via QR code..."
+        Write-Info "Running 'atlas whatsapp' to pair via QR code..."
         Write-Host ""
         # Non-interactive callers (GUI installer, CI) skip the QR-pair prompt;
         # WhatsApp pairing requires a human looking at a phone camera, so the
@@ -3097,7 +3106,7 @@ function Start-GatewayIfConfigured {
     # services on the build agent, etc.).  Treat it like the user declined.
     if ($NonInteractive) {
         Write-Info "Skipping gateway autostart prompt (non-interactive)."
-        Write-Info "Start the gateway later with: hermes gateway"
+        Write-Info "Start the gateway later with: atlas gateway"
         return
     }
 
@@ -3115,10 +3124,10 @@ function Start-GatewayIfConfigured {
             Write-Info "Logs: $logFile"
             Write-Info "To stop: close the gateway process from Task Manager"
         } catch {
-            Write-Warn "Failed to start gateway. Run manually: hermes gateway"
+            Write-Warn "Failed to start gateway. Run manually: atlas gateway"
         }
     } else {
-        Write-Info "Skipped. Start the gateway later with: hermes gateway"
+        Write-Info "Skipped. Start the gateway later with: atlas gateway"
     }
 }
 
@@ -3146,17 +3155,17 @@ function Write-Completion {
     Write-Host ""
     Write-Host "* Commands:" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "   hermes              " -NoNewline -ForegroundColor Green
+    Write-Host "   atlas               " -NoNewline -ForegroundColor Green
     Write-Host "Start chatting"
-    Write-Host "   hermes setup        " -NoNewline -ForegroundColor Green
+    Write-Host "   atlas setup         " -NoNewline -ForegroundColor Green
     Write-Host "Configure API keys & settings"
-    Write-Host "   hermes config       " -NoNewline -ForegroundColor Green
+    Write-Host "   atlas config        " -NoNewline -ForegroundColor Green
     Write-Host "View/edit configuration"
-    Write-Host "   hermes config edit  " -NoNewline -ForegroundColor Green
+    Write-Host "   atlas config edit   " -NoNewline -ForegroundColor Green
     Write-Host "Open config in editor"
-    Write-Host "   hermes gateway      " -NoNewline -ForegroundColor Green
+    Write-Host "   atlas gateway       " -NoNewline -ForegroundColor Green
     Write-Host "Start messaging gateway (Telegram, Discord, etc.)"
-    Write-Host "   hermes update       " -NoNewline -ForegroundColor Green
+    Write-Host "   atlas update        " -NoNewline -ForegroundColor Green
     Write-Host "Update to latest version"
     Write-Host ""
     
@@ -3258,7 +3267,7 @@ $InstallStages = @(
     @{ Name = "git";              Title = "Installing Git";                       Category = "prereqs";      NeedsUserInput = $false; Worker = "Stage-Git" }
     @{ Name = "node";             Title = "Detecting Node.js";                    Category = "prereqs";      NeedsUserInput = $false; Worker = "Stage-Node" }
     @{ Name = "system-packages";  Title = "Installing ripgrep and ffmpeg";        Category = "prereqs";      NeedsUserInput = $false; Worker = "Stage-SystemPackages" }
-    @{ Name = "repository";       Title = "Cloning Hermes repository";            Category = "install";      NeedsUserInput = $false; Worker = "Stage-Repository" }
+    @{ Name = "repository";       Title = "Cloning Atlas repository";            Category = "install";      NeedsUserInput = $false; Worker = "Stage-Repository" }
     @{ Name = "venv";             Title = "Creating Python virtual environment";  Category = "install";      NeedsUserInput = $false; Worker = "Stage-Venv" }
     @{ Name = "dependencies";     Title = "Installing Python dependencies";       Category = "install";      NeedsUserInput = $false; Worker = "Stage-Dependencies" }
     @{ Name = "node-deps";        Title = "Installing Node.js dependencies";      Category = "install";      NeedsUserInput = $false; Worker = "Stage-NodeDeps" }
@@ -3266,11 +3275,11 @@ $InstallStages = @(
 if ($IncludeDesktop) {
     # Insert AFTER node-deps so workspace npm is already installed when
     # the desktop build runs. Inserted only when explicitly requested
-    # (Hermes-Setup.exe), never via the irm|iex CLI one-liner.
+    # (Atlas-Setup.exe), never via the irm|iex CLI one-liner.
     $InstallStages += @{ Name = "desktop"; Title = "Building desktop app"; Category = "install"; NeedsUserInput = $false; Worker = "Stage-Desktop" }
 }
 $InstallStages += @(
-    @{ Name = "path";             Title = "Adding Hermes to PATH";                Category = "finalize";     NeedsUserInput = $false; Worker = "Stage-Path" }
+    @{ Name = "path";             Title = "Adding Atlas to PATH";                Category = "finalize";     NeedsUserInput = $false; Worker = "Stage-Path" }
     @{ Name = "config-templates"; Title = "Writing configuration templates";      Category = "finalize";     NeedsUserInput = $false; Worker = "Stage-ConfigTemplates" }
     @{ Name = "platform-sdks";    Title = "Installing messaging platform SDKs";   Category = "finalize";     NeedsUserInput = $false; Worker = "Stage-PlatformSdks" }
     @{ Name = "bootstrap-marker"; Title = "Marking install complete";              Category = "finalize";     NeedsUserInput = $false; Worker = "Stage-BootstrapMarker" }

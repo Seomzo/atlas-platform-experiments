@@ -1,4 +1,4 @@
-"""Public Altas command-line interface."""
+"""Atlas control-plane command-line interface."""
 
 from __future__ import annotations
 
@@ -12,10 +12,10 @@ from altas import __version__
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="altas",
-        description="Altas managed AI worker platform",
+        prog="atlas-control",
+        description="Atlas managed AI worker control plane",
     )
-    parser.add_argument("--version", action="version", version=f"Altas {__version__}")
+    parser.add_argument("--version", action="version", version=f"Atlas {__version__}")
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     serve = subcommands.add_parser("serve", help="Start the local Control Plane")
@@ -96,7 +96,8 @@ def _doctor() -> int:
 
 
 def main(argv: list[str] | None = None) -> None:
-    args = _parser().parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = _parser().parse_args(raw_argv)
     handlers = {
         "serve": lambda: _serve(args),
         "worker": lambda: _worker(args),

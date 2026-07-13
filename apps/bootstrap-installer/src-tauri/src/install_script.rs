@@ -10,7 +10,7 @@
 //!
 //! Mirrors `apps/desktop/electron/bootstrap-runner.ts`'s `resolveInstallScript`,
 //! but the dev-checkout resolution is driven by an env var rather than the
-//! Electron app's APP_ROOT/../.. trick, because Hermes-Setup.exe is meant
+//! Electron app's APP_ROOT/../.. trick, because Atlas-Setup.exe is meant
 //! to live OUTSIDE any repo checkout.
 
 use anyhow::{anyhow, Context, Result};
@@ -72,7 +72,7 @@ fn is_valid_commit(s: &str) -> bool {
 
 /// Resolves the install script to use for this run.
 ///
-/// `pin` is the commit-or-branch from either Hermes-Setup's build-time
+/// `pin` is the commit-or-branch from either Atlas-Setup's build-time
 /// constant (compiled into the installer) or a runtime override.
 pub async fn resolve(
     kind: ScriptKind,
@@ -188,10 +188,16 @@ fn truncate_ref(s: &str) -> &str {
 /// Downloads to `dest_path` via reqwest with rustls. Atomically renames
 /// `dest_path.tmp` → `dest_path` so partial writes don't poison the cache.
 async fn download(kind: ScriptKind, commit_or_ref: &str, dest_path: &Path) -> Result<()> {
+    let repository = std::env::var("ATLAS_GITHUB_REPOSITORY")
+        .ok()
+        .or_else(|| option_env!("ATLAS_GITHUB_REPOSITORY").map(str::to_string))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "NousResearch/hermes-agent".to_string());
     let url = format!(
-        "https://raw.githubusercontent.com/NousResearch/hermes-agent/{}/scripts/{}",
+        "https://raw.githubusercontent.com/{}/{}/scripts/{}",
+        repository.trim_matches('/'),
         commit_or_ref,
-        kind.filename()
+        kind.filename(),
     );
 
     if let Some(parent) = dest_path.parent() {
@@ -210,7 +216,7 @@ async fn download(kind: ScriptKind, commit_or_ref: &str, dest_path: &Path) -> Re
 
     let response = reqwest::Client::new()
         .get(&url)
-        .header("User-Agent", "hermes-setup/0.0.1")
+        .header("User-Agent", "atlas-setup/0.0.1")
         .send()
         .await
         .with_context(|| format!("GET {url}"))?;

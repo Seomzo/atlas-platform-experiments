@@ -1,6 +1,6 @@
 > [!IMPORTANT]
 > 这是为署名与上游引擎维护而保留的 Hermes 历史译文。本仓库中的产品是
-> Altas；当前文档请参阅 [README.md](README.md)。
+> Atlas；当前文档请参阅 [README.md](README.md)。
 
 <p align="center">
   <img src="assets/banner.png" alt="Hermes Agent" width="100%">

@@ -1,6 +1,6 @@
 {
   "fixture_version": "1.0",
-  "notice": "Synthetic data for Altas prototype testing. Not exported from a dealership.",
+  "notice": "Synthetic data for Atlas prototype testing. Not exported from a dealership.",
   "stores": {
     "store-sunrise-vw": {
       "store_name": "Sunrise Volkswagen",

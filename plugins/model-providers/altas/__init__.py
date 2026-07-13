@@ -1,6 +1,6 @@
-"""Altas managed OpenAI-compatible model gateway profile.
+"""Atlas managed OpenAI-compatible model gateway profile.
 
-Selecting this profile opts the engine process into mandatory Altas policy
+Selecting this profile opts the engine process into mandatory Atlas policy
 enforcement before the model can receive and request tools.
 """
 
@@ -20,9 +20,9 @@ class AltasGatewayProfile(ProviderProfile):
         self, messages: list[dict[str, object]]
     ) -> list[dict[str, object]]:
         # Provider plugins are discovered eagerly, so managed mode must not be
-        # enabled at import time. This hook only runs when the Altas profile is
+        # enabled at import time. This hook only runs when the Atlas profile is
         # actually selected and runs before a response can contain tool calls.
-        os.environ["ALTAS_MANAGED_MODE"] = "1"
+        os.environ["ATLAS_MANAGED_MODE"] = "1"
         return messages
 
     def build_api_kwargs_extras(
@@ -47,7 +47,7 @@ class AltasGatewayProfile(ProviderProfile):
         """Return the small, environment-configurable prototype output cap."""
 
         del model
-        raw_value = os.getenv("ALTAS_DEFAULT_MODEL_MAX_TOKENS", "400").strip()
+        raw_value = os.getenv("ATLAS_DEFAULT_MODEL_MAX_TOKENS", "400").strip()
         try:
             value = int(raw_value)
         except ValueError:
@@ -56,20 +56,20 @@ class AltasGatewayProfile(ProviderProfile):
 
 
 def _gateway_url() -> str:
-    return os.getenv("ALTAS_MODEL_GATEWAY_URL", "http://127.0.0.1:8787/v1").rstrip("/")
+    return os.getenv("ATLAS_MODEL_GATEWAY_URL", "http://127.0.0.1:8787/v1").rstrip("/")
 
 
 def _managed_headers() -> dict[str, str]:
     """Build fresh, request-scoped headers for one managed engine process."""
 
     mapping = {
-        "ALTAS_LEASE_TOKEN": "X-Altas-Lease",
-        "ALTAS_TENANT_ID": "X-Altas-Tenant-ID",
-        "ALTAS_STORE_ID": "X-Altas-Store-ID",
-        "ALTAS_AGENT_ID": "X-Altas-Agent-ID",
-        "ALTAS_JOB_ID": "X-Altas-Job-ID",
-        "ALTAS_CLAIM_TOKEN": "X-Altas-Claim-Token",
-        "ALTAS_CORRELATION_ID": "X-Altas-Correlation-ID",
+        "ATLAS_LEASE_TOKEN": "X-Atlas-Lease",
+        "ATLAS_TENANT_ID": "X-Atlas-Tenant-ID",
+        "ATLAS_STORE_ID": "X-Atlas-Store-ID",
+        "ATLAS_AGENT_ID": "X-Atlas-Agent-ID",
+        "ATLAS_JOB_ID": "X-Atlas-Job-ID",
+        "ATLAS_CLAIM_TOKEN": "X-Atlas-Claim-Token",
+        "ATLAS_CORRELATION_ID": "X-Atlas-Correlation-ID",
     }
     return {
         header: value
@@ -81,9 +81,9 @@ def _managed_headers() -> dict[str, str]:
 altas = AltasGatewayProfile(
     name="altas",
     aliases=("altas-gateway", "altas-managed"),
-    env_vars=("ALTAS_DEVICE_TOKEN",),
-    display_name="Altas Gateway",
-    description="Managed model access through the Altas Control Plane",
+    env_vars=("ATLAS_DEVICE_TOKEN",),
+    display_name="Atlas Gateway",
+    description="Managed model access through the Atlas Control Plane",
     base_url=_gateway_url(),
     auth_type="api_key",
     supports_health_check=True,

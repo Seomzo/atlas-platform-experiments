@@ -58,6 +58,7 @@ from hermes_cli.setup import (
     prompt_yes_no,
 )
 from hermes_cli.colors import Colors, color
+from hermes_cli.brand import is_atlas_branded, product_name
 
 logger = logging.getLogger(__name__)
 
@@ -4777,12 +4778,24 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
 
     from gateway.run import start_gateway
 
-    print("┌─────────────────────────────────────────────────────────┐")
-    print("│           ⚕ Hermes Gateway Starting...                 │")
-    print("├─────────────────────────────────────────────────────────┤")
-    print("│  Messaging platforms + cron scheduler                    │")
-    print("│  Press Ctrl+C to stop                                   │")
-    print("└─────────────────────────────────────────────────────────┘")
+    gateway_box_width = 57
+    gateway_accent = Colors.ATLAS_BLUE if is_atlas_branded() else Colors.CYAN
+
+    def _gateway_line(message: str, *, center: bool = False) -> str:
+        remaining = max(0, gateway_box_width - len(message))
+        if center:
+            left = remaining // 2
+            body = (" " * left) + message + (" " * (remaining - left))
+        else:
+            body = message + (" " * remaining)
+        return color(f"│{body}│", gateway_accent)
+
+    print(color("┌" + ("─" * gateway_box_width) + "┐", gateway_accent))
+    print(_gateway_line(f"{product_name()} Gateway Starting...", center=True))
+    print(color("├" + ("─" * gateway_box_width) + "┤", gateway_accent))
+    print(_gateway_line("  Messaging platforms + cron scheduler"))
+    print(_gateway_line("  Press Ctrl+C to stop"))
+    print(color("└" + ("─" * gateway_box_width) + "┘", gateway_accent))
     print()
 
     # Exit with code 1 if gateway fails to connect any platform,

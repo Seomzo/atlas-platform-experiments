@@ -1,5 +1,5 @@
 name: altas-gateway-provider
 kind: model-provider
 version: 0.1.0
-description: Altas managed model gateway
-author: Altas
+description: Atlas managed model gateway
+author: Atlas

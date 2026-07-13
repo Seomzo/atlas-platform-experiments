@@ -2,6 +2,7 @@ import { type ScrollBoxHandle, useApp, useHasSelection, useSelection, useStdout,
 import { useStore } from '@nanostores/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+import { SHORT_NAME } from '../brand.js'
 import { STARTUP_RESUME_ID } from '../config/env.js'
 import { MAX_HISTORY, WHEEL_SCROLL_STEP } from '../config/limits.js'
 import { RESIZE_COALESCE_MS } from '../config/timing.js'
@@ -582,7 +583,7 @@ export function useMainApp(gw: GatewayClient) {
   const tabCwd = ui.info?.cwd
 
   useTerminalTitle(
-    model ? composeTabTitle(marker, ui.sessionTitle, model, tabCwd ? shortCwd(tabCwd, 24) : '') : 'Hermes'
+    model ? composeTabTitle(marker, ui.sessionTitle, model, tabCwd ? shortCwd(tabCwd, 24) : '') : SHORT_NAME
   )
 
   useEffect(() => {

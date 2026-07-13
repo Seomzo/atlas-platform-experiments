@@ -1,14 +1,14 @@
-# Altas Security and Trust Model
+# Atlas Security and Trust Model
 
 ## Purpose
 
-This document defines what Altas protects, which components are trusted, and
+This document defines what Atlas protects, which components are trusted, and
 what the prototype does not yet claim. It is a design contract, not a
 compliance certification.
 
 ## Security statement
 
-Altas assumes that:
+Atlas assumes that:
 
 - Model output may be incorrect or adversarial.
 - Content read from browsers, messages, files, and APIs may contain prompt
@@ -25,7 +25,7 @@ redaction, and approval heuristics are not authorization boundaries.
 
 Highest-value assets are:
 
-- Altas model-provider credentials
+- Atlas model-provider credentials
 - Tekion app-level credentials
 - Dealer/store credentials and browser sessions
 - Dealership operational data
@@ -107,7 +107,7 @@ dealership payloads.
 | Prompt asks worker to add a store | Server entitlement check | Stripe-backed upgrade workflow |
 | Local config claims another tenant/store | Tenant derived from device; relationship check | Signed asymmetric requests + nonce replay protection |
 | Customer copies install directory | No provider keys; revocable device credential | Device-bound key + attestation where practical |
-| Model calls provider directly | Altas gateway profile; production network policy | Egress allowlist |
+| Model calls provider directly | Atlas gateway profile; production network policy | Egress allowlist |
 | Policy service times out | Managed guard denies | Multi-region policy service and cached lease policy with bounded TTL |
 | Device is remotely disabled | Live device recheck on protected calls | Push invalidation and fleet alerting |
 | Job is abandoned or completed by an old attempt | One active claim per device, visibility timeout, one-time hashed claim token | Durable queue with lease renewal and dead-letter policy |
@@ -116,7 +116,7 @@ dealership payloads.
 | Secret reaches model/log | Opaque vault contract; safe metadata | Automated data-loss-prevention tests |
 | Store browser session leaks | Per-store profile requirement | OS user/container isolation and encrypted storage |
 | Malicious skill/plugin | Curated signed packs only | Signature verification and release provenance |
-| Upstream update changes behavior | Pinned commit and patch ledger | Staged signed Altas update channel |
+| Upstream update changes behavior | Pinned commit and patch ledger | Staged signed Atlas update channel |
 
 ## Prototype limitations
 
@@ -132,7 +132,7 @@ The current prototype:
 - Uses fixture data, not a live Tekion connector.
 - Runs the fixture workflow directly; it does not yet launch or supervise a
   Hermes engine process.
-- Enables the Hermes dispatch guard only when the Altas provider selects
+- Enables the Hermes dispatch guard only when the Atlas provider selects
   managed mode. The upstream developer CLI remains intentionally unmanaged and
   is not the commercial worker. A production supervisor must set managed mode,
   isolate the process, and restrict network egress before launching the engine.
@@ -157,7 +157,7 @@ Before a dealership pilot with real data:
 
 1. External architecture and application security review.
 2. Tekion partner agreement and API/browser authorization review.
-3. Commercial name and trademark review for Altas.
+3. Commercial name and trademark review for Atlas.
 4. OS-specific secure-storage and installer review.
 5. Dependency, asset-license, and SBOM review.
 6. Data-processing agreement, retention, deletion, and backup design.

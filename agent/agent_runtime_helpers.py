@@ -2312,7 +2312,7 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
             )
 
     # Reuse the same execution-middleware boundary as the sequential agent
-    # loop. In Altas managed mode that boundary performs the mandatory policy
+    # loop. In Atlas managed mode that boundary performs the mandatory policy
     # check for agent-owned tools before their handler can run.
     from agent.tool_executor import _run_agent_tool_execution_middleware
 

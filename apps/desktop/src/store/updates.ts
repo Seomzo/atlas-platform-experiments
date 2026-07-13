@@ -375,15 +375,15 @@ export async function applyUpdates(opts: DesktopUpdateApplyOptions = {}): Promis
     const result = await bridge.apply(opts)
 
     // CLI install with no staged updater: not an error — the user just runs
-    // `hermes update` themselves. Land on a dedicated manual state so the
+    // `atlas update` themselves. Land on a dedicated manual state so the
     // overlay shows the command + copy button instead of a dead retry loop.
     if (result?.manual) {
       $updateApply.set({
         ...IDLE,
         applying: false,
         stage: 'manual',
-        message: result.command ?? 'hermes update',
-        command: result.command ?? 'hermes update'
+        message: result.command ?? 'atlas update',
+        command: result.command ?? 'atlas update'
       })
 
       return result
@@ -538,7 +538,7 @@ export async function applyBackendUpdate(): Promise<DesktopUpdateApplyResult> {
 
     if (!started.ok) {
       const message = (started as { message?: string }).message || translateNow('updates.applyStatus.notAvailable')
-      const command = (started as { update_command?: string }).update_command || 'hermes update'
+      const command = (started as { update_command?: string }).update_command || 'atlas update'
       $backendUpdateApply.set({ ...IDLE, applying: false, stage: 'manual', message, command })
 
       return { ok: false, error: 'manual', manual: true, message, command }

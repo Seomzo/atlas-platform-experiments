@@ -31,7 +31,7 @@ _TOOL_CAPABILITIES = {
 
 def managed_mode_enabled(env: Mapping[str, str] | None = None) -> bool:
     values = os.environ if env is None else env
-    return values.get("ALTAS_MANAGED_MODE", "").strip().lower() in {
+    return values.get("ATLAS_MANAGED_MODE", "").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -42,52 +42,52 @@ def managed_mode_enabled(env: Mapping[str, str] | None = None) -> bool:
 def _required(env: Mapping[str, str], key: str) -> str:
     value = env.get(key, "").strip()
     if not value:
-        raise ValueError(f"{key} is required in Altas managed mode")
+        raise ValueError(f"{key} is required in Atlas managed mode")
     return value
 
 
 def _lease_token(env: Mapping[str, str]) -> str:
-    direct = env.get("ALTAS_LEASE_TOKEN", "").strip()
+    direct = env.get("ATLAS_LEASE_TOKEN", "").strip()
     if direct:
         return direct
-    lease_file = env.get("ALTAS_LEASE_FILE", "").strip()
+    lease_file = env.get("ATLAS_LEASE_FILE", "").strip()
     if not lease_file:
-        raise ValueError("ALTAS_LEASE_TOKEN or ALTAS_LEASE_FILE is required")
+        raise ValueError("ATLAS_LEASE_TOKEN or ATLAS_LEASE_FILE is required")
     path = Path(lease_file).expanduser()
     token = path.read_text(encoding="utf-8").strip()
     if not token:
-        raise ValueError("Altas lease file is empty")
+        raise ValueError("Atlas lease file is empty")
     return token
 
 
 def _device_token(env: Mapping[str, str]) -> str:
     """Resolve the prototype device credential without logging it.
 
-    `ALTAS_DEVICE_TOKEN` is supported only for local development and
+    `ATLAS_DEVICE_TOKEN` is supported only for local development and
     short-lived process injection. Managed installs should supply a keyring
     handle with the four-part form `tenant/store/kind/name`.
     """
 
-    direct = env.get("ALTAS_DEVICE_TOKEN", "").strip()
+    direct = env.get("ATLAS_DEVICE_TOKEN", "").strip()
     if direct:
         return direct
-    raw_handle = env.get("ALTAS_DEVICE_TOKEN_HANDLE", "").strip()
+    raw_handle = env.get("ATLAS_DEVICE_TOKEN_HANDLE", "").strip()
     parts = raw_handle.split("/")
     if len(parts) != 4 or any(not part for part in parts):
-        raise ValueError("ALTAS_DEVICE_TOKEN_HANDLE must be tenant/store/kind/name")
+        raise ValueError("ATLAS_DEVICE_TOKEN_HANDLE must be tenant/store/kind/name")
     return SystemKeyringVault().resolve(SecretHandle(*parts))
 
 
 def _context(env: Mapping[str, str]) -> ManagedContext:
     return ManagedContext(
-        tenant_id=_required(env, "ALTAS_TENANT_ID"),
-        store_id=_required(env, "ALTAS_STORE_ID"),
-        device_id=_required(env, "ALTAS_DEVICE_ID"),
-        agent_id=_required(env, "ALTAS_AGENT_ID"),
-        job_id=_required(env, "ALTAS_JOB_ID"),
-        correlation_id=env.get("ALTAS_CORRELATION_ID", "").strip()
-        or _required(env, "ALTAS_JOB_ID"),
-        user_id=env.get("ALTAS_USER_ID", "").strip() or "system",
+        tenant_id=_required(env, "ATLAS_TENANT_ID"),
+        store_id=_required(env, "ATLAS_STORE_ID"),
+        device_id=_required(env, "ATLAS_DEVICE_ID"),
+        agent_id=_required(env, "ATLAS_AGENT_ID"),
+        job_id=_required(env, "ATLAS_JOB_ID"),
+        correlation_id=env.get("ATLAS_CORRELATION_ID", "").strip()
+        or _required(env, "ATLAS_JOB_ID"),
+        user_id=env.get("ATLAS_USER_ID", "").strip() or "system",
     )
 
 
@@ -123,28 +123,28 @@ def guard_tool_call(
             return GuardResult(
                 False,
                 "SCOPE_MISMATCH",
-                "Altas denied this action because its store scope does not match.",
+                "Atlas denied this action because its store scope does not match.",
             )
 
         capability = _TOOL_CAPABILITIES.get(tool_name, f"tool.{tool_name}")
         with AltasControlPlaneClient(
-            base_url=_required(env, "ALTAS_CONTROL_PLANE_URL"),
+            base_url=_required(env, "ATLAS_CONTROL_PLANE_URL"),
             device_token=_device_token(env),
-            timeout_seconds=float(env.get("ALTAS_POLICY_TIMEOUT_SECONDS", "3")),
+            timeout_seconds=float(env.get("ATLAS_POLICY_TIMEOUT_SECONDS", "3")),
         ) as client:
             decision = client.evaluate_policy(
                 lease=_lease_token(env),
                 context=context,
-                claim_token=_required(env, "ALTAS_CLAIM_TOKEN"),
+                claim_token=_required(env, "ATLAS_CLAIM_TOKEN"),
                 capability=capability,
                 tool_name=tool_name,
             )
         if decision.allowed:
-            return GuardResult(True, decision.reason_code, "Allowed by Altas policy")
+            return GuardResult(True, decision.reason_code, "Allowed by Atlas policy")
         return GuardResult(
             False,
             decision.reason_code,
-            f"Altas policy denied this action ({decision.reason_code}).",
+            f"Atlas policy denied this action ({decision.reason_code}).",
         )
     except Exception:
         # Intentionally avoid embedding exception details: HTTP client errors
@@ -153,7 +153,7 @@ def guard_tool_call(
         return GuardResult(
             False,
             "POLICY_UNAVAILABLE",
-            "Altas could not verify permission for this action. No tool was run.",
+            "Atlas could not verify permission for this action. No tool was run.",
         )
 
 

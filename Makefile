@@ -1,38 +1,47 @@
 PYTHON ?= .venv/bin/python
-ALTAS_DEMO_ENV = \
-	ALTAS_DATABASE_PATH=data/altas-control-plane.sqlite3 \
-	ALTAS_LEASE_SIGNING_KEY=altas-demo-signing-key-change-me-00000001 \
-	ALTAS_ADMIN_TOKEN=altas-demo-admin-token-v1 \
-	ALTAS_SEED_DEMO_DATA=true \
-	ALTAS_MODEL_MOCK=true
+ATLAS_DEMO_ENV = \
+	ATLAS_DATABASE_PATH=data/atlas-control-plane.sqlite3 \
+	ATLAS_LEASE_SIGNING_KEY=atlas-demo-signing-key-change-me-00000001 \
+	ATLAS_ADMIN_TOKEN=atlas-demo-admin-token-v1 \
+	ATLAS_SEED_DEMO_DATA=true \
+	ATLAS_MODEL_MOCK=true
 
-.PHONY: altas-dev altas-worker altas-test altas-lint altas-smoke altas-reset
+.PHONY: atlas-dev atlas-worker atlas-test atlas-lint atlas-smoke atlas-reset \
+	altas-dev altas-worker altas-test altas-lint altas-smoke altas-reset
 
-altas-dev:
+atlas-dev:
 	@mkdir -p data
-	$(ALTAS_DEMO_ENV) $(PYTHON) -m altas serve --host 127.0.0.1 --port 8787
+	$(ATLAS_DEMO_ENV) $(PYTHON) -m altas serve --host 127.0.0.1 --port 8787
 
-altas-worker:
-	$(ALTAS_DEMO_ENV) \
-		ALTAS_CONTROL_PLANE_URL=http://127.0.0.1:8787 \
-		ALTAS_DEVICE_ID=device_demo_local_worker \
-		ALTAS_DEVICE_TOKEN=altas-demo-device-secret-v1 \
-		ALTAS_TENANT_ID=tenant_demo_fixed_ops \
-		ALTAS_STORE_ID=store-sunrise-vw \
-		ALTAS_AGENT_ID=agent_demo_altas \
+atlas-worker:
+	$(ATLAS_DEMO_ENV) \
+		ATLAS_CONTROL_PLANE_URL=http://127.0.0.1:8787 \
+		ATLAS_DEVICE_ID=device_demo_local_worker \
+		ATLAS_DEVICE_TOKEN=atlas-demo-device-secret-v1 \
+		ATLAS_TENANT_ID=tenant_demo_fixed_ops \
+		ATLAS_STORE_ID=store-sunrise-vw \
+		ATLAS_AGENT_ID=agent_demo_atlas \
 		$(PYTHON) -m altas worker --once
 
-altas-test:
-	$(PYTHON) -m pytest -q tests/altas
+atlas-test:
+	scripts/run_tests.sh tests/altas -q
 
-altas-lint:
+atlas-lint:
 	$(PYTHON) -m ruff check altas tests/altas scripts/altas-smoke.py plugins/model-providers/altas model_tools.py agent/tool_executor.py agent/agent_runtime_helpers.py
 	$(PYTHON) -m ruff format --check altas tests/altas scripts/altas-smoke.py plugins/model-providers/altas
 	node --check altas/control_plane/static/app.js
 	git diff --check
 
-altas-smoke:
-	$(ALTAS_DEMO_ENV) PYTHONPATH=. $(PYTHON) scripts/altas-smoke.py
+atlas-smoke:
+	$(ATLAS_DEMO_ENV) PYTHONPATH=. $(PYTHON) scripts/altas-smoke.py
 
-altas-reset:
-	rm -f data/altas-control-plane.sqlite3 data/altas-control-plane.sqlite3-shm data/altas-control-plane.sqlite3-wal
+atlas-reset:
+	rm -f data/atlas-control-plane.sqlite3 data/atlas-control-plane.sqlite3-shm data/atlas-control-plane.sqlite3-wal
+
+# Compatibility aliases for the prototype's original misspelled target names.
+altas-dev: atlas-dev
+altas-worker: atlas-worker
+altas-test: atlas-test
+altas-lint: atlas-lint
+altas-smoke: atlas-smoke
+altas-reset: atlas-reset

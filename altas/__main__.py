@@ -1,4 +1,4 @@
-"""Run the public Altas command line with `python -m altas`."""
+"""Run the public Atlas command line with `python -m altas`."""
 
 from altas.cli import main
 

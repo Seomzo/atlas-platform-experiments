@@ -1,16 +1,16 @@
-# Altas Managed AI Worker Platform
+# Atlas Managed AI Worker Platform
 
 ## Product definition
 
-Altas is a managed AI worker platform for dealership fixed-operations teams.
+Atlas is a managed AI worker platform for dealership fixed-operations teams.
 It gives a dealership a worker that can analyze operational data, run approved
 browser and API workflows, generate recurring reports, and communicate with
-managers—while Altas retains operational control over licensing, store access,
+managers—while Atlas retains operational control over licensing, store access,
 model usage, updates, support, and revocation.
 
-Altas is not a generic chatbot, a prompt bundle, or a raw copy of an agent
+Atlas is not a generic chatbot, a prompt bundle, or a raw copy of an agent
 repository. Hermes Agent supplies a capable reasoning and tool-execution
-engine. Altas is the commercial system around that engine:
+engine. Atlas is the commercial system around that engine:
 
 - A managed worker runtime on an isolated local or hosted machine.
 - A cloud control plane that owns identity, policy, entitlements, jobs, model
@@ -19,7 +19,7 @@ engine. Altas is the commercial system around that engine:
 - Versioned dealership workflow packs, beginning with fixed operations.
 - A support console for operating a fleet of workers across customers.
 
-The first product is **Altas for Fixed Ops**.
+The first product is **Atlas for Fixed Ops**.
 
 ## Why it exists
 
@@ -37,7 +37,7 @@ product must also assume that:
 - Support, updates, auditability, and billing enforcement are part of the
   product—not back-office afterthoughts.
 
-Altas addresses those realities by separating execution from authority.
+Atlas addresses those realities by separating execution from authority.
 
 ## Core product principle
 
@@ -53,12 +53,12 @@ and executes them.
 
 ## Product promise
 
-For a dealership, Altas should feel like:
+For a dealership, Atlas should feel like:
 
 > “Our fixed-ops worker runs the right reports and follow-up every day, and we
 > can see what it did.”
 
-For the Altas operator, the platform should provide:
+For the Atlas operator, the platform should provide:
 
 > “We can identify, authorize, meter, update, support, and disable every worker,
 > store, capability, and model request.”
@@ -69,20 +69,20 @@ For the Altas operator, the platform should provide:
 
 Needs a concise daily view of advisor, repair-order, labor, parts, and exception
 performance without manually assembling data. Interacts through a business
-channel such as Slack, email, or the Altas web experience.
+channel such as Slack, email, or the Atlas web experience.
 
 ### Dealer-group administrator
 
 Authorizes stores, sees which workers and integrations are active, manages
 users, and understands the subscription and usage.
 
-### Altas fleet operator
+### Atlas fleet operator
 
 Monitors health, failures, versions, model cost, policy denials, and connector
 status across all tenants. Can perform safe support actions with a complete
 audit trail.
 
-### Altas workflow engineer
+### Atlas workflow engineer
 
 Builds and tests named, versioned workflows. Does not grant those workflows
 authority; the control plane and entitlement system do.
@@ -105,7 +105,7 @@ security requirements are verified with the real partner environment.
 
 ## System components
 
-### Altas Control Plane
+### Atlas Control Plane
 
 The Control Plane is the source of truth for:
 
@@ -126,7 +126,7 @@ The Control Plane is the source of truth for:
 
 No prompt or editable local configuration can create a paid entitlement.
 
-### Altas Worker
+### Atlas Worker
 
 The worker is an outbound-connected supervisor that:
 
@@ -146,10 +146,10 @@ subscriptions or permissions.
 ### Hermes engine adapter
 
 Hermes Agent supplies the reasoning loop, memory primitives, skill system,
-gateway adapters, browser tooling, and desktop foundation. Altas integrates at
+gateway adapters, browser tooling, and desktop foundation. Atlas integrates at
 the smallest stable seams:
 
-- OpenAI-compatible model-provider adapter to the Altas gateway
+- OpenAI-compatible model-provider adapter to the Atlas gateway
 - Mandatory managed-mode guard at central tool dispatch
 - Isolated engine home/profile
 - Curated toolsets and workflow packs
@@ -159,10 +159,10 @@ Internal upstream namespaces remain intact in the first product slice. A
 global source rename would add regression and update risk without improving
 customer-facing branding or security.
 
-### Altas Model Gateway
+### Atlas Model Gateway
 
-Production workers never receive Altas-owned model-provider master keys.
-Workers call an Altas OpenAI-compatible endpoint with a scoped worker
+Production workers never receive Atlas-owned model-provider master keys.
+Workers call an Atlas OpenAI-compatible endpoint with a scoped worker
 credential. The gateway:
 
 - Revalidates the device and lease.
@@ -199,18 +199,18 @@ those platforms can handle real dealer credentials.
 
 The intended authorization model contains two separate concepts:
 
-1. Altas/Tekion app-level identity controlled by the vendor.
+1. Atlas/Tekion app-level identity controlled by the vendor.
 2. Dealer/store-level authorization controlled by the dealership.
 
-Tekion authorization does not create an Altas commercial entitlement. A dealer
-may authorize multiple stores, while the Altas subscription authorizes only a
+Tekion authorization does not create an Atlas commercial entitlement. A dealer
+may authorize multiple stores, while the Atlas subscription authorizes only a
 subset.
 
 Each store receives an isolated connector and browser profile. Production
 starts read-only. Write-back workflows require separate scopes, approval,
 idempotency, and rollback design.
 
-### Altas Control Center
+### Atlas Control Center
 
 The customer-facing status view and internal fleet console eventually become
 separate permissioned applications. The prototype uses one localhost-only
@@ -227,7 +227,7 @@ The first console covers:
 
 ### Desktop wrapper
 
-The upstream Electron application is the foundation for Altas Desktop. Its
+The upstream Electron application is the foundation for Atlas Desktop. Its
 product role is setup and supervision, not security policy. The commercial
 wrapper will eventually handle:
 
@@ -239,7 +239,7 @@ wrapper will eventually handle:
 - Connector authorization
 - Channel connection
 - Health and support status
-- Signed Altas updates
+- Signed Atlas updates
 
 The prototype prioritizes the control-plane/worker contract before packaging
 the desktop installer.
@@ -282,23 +282,23 @@ Policy service errors produce `POLICY_UNAVAILABLE` and deny the action.
 
 ## Deployment modes
 
-### Cloud-hosted Altas
+### Cloud-hosted Atlas
 
-Runs on Altas-controlled infrastructure. This should become the preferred
+Runs on Atlas-controlled infrastructure. This should become the preferred
 premium deployment because it improves monitoring, update control, isolation,
 and support. Browser authentication, MFA, network allowlists, and per-tenant
 isolation must be validated before broad availability.
 
-### Managed local Altas
+### Managed local Atlas
 
-Runs on a dedicated dealership or Altas-provided machine and connects outbound
+Runs on a dedicated dealership or Atlas-provided machine and connects outbound
 to the Control Plane. This is the primary design-partner deployment because it
 matches browser-heavy workflows while retaining central policy and support.
 
 ### Customer-owned device
 
 Useful for trials and low-risk workflows. It is the lowest-trust option. The
-platform assumes a local administrator can inspect or modify software. Altas
+platform assumes a local administrator can inspect or modify software. Atlas
 protects its own cloud resources and business services; it does not claim to
 control the customer's machine.
 
@@ -338,7 +338,7 @@ cross-store exports.
 
 ## Reliability model
 
-Altas assumes models, browsers, APIs, networks, and local processes fail.
+Atlas assumes models, browsers, APIs, networks, and local processes fail.
 Reliability comes from:
 
 - Idempotent jobs and explicit state transitions
@@ -379,7 +379,7 @@ model and non-claims.
 - Remote shell
 - Silent remote desktop access
 - General-purpose customer coding agent
-- Strong control over customer-owned dealer credentials outside Altas
+- Strong control over customer-owned dealer credentials outside Atlas
 - Production compliance certification
 
 These are roadmap items or explicit exclusions, not hidden mock behavior.
@@ -396,12 +396,12 @@ The prototype is successful when:
 6. Expired or tampered leases fail closed.
 7. Raw sentinel secrets never appear in API responses, logs, reports, prompts,
    or audit metadata.
-8. Altas product surfaces do not expose provider keys or editable production
+8. Atlas product surfaces do not expose provider keys or editable production
    policy.
 
 ## Internal north star
 
-Altas should make a complex worker fleet feel simple to the dealership and
+Atlas should make a complex worker fleet feel simple to the dealership and
 legible to the operator. The durable business is not ownership of one agent
 loop. It is the managed system of permissions, workflows, integrations,
 support, data boundaries, reliability, and continuous improvement around that

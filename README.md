@@ -1,12 +1,12 @@
-# Altas
+# Atlas
 
 **Managed AI workers for dealership fixed operations.**
 
-Altas turns the open-source Hermes Agent engine into a controlled, observable,
+Atlas turns the open-source Hermes Agent engine into a controlled, observable,
 subscription-ready worker platform. The prototype in this repository proves
-the business-critical path: a local worker enrolls with the Altas Control
+the business-critical path: a local worker enrolls with the Atlas Control
 Plane, receives a short-lived lease, is authorized against store and tool
-entitlements, runs a fixed-ops workflow, routes model use through an Altas
+entitlements, runs a fixed-ops workflow, routes model use through an Atlas
 gateway, and reports results and audit events back to an operator console.
 
 > Status: local prototype for development and design-partner testing. It is
@@ -14,11 +14,11 @@ gateway, and reports results and audit events back to an operator console.
 
 ## The product boundary
 
-Altas follows one rule:
+Atlas follows one rule:
 
 > **Local execution. Cloud control.**
 
-The local engine can reason and execute approved workflows. The Altas Control
+The local engine can reason and execute approved workflows. The Atlas Control
 Plane remains the source of truth for device identity, subscriptions, store
 access, tool permissions, model usage, jobs, audit history, support actions,
 and revocation.
@@ -27,18 +27,18 @@ and revocation.
 Operator / Slack / Web
           │
           ▼
-   Altas Control Plane
+   Atlas Control Plane
    identity · leases · policy · jobs · model gateway · audit
           │
           ▼
-     Altas Worker
+     Atlas Worker
    managed context · named workflows · connector boundary
           │
           ▼
   Tekion connector boundary
 ```
 
-Hermes Agent is the replaceable engine underneath Altas—not the commercial
+Hermes Agent is the replaceable engine underneath Atlas—not the commercial
 product or the security boundary. Product code is isolated under the
 `altas/` namespace, and unavoidable upstream integration patches are kept
 small and documented.
@@ -58,12 +58,12 @@ small and documented.
   provider.
 - A fixture-backed fixed-ops report workflow that proves orchestration without
   claiming a live Tekion integration.
-- A polished local Altas Control Center for fleet, job, usage, and audit
+- A polished local Atlas Control Center for fleet, job, usage, and audit
   visibility.
 - A managed Hermes dispatch guard that denies tool execution when policy
   cannot be verified.
-- A public `altas` CLI while upstream internal module names remain intact for
-  maintainability.
+- A direct public `atlas` CLI backed by the same in-process engine, while
+  upstream internal module names remain intact for maintainability.
 
 ## Quick start
 
@@ -78,8 +78,9 @@ Prerequisites:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements-altas-dev.txt
-make altas-dev
+python -m pip install -r requirements-atlas-dev.txt
+python -m pip install -e .
+make atlas-dev
 ```
 
 Then open [http://127.0.0.1:8787](http://127.0.0.1:8787).
@@ -88,26 +89,46 @@ In another terminal, run the seeded worker:
 
 ```bash
 source .venv/bin/activate
-make altas-worker
+make atlas-worker
 ```
 
 Queue a fixed-ops report from Control Center and watch the worker claim,
 authorize, execute, and report it. The exact demo identities and expected
 results are documented in [docs/altas/TESTING.md](docs/altas/TESTING.md).
 
+## Talk to Atlas
+
+The public Atlas command is a direct entry point to the complete conversational
+engine. There is no forwarding subprocess or bridge. Atlas keeps setup,
+credentials, sessions, skills, and memory under `~/.atlas`.
+
+```bash
+source .venv/bin/activate
+atlas setup
+atlas
+```
+
+The same direct command exposes model selection, skills, tools, gateways, and
+the modern terminal UI: `atlas model`, `atlas skills`, `atlas tools`,
+`atlas gateway`, and `atlas --tui`.
+
+The managed product control plane has its own command so it never intercepts
+agent traffic: `atlas-control serve`, `atlas-control worker`, and
+`atlas-control doctor`.
+
 ## Repository map
 
 ```text
 altas-platform/
-├── altas/                         # Altas-owned Python product code
+├── altas/                         # Atlas-owned Python product code
 │   ├── control_plane/             # API, persistence, policy, gateway
 │   ├── credentials/               # opaque local credential-vault boundary
 │   ├── fixed_ops/                 # named workflows + Tekion mock adapter
 │   └── managed/                   # worker, client, runtime context, guard
-├── plugins/model-providers/altas/ # Hermes → Altas gateway adapter
+├── plugins/model-providers/altas/ # Hermes → Atlas gateway adapter
 ├── tests/altas/                   # product, security, and integration tests
 ├── docs/altas/                    # product and engineering source of truth
-├── apps/desktop/                  # upstream desktop foundation; rebrand later
+├── apps/desktop/                  # Atlas desktop application
 ├── agent/, gateway/, tools/       # upstream Hermes engine internals
 └── THIRD_PARTY_NOTICES.md         # required attribution and provenance
 ```
@@ -127,7 +148,7 @@ altas-platform/
 8. Production deployments use one isolated engine process/profile per
    credential boundary.
 9. Upstream engine updates are pinned, reviewed, tested, and rolled out by
-   Altas—not fetched autonomously on customer devices.
+   Atlas—not fetched autonomously on customer devices.
 10. The demo must be honest about every mocked boundary.
 
 ## Documentation
@@ -145,8 +166,8 @@ altas-platform/
 This repository began from
 [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent).
 Hermes Agent is MIT licensed. Its original license remains in
-[LICENSE](LICENSE), and Altas-specific provenance is recorded in
+[LICENSE](LICENSE), and Atlas-specific provenance is recorded in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-Altas is an independent product and does not imply endorsement by Nous
+Atlas is an independent product and does not imply endorsement by Nous
 Research. Tekion is not bundled with or endorsed by this prototype.

@@ -1,6 +1,7 @@
 import { Box, NoSelect, ScrollBox, type ScrollBoxHandle, Text, useInput, useStdout } from '@hermes/ink'
 import { useEffect, useRef, useState } from 'react'
 
+import { SHORT_NAME } from '../brand.js'
 import type { GatewayClient } from '../gatewayClient.js'
 import { openInEditor } from '../lib/editor.js'
 import { rpcErrorMessage } from '../lib/rpc.js'
@@ -390,7 +391,7 @@ export function Journey({ gw, onClose, t }: JourneyProps) {
     return (
       <Shell t={t}>
         <Text color={t.color.muted}>
-          No learning yet — your learned skills and memories will start mapping out here as you use Hermes.
+          No learning yet — your learned skills and memories will start mapping out here as you use {SHORT_NAME}.
         </Text>
       </Shell>
     )

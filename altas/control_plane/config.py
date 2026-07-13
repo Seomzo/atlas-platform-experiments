@@ -1,4 +1,4 @@
-"""Runtime configuration for the Altas control plane."""
+"""Runtime configuration for the Atlas control plane."""
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ class ControlPlaneSettings:
                 "demo seed data cannot be combined with a real model provider"
             )
         if not self.mock_model and not self.upstream_api_key:
-            raise ValueError("ALTAS_UPSTREAM_API_KEY is required outside mock mode")
+            raise ValueError("ATLAS_UPSTREAM_API_KEY is required outside mock mode")
 
     @classmethod
     def from_env(cls) -> "ControlPlaneSettings":
@@ -75,42 +75,42 @@ class ControlPlaneSettings:
         invalidate every outstanding lease after a restart.
         """
 
-        signing_key = os.getenv("ALTAS_LEASE_SIGNING_KEY")
-        admin_token = os.getenv("ALTAS_ADMIN_TOKEN")
+        signing_key = os.getenv("ATLAS_LEASE_SIGNING_KEY")
+        admin_token = os.getenv("ATLAS_ADMIN_TOKEN")
         if not signing_key:
-            raise ValueError("ALTAS_LEASE_SIGNING_KEY is required")
+            raise ValueError("ATLAS_LEASE_SIGNING_KEY is required")
         if not admin_token:
-            raise ValueError("ALTAS_ADMIN_TOKEN is required")
+            raise ValueError("ATLAS_ADMIN_TOKEN is required")
         return cls(
             database_path=Path(
                 os.getenv(
-                    "ALTAS_DATABASE_PATH",
-                    "data/altas-control-plane.sqlite3",
+                    "ATLAS_DATABASE_PATH",
+                    "data/atlas-control-plane.sqlite3",
                 )
             ),
             lease_signing_key=signing_key.encode("utf-8"),
             admin_token=admin_token,
-            seed_demo_data=_as_bool(os.getenv("ALTAS_SEED_DEMO_DATA"), default=False),
-            mock_model=_as_bool(os.getenv("ALTAS_MODEL_MOCK"), default=True),
-            lease_ttl_seconds=int(os.getenv("ALTAS_LEASE_TTL_SECONDS", "300")),
+            seed_demo_data=_as_bool(os.getenv("ATLAS_SEED_DEMO_DATA"), default=False),
+            mock_model=_as_bool(os.getenv("ATLAS_MODEL_MOCK"), default=True),
+            lease_ttl_seconds=int(os.getenv("ATLAS_LEASE_TTL_SECONDS", "300")),
             job_visibility_timeout_seconds=int(
-                os.getenv("ALTAS_JOB_VISIBILITY_TIMEOUT_SECONDS", "900")
+                os.getenv("ATLAS_JOB_VISIBILITY_TIMEOUT_SECONDS", "900")
             ),
             max_model_requests_per_job=int(
-                os.getenv("ALTAS_MAX_MODEL_REQUESTS_PER_JOB", "8")
+                os.getenv("ATLAS_MAX_MODEL_REQUESTS_PER_JOB", "8")
             ),
             max_requested_tokens_per_job=int(
-                os.getenv("ALTAS_MAX_REQUESTED_TOKENS_PER_JOB", "4096")
+                os.getenv("ATLAS_MAX_REQUESTED_TOKENS_PER_JOB", "4096")
             ),
             default_model_max_tokens=int(
-                os.getenv("ALTAS_DEFAULT_MODEL_MAX_TOKENS", "400")
+                os.getenv("ATLAS_DEFAULT_MODEL_MAX_TOKENS", "400")
             ),
-            model_id=os.getenv("ALTAS_MODEL_ID", "altas-fixed-ops"),
+            model_id=os.getenv("ATLAS_MODEL_ID", "altas-fixed-ops"),
             upstream_base_url=os.getenv(
-                "ALTAS_UPSTREAM_BASE_URL", "https://api.openai.com/v1"
+                "ATLAS_UPSTREAM_BASE_URL", "https://api.openai.com/v1"
             ).rstrip("/"),
-            upstream_api_key=os.getenv("ALTAS_UPSTREAM_API_KEY"),
+            upstream_api_key=os.getenv("ATLAS_UPSTREAM_API_KEY"),
             request_timeout_seconds=float(
-                os.getenv("ALTAS_REQUEST_TIMEOUT_SECONDS", "30")
+                os.getenv("ATLAS_REQUEST_TIMEOUT_SECONDS", "30")
             ),
         )

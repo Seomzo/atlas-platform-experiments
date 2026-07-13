@@ -1,9 +1,9 @@
-# Altas Architecture
+# Atlas Architecture
 
 ## Status
 
 - Stage: prototype
-- Architecture owner: Altas platform team
+- Architecture owner: Atlas platform team
 - Upstream engine baseline: Hermes Agent
   `a7f65e3bcd937cd095ba599ab5927af2093a0d95`
 - Primary deployment: one local worker per store/credential boundary
@@ -14,12 +14,12 @@
 
 ```mermaid
 flowchart LR
-    U["Dealership user"] --> C["Slack / Email / Altas UI"]
-    O["Altas operator"] --> CC["Altas Control Center"]
-    C --> CP["Altas Control Plane"]
+    U["Dealership user"] --> C["Slack / Email / Atlas UI"]
+    O["Atlas operator"] --> CC["Atlas Control Center"]
+    C --> CP["Atlas Control Plane"]
     CC --> CP
 
-    subgraph Cloud["Altas-controlled services"]
+    subgraph Cloud["Atlas-controlled services"]
       CP --> P["Policy + entitlements"]
       CP --> J["Job service"]
       CP --> M["Model gateway"]
@@ -28,7 +28,7 @@ flowchart LR
     end
 
     subgraph Store["Isolated worker boundary"]
-      W["Altas Worker"] --> F["Named fixed-ops workflow"]
+      W["Atlas Worker"] --> F["Named fixed-ops workflow"]
       F --> X["Synthetic connector (prototype)"]
       W -. "managed adapter seam" .-> E["Hermes engine"]
       E -. "target runtime" .-> T["Curated dealership tools"]
@@ -51,13 +51,13 @@ flowchart LR
 4. **Connector boundary.** Raw dealer credentials and browser sessions are
    available only to trusted connector code.
 5. **Provider boundary.** Model-provider master credentials remain behind the
-   Altas Model Gateway.
+   Atlas Model Gateway.
 
 ## Runtime sequence
 
 ```mermaid
 sequenceDiagram
-    participant W as Altas Worker
+    participant W as Atlas Worker
     participant CP as Control Plane
     participant PE as Policy Engine
     participant F as Fixed-Ops Workflow
@@ -98,9 +98,9 @@ sequenceDiagram
 - Persists safe usage and audit records.
 - Serves the localhost Control Center in the prototype.
 
-### Altas Worker supervisor
+### Atlas Worker supervisor
 
-- Reads the prototype device bearer from `ALTAS_DEVICE_TOKEN`; moving device
+- Reads the prototype device bearer from `ATLAS_DEVICE_TOKEN`; moving device
   identity into the OS vault is a production milestone.
 - Sends heartbeats and maintains the current lease.
 - Claims only jobs assigned by the control plane.
@@ -114,18 +114,18 @@ sequenceDiagram
 
 The current adapter surface contains:
 
-- An Altas model-provider plugin for the server-side model gateway.
+- An Atlas model-provider plugin for the server-side model gateway.
 - A mandatory managed policy guard before upstream tool dispatch.
 - Focused tests proving managed mode cannot bypass that guard through skip
   flags or alternate dispatch paths.
 
-The next runtime milestone is an Altas supervisor that starts one engine
+The next runtime milestone is an Atlas supervisor that starts one engine
 process per store/credential boundary with an isolated internal data directory,
-the Altas provider profile, and a curated toolset. That process launch is not
+the Atlas provider profile, and a curated toolset. That process launch is not
 part of the current fixture-backed worker.
 
 Only the minimum fail-closed hook belongs in upstream execution code. Billing,
-Tekion behavior, customer UI, and product policy remain in Altas modules.
+Tekion behavior, customer UI, and product policy remain in Atlas modules.
 
 ### Fixed-ops workflow pack
 
@@ -175,10 +175,10 @@ POST /api/v1/worker/jobs/{job_id}/complete
 ```
 
 Worker calls use `Authorization: Bearer <device-secret>`. Lease-protected
-calls also supply the signed lease returned by heartbeat in `X-Altas-Lease`.
+calls also supply the signed lease returned by heartbeat in `X-Atlas-Lease`.
 The job claim response contains a one-time `claim_token`; the completion body
 must return it, preventing another attempt from completing the job. Policy and
-model calls also carry it as `X-Altas-Claim-Token`, binding all paid execution
+model calls also carry it as `X-Atlas-Claim-Token`, binding all paid execution
 to the exact active attempt. Scoped calls carry tenant, store, agent, and job
 headers derived from `ManagedContext`.
 
@@ -192,12 +192,12 @@ POST /v1/chat/completions
 The contract is intentionally OpenAI-compatible so the Hermes engine can use a
 small provider profile. The server rechecks live device state and never returns
 its upstream provider credential. Chat completion requests must include the
-claimed running job in `X-Altas-Job-ID`; idle or foreign jobs are denied. The
+claimed running job in `X-Atlas-Job-ID`; idle or foreign jobs are denied. The
 job must explicitly declare `model.chat` as a static workflow dependency. The
 prototype defaults to eight requests and 4,096 requested output tokens per
 job. Each request is limited to one completion, 128 messages, 64 KiB per
 message, and 256 KiB total; unknown provider extensions are rejected. Quota
-configuration is documented in `.env.altas.example`.
+configuration is documented in `.env.atlas.example`.
 
 ### Development admin surface
 
@@ -260,4 +260,4 @@ The prototype contract should survive these replacements:
 4. No policy decision is delegated to a model.
 5. No managed tool executes when policy is unreachable.
 6. No generic engine updater runs on a customer deployment.
-7. No customer-facing Altas capability depends on a mutable upstream name.
+7. No customer-facing Atlas capability depends on a mutable upstream name.

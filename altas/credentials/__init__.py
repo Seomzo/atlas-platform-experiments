@@ -1,4 +1,4 @@
-"""Credential-vault interfaces for Altas workers."""
+"""Credential-vault interfaces for Atlas workers."""
 
 from altas.credentials.base import CredentialNotFound, CredentialVault, SecretHandle
 from altas.credentials.keyring import SystemKeyringVault

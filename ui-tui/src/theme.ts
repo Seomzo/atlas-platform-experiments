@@ -1,3 +1,5 @@
+import { AGENT_NAME } from './brand.js'
+
 export interface ThemeColors {
   primary: string
   accent: string
@@ -234,7 +236,7 @@ function normalizeAnsiForeground(color: string): string {
 // ── Defaults ─────────────────────────────────────────────────────────
 
 const BRAND: ThemeBrand = {
-  name: 'Hermes Agent',
+  name: AGENT_NAME,
   icon: '⚕',
   prompt: '❯',
   welcome: 'Type your message or /help for commands.',

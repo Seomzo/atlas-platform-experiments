@@ -99,6 +99,9 @@ def remove_path_from_shell_configs():
 def remove_wrapper_script():
     """Remove the hermes wrapper script if it exists."""
     wrapper_paths = [
+        Path.home() / ".local" / "bin" / "atlas",
+        Path("/usr/local/bin/atlas"),
+        # Compatibility launchers from pre-Atlas installs.
         Path.home() / ".local" / "bin" / "hermes",
         Path("/usr/local/bin/hermes"),
     ]

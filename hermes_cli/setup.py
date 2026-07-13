@@ -25,12 +25,29 @@ from hermes_cli.nous_subscription import get_nous_subscription_features
 from tools.tool_backend_helpers import managed_nous_tools_enabled
 from utils import base_url_hostname
 from hermes_constants import get_optional_skills_dir
+from hermes_cli.brand import command_name, is_atlas_branded, product_name
 
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 _DOCS_BASE = "https://hermes-agent.nousresearch.com/docs"
+
+
+def _setup_docs_url(path: str) -> str | None:
+    """Return a public docs URL without leaking upstream branding in Atlas.
+
+    Atlas does not have a public documentation host yet. An owned docs host can
+    be supplied later without another code change via ``ATLAS_DOCS_BASE_URL``.
+    Until then the wizard gives local CLI guidance instead of routing a dealer
+    to the Hermes website.
+    """
+
+    clean_path = path.lstrip("/")
+    if is_atlas_branded():
+        atlas_base = os.environ.get("ATLAS_DOCS_BASE_URL", "").strip().rstrip("/")
+        return f"{atlas_base}/{clean_path}" if atlas_base else None
+    return f"{_DOCS_BASE}/{clean_path}"
 
 
 def _model_config_dict(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -155,7 +172,83 @@ from hermes_cli.colors import Colors, color
 def print_header(title: str):
     """Print a section header."""
     print()
-    print(color(f"◆ {title}", Colors.CYAN, Colors.BOLD))
+    accent = Colors.ATLAS_CYAN if is_atlas_branded() else Colors.CYAN
+    print(color(f"◆ {title}", accent, Colors.BOLD))
+
+
+def _setup_accent_color() -> str:
+    return Colors.ATLAS_BLUE if is_atlas_branded() else Colors.MAGENTA
+
+
+_SETUP_BOX_WIDTH = 57
+_ATLAS_SETUP_LOGO = (
+    " █████╗ ████████╗██╗      █████╗ ███████╗",
+    "██╔══██╗╚══██╔══╝██║     ██╔══██╗██╔════╝",
+    "███████║   ██║   ██║     ███████║███████╗",
+    "██╔══██║   ██║   ██║     ██╔══██║╚════██║",
+    "██║  ██║   ██║   ███████╗██║  ██║███████║",
+    "╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚══════╝",
+)
+
+
+def _setup_box_line(
+    text: str = "",
+    *,
+    align: str = "center",
+    text_color: str | None = None,
+) -> None:
+    """Print one correctly padded line of the Atlas setup frame."""
+
+    visible = text[:_SETUP_BOX_WIDTH]
+    remaining = _SETUP_BOX_WIDTH - len(visible)
+    if align == "left":
+        body = visible + (" " * remaining)
+    else:
+        left = remaining // 2
+        body = (" " * left) + visible + (" " * (remaining - left))
+
+    frame_color = _setup_accent_color()
+    body_color = text_color or (
+        Colors.ATLAS_CYAN if is_atlas_branded() else Colors.MAGENTA
+    )
+    print(
+        color("│", frame_color)
+        + color(body, body_color, Colors.BOLD if visible else "")
+        + color("│", frame_color)
+    )
+
+
+def _print_setup_wizard_banner() -> None:
+    """Render the full setup banner for the active public product."""
+
+    if not is_atlas_branded():
+        print(color("┌" + ("─" * _SETUP_BOX_WIDTH) + "┐", Colors.MAGENTA))
+        _setup_box_line(f"⚕ {product_name()} Setup Wizard")
+        print(color("├" + ("─" * _SETUP_BOX_WIDTH) + "┤", Colors.MAGENTA))
+        _setup_box_line(f"  Let's configure your {product_name()} installation.", align="left")
+        _setup_box_line("  Press Ctrl+C at any time to exit.", align="left")
+        print(color("└" + ("─" * _SETUP_BOX_WIDTH) + "┘", Colors.MAGENTA))
+        return
+
+    print(color("╭" + ("─" * _SETUP_BOX_WIDTH) + "╮", Colors.ATLAS_BLUE))
+    _setup_box_line()
+    logo_colors = (
+        Colors.ATLAS_CYAN,
+        Colors.ATLAS_CYAN,
+        Colors.ATLAS_SKY,
+        Colors.ATLAS_SKY,
+        Colors.ATLAS_BLUE,
+        Colors.ATLAS_INDIGO,
+    )
+    for logo_line, logo_color in zip(_ATLAS_SETUP_LOGO, logo_colors):
+        _setup_box_line(logo_line, text_color=logo_color)
+    _setup_box_line()
+    _setup_box_line("DEALERSHIP AI • RUNNING LOCALLY", text_color=Colors.ATLAS_CYAN)
+    print(color("├" + ("─" * _SETUP_BOX_WIDTH) + "┤", Colors.ATLAS_BLUE))
+    _setup_box_line("  Atlas Setup Wizard", align="left", text_color=Colors.ATLAS_CYAN)
+    _setup_box_line("  Configure this Atlas installation.", align="left", text_color=Colors.ATLAS_SKY)
+    _setup_box_line("  Press Ctrl+C at any time to exit.", align="left", text_color=Colors.ATLAS_SKY)
+    print(color("╰" + ("─" * _SETUP_BOX_WIDTH) + "╯", Colors.ATLAS_BLUE))
 
 
 from hermes_cli.cli_output import (  # noqa: E402
@@ -205,10 +298,11 @@ def prompt(question: str, default: str = None, password: bool = False) -> str:
         display = f"{question}: "
 
     try:
+        prompt_color = Colors.ATLAS_SKY if is_atlas_branded() else Colors.YELLOW
         if password:
-            value = masked_secret_prompt(color(display, Colors.YELLOW))
+            value = masked_secret_prompt(color(display, prompt_color))
         else:
-            value = input(color(display, Colors.YELLOW))
+            value = input(color(display, prompt_color))
 
         cleaned = _sanitize_pasted_input(value)
         return cleaned.strip() or default or ""
@@ -249,11 +343,14 @@ def prompt_choice(question: str, choices: list, default: int = 0, description: s
         print()
         return idx
 
-    print(color(question, Colors.YELLOW))
+    question_color = Colors.ATLAS_CYAN if is_atlas_branded() else Colors.YELLOW
+    selected_color = Colors.ATLAS_BLUE if is_atlas_branded() else Colors.GREEN
+    input_color = Colors.ATLAS_SKY if is_atlas_branded() else Colors.DIM
+    print(color(question, question_color))
     for i, choice in enumerate(choices):
         marker = "●" if i == default else "○"
         if i == default:
-            print(color(f"  {marker} {choice}", Colors.GREEN))
+            print(color(f"  {marker} {choice}", selected_color))
         else:
             print(f"  {marker} {choice}")
 
@@ -262,7 +359,7 @@ def prompt_choice(question: str, choices: list, default: int = 0, description: s
     while True:
         try:
             value = input(
-                color(f"  Select [1-{len(choices)}] ({default + 1}): ", Colors.DIM)
+                color(f"  Select [1-{len(choices)}] ({default + 1}): ", input_color)
             )
             if not value:
                 return default
@@ -310,8 +407,9 @@ def prompt_yes_no(question: str, default: bool = True) -> bool:
 
     while True:
         try:
+            prompt_color = Colors.ATLAS_SKY if is_atlas_branded() else Colors.YELLOW
             value = (
-                input(color(f"{question} [{default_str}]: ", Colors.YELLOW))
+                input(color(f"{question} [{default_str}]: ", prompt_color))
                 .strip()
                 .lower()
             )
@@ -1183,7 +1281,13 @@ def setup_terminal_backend(config: dict):
     print_header("Terminal Backend")
     print_info("Choose where Hermes runs shell commands and code.")
     print_info("This affects tool execution, file access, and isolation.")
-    print_info(f"   Guide: {_DOCS_BASE}/user-guide/configuration#terminal-backend-configuration")
+    terminal_guide = _setup_docs_url(
+        "user-guide/configuration#terminal-backend-configuration"
+    )
+    if terminal_guide:
+        print_info(f"   Guide: {terminal_guide}")
+    else:
+        print_info(f"   Guide: run `{command_name()} setup terminal --help`")
     print()
 
     current_backend = cfg_get(config, "terminal", "backend", default="local")
@@ -1910,7 +2014,11 @@ def _setup_webhooks():
     print_warning("   internet. For security, run the gateway in a sandboxed environment")
     print_warning("   (Docker, VM, etc.) to limit blast radius from prompt injection.")
     print()
-    print_info("   Full guide: https://hermes-agent.nousresearch.com/docs/user-guide/messaging/webhooks/")
+    webhook_guide = _setup_docs_url("user-guide/messaging/webhooks/")
+    if webhook_guide:
+        print_info(f"   Full guide: {webhook_guide}")
+    else:
+        print_info(f"   Guide: run `{command_name()} setup gateway` to review this configuration.")
     print()
 
     port = prompt("Webhook port (default 8644)")
@@ -1937,7 +2045,13 @@ def _setup_webhooks():
     print_info("      http://your-server:8644/webhooks/<route-name>")
     print()
     print_info("   Route configuration guide:")
-    print_info("   https://hermes-agent.nousresearch.com/docs/user-guide/messaging/webhooks/#configuring-routes")
+    route_guide = _setup_docs_url(
+        "user-guide/messaging/webhooks/#configuring-routes"
+    )
+    if route_guide:
+        print_info(f"   {route_guide}")
+    else:
+        print_info(f"   Edit routes with `{command_name()} config edit`.")
     print()
     print_info("   Open config in your editor:  hermes config edit")
     print_info("   Open config in your editor:  hermes config edit")
@@ -2629,24 +2743,24 @@ def _run_portal_one_shot(config: dict) -> None:
     """
     from hermes_cli.config import load_config
 
+    portal_accent = _setup_accent_color()
     print()
     print(
         color(
             "┌─────────────────────────────────────────────────────────┐",
-            Colors.MAGENTA,
+            portal_accent,
         )
     )
-    print(color("│     ⚕ Hermes Setup — Nous Portal (one-shot)             │", Colors.MAGENTA))
+    print(color("│     ⚕ Hermes Setup — Nous Portal (one-shot)             │", portal_accent))
     print(
         color(
             "└─────────────────────────────────────────────────────────┘",
-            Colors.MAGENTA,
+            portal_accent,
         )
     )
     print()
-    print_info("  One subscription, 300+ models, plus the Tool Gateway:")
-    print_info("    web search, image generation, TTS, browser automation")
-    print_info("    — all routed through your Nous Portal sub.")
+    print_info("  Free accounts include selected models with standard rate limits.")
+    print_info("  Paid plans add 200+ models and hosted web, image, TTS, and browser tools.")
     print()
     print_info("  Sign up: https://portal.nousresearch.com/manage-subscription")
     print()
@@ -2659,13 +2773,11 @@ def _run_portal_one_shot(config: dict) -> None:
     try:
         from hermes_cli.main import _model_flow_nous
 
-        _model_flow_nous(config)
+        _model_flow_nous(config, propagate_login_abort=True)
     except (KeyboardInterrupt, EOFError, SystemExit):
-        # _login_nous raises SystemExit(130)/(1) on cancel/failure; the
-        # logged-out path inside _model_flow_nous catches it, but the
-        # expired-session re-login path only catches Exception, so a
-        # SystemExit there would otherwise escape and kill the whole CLI.
-        # Treat all of these as a graceful cancel/abort for the portal flow.
+        # _login_nous raises SystemExit(130)/(1) on cancel/failure. The
+        # propagate_login_abort flag preserves that signal through the model
+        # flow so this one-shot command can stop cleanly without a traceback.
         print()
         print_info("  Setup cancelled.")
         print_info("  You can retry later with `hermes portal`.")
@@ -2759,18 +2871,19 @@ def run_setup_wizard(args):
     if section:
         for key, label, func in SETUP_SECTIONS:
             if key == section:
+                section_accent = _setup_accent_color()
                 print()
                 print(
                     color(
                         "┌─────────────────────────────────────────────────────────┐",
-                        Colors.MAGENTA,
+                        section_accent,
                     )
                 )
-                print(color(f"│     ⚕ Hermes Setup — {label:<34s} │", Colors.MAGENTA))
+                print(color(f"│     ⚕ Hermes Setup — {label:<34s} │", section_accent))
                 print(
                     color(
                         "└─────────────────────────────────────────────────────────┘",
-                        Colors.MAGENTA,
+                        section_accent,
                     )
                 )
                 func(config)
@@ -2794,39 +2907,7 @@ def run_setup_wizard(args):
     )
 
     print()
-    print(
-        color(
-            "┌─────────────────────────────────────────────────────────┐",
-            Colors.MAGENTA,
-        )
-    )
-    print(
-        color(
-            "│             ⚕ Hermes Agent Setup Wizard                │", Colors.MAGENTA
-        )
-    )
-    print(
-        color(
-            "├─────────────────────────────────────────────────────────┤",
-            Colors.MAGENTA,
-        )
-    )
-    print(
-        color(
-            "│  Let's configure your Hermes Agent installation.       │", Colors.MAGENTA
-        )
-    )
-    print(
-        color(
-            "│  Press Ctrl+C at any time to exit.                     │", Colors.MAGENTA
-        )
-    )
-    print(
-        color(
-            "└─────────────────────────────────────────────────────────┘",
-            Colors.MAGENTA,
-        )
-    )
+    _print_setup_wizard_banner()
 
     migration_ran = False
 
@@ -2869,7 +2950,7 @@ def run_setup_wizard(args):
         setup_mode = prompt_choice(
             "How would you like to set up Hermes?",
             [
-                "Quick Setup (Nous Portal) — free OAuth login, no API keys, model + tools (recommended)",
+                "Quick Setup (Nous Portal) — OAuth login, free models available, paid tools optional (recommended)",
                 "Full setup — configure every provider, tool & option yourself (bring your own keys)",
                 "Blank Slate — everything off except the bare minimum; opt in to each capability",
             ],
@@ -2946,20 +3027,32 @@ def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):
     # Nous model picker). Provider is set to "nous" by the login/model save.
     print()
     print_header("Nous Portal")
-    print_info("One subscription, 300+ models, plus the Tool Gateway:")
-    print_info("  web search, image generation, TTS, browser automation.")
+    print_info("Free accounts include selected models with standard rate limits.")
+    print_info("Paid plans add 200+ models and hosted web, image, TTS, and browser tools.")
     print_info("Sign up: https://portal.nousresearch.com/manage-subscription")
     print()
     try:
         from hermes_cli.main import _model_flow_nous
-        _model_flow_nous(config)
+        _model_flow_nous(config, propagate_login_abort=True)
     except (KeyboardInterrupt, EOFError):
         print()
         print_info("Nous Portal setup cancelled.")
+        print_info("Quick setup stopped before terminal or messaging configuration.")
+        return False
+    except SystemExit as exc:
+        print()
+        if exc.code == 130:
+            print_info("Nous Portal setup cancelled.")
+        else:
+            print_warning("Nous Portal login did not complete.")
+        print_info("Quick setup stopped before terminal or messaging configuration.")
+        print_info(f"Retry later with: {command_name()} setup")
+        return False
     except Exception as exc:
         logger.debug("_model_flow_nous error during quick setup: %s", exc)
         print_warning(f"Nous Portal setup encountered an error: {exc}")
-        print_info("You can try again later with: hermes model")
+        print_info(f"Retry later with: {command_name()} setup")
+        return False
 
     # Re-sync the wizard's config dict from disk — _model_flow_nous (and the
     # underlying login/model save) write via their own load/save cycle, and the
@@ -3000,6 +3093,7 @@ def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):
     print()
 
     _print_setup_summary(config, hermes_home)
+    return True
 
 
 def _blank_slate_minimal_toolsets(config: dict):

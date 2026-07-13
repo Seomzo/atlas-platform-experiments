@@ -2,7 +2,7 @@ graft skills
 graft optional-skills
 graft optional-mcps
 graft locales
-# Altas product assets and synthetic test fixtures.
+# Atlas product assets and synthetic test fixtures.
 recursive-include altas/control_plane/static *
 recursive-include altas/fixed_ops/fixtures *.json
 # Bundled plugin manifests (plugin.yaml / plugin.yml). Without these the

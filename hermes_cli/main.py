@@ -11,13 +11,13 @@ Usage:
     hermes gateway status      # Show gateway status
     hermes gateway install     # Install gateway service
     hermes gateway uninstall   # Uninstall gateway service
-    hermes setup               # Interactive setup wizard
+    atlas setup               # Interactive setup wizard
     hermes logout              # Clear stored authentication
     hermes status              # Show status of all components
     hermes cron                # Manage cron jobs
     hermes cron list           # List cron jobs
     hermes cron status         # Check if cron scheduler is running
-    hermes doctor              # Check configuration and dependencies
+    atlas doctor              # Check configuration and dependencies
     hermes honcho setup                    # Configure Honcho AI memory integration
     hermes honcho status                   # Show Honcho config and connection status
     hermes honcho sessions                 # List directory → session name mappings
@@ -35,8 +35,8 @@ Usage:
     hermes honcho identity <file>          # Seed AI peer identity from a file (SOUL.md etc.)
     hermes honcho migrate                  # Step-by-step migration guide: OpenClaw native → Hermes + Honcho
     hermes version             Show version
-    hermes update              Update to latest version
-    hermes uninstall           Uninstall Hermes Agent
+    atlas update              Update to latest version
+    hermes uninstall           Uninstall Atlas
     hermes acp                 Run as an ACP server for editor integration
     hermes sessions browse     Interactive session picker with search
 
@@ -49,12 +49,12 @@ Usage:
 #
 # Guarded against ModuleNotFoundError because ``hermes_bootstrap`` is a
 # top-level module registered via pyproject.toml's ``py-modules`` list.
-# When the user upgrades code via ``git pull`` (or ``hermes update``
+# When the user upgrades code via ``git pull`` (or ``atlas update``
 # crashes between ``git reset --hard`` and ``uv pip install -e .``), the
 # new code references ``hermes_bootstrap`` but the editable install's
 # ``.pth`` file still points at the old set of top-level modules.  Without
 # this guard, hermes crashes on import and the user can't run
-# ``hermes update`` to recover.  Missing the bootstrap means UTF-8 stdio
+# ``atlas update`` to recover.  Missing the bootstrap means UTF-8 stdio
 # setup is skipped on Windows — degraded, not broken.  POSIX is unaffected.
 try:
     import hermes_bootstrap  # noqa: F401
@@ -63,6 +63,13 @@ except ModuleNotFoundError:
 
 import os
 import sys
+
+from hermes_cli.brand import brand_argparse, brand_text, command_name, configure_runtime_brand, product_name
+
+
+# The Atlas console script points directly at this module. Apply its state and
+# child-process defaults before any config path or TUI launch decision runs.
+configure_runtime_brand()
 
 
 def _set_process_title() -> None:
@@ -83,7 +90,7 @@ def _set_process_title() -> None:
     try:
         import setproctitle  # type: ignore[import-untyped]
 
-        setproctitle.setproctitle("hermes")
+        setproctitle.setproctitle(command_name())
         return
     except ImportError:
         pass
@@ -96,10 +103,10 @@ def _set_process_title() -> None:
         system = platform.system()
         if system == "Linux":
             libc = ctypes.CDLL("libc.so.6", use_errno=True)
-            libc.prctl(15, b"hermes", 0, 0, 0)  # PR_SET_NAME = 15
+            libc.prctl(15, command_name().encode(), 0, 0, 0)  # PR_SET_NAME = 15
         elif system == "Darwin":
             libc = ctypes.CDLL("libc.dylib", use_errno=True)
-            libc.pthread_setname_np(b"hermes")
+            libc.pthread_setname_np(command_name().encode())
         # Windows: the .exe name is already ``hermes.exe`` — nothing to do.
     except Exception:
         pass
@@ -244,7 +251,7 @@ def _read_openai_version_fast() -> str | None:
 def _print_fast_version_info() -> None:
     from hermes_cli import __release_date__, __version__
 
-    print(f"Hermes Agent v{__version__} ({__release_date__})")
+    print(f"{product_name()} v{__version__} ({__release_date__})")
     print(f"Install directory: {PROJECT_ROOT}")
 
     print(f"Python: {sys.version.split()[0]}")
@@ -324,7 +331,7 @@ from hermes_cli.subcommands.claw import build_claw_parser
 def _require_tty(command_name: str) -> None:
     """Exit with a clear error if stdin is not a terminal.
 
-    Interactive TUI commands (hermes tools, hermes setup, hermes model) use
+    Interactive TUI commands (hermes tools, atlas setup, atlas model) use
     curses or input() prompts that spin at 100% CPU when stdin is a pipe.
     This guard prevents accidental non-interactive invocation.
     """
@@ -709,7 +716,7 @@ def _read_git_revision_fingerprint(repo_root: Path) -> str | None:
                 return f"git:{ref}:{packed_sha}"
             # Ref name is known but unresolved — still stable across launches,
             # and the version/release fallback in the caller will invalidate
-            # after `hermes update`.
+            # after `atlas update`.
             return f"git:{ref}:unresolved"
         return f"git:HEAD:{head}"
     except OSError:
@@ -1679,7 +1686,7 @@ def _restore_tui_workspace(tui_dir: Path) -> bool:
     """Try to restore a missing ``ui-tui/`` from git, returning True on success.
 
     On Windows an antivirus / NTFS filter driver can leave tracked ``ui-tui/``
-    files deleted in the working tree after ``hermes update`` (HEAD stays
+    files deleted in the working tree after ``atlas update`` (HEAD stays
     intact; the files just vanish — see issue #49145). Those files are tracked,
     so ``git restore`` puts them back deterministically. Best-effort: returns
     False (rather than raising) when git is unavailable, this isn't a checkout,
@@ -1722,12 +1729,12 @@ def _ensure_tui_workspace(tui_dir: Path) -> None:
     print(
         "Error: the TUI workspace is missing from this Hermes checkout.\n"
         f"Expected directory: {tui_dir}\n"
-        "This usually means `hermes update` left tracked ui-tui files deleted.\n"
+        "This usually means `atlas update` left tracked ui-tui files deleted.\n"
         "Recovery:\n"
         "  1. From the Hermes checkout, run `git restore -- ui-tui`\n"
         "  2. Run `npm install --silent --no-fund --no-audit --progress=false`\n"
         "  3. Retry `hermes --tui`\n"
-        "If the checkout is still inconsistent, run `hermes update --force`.",
+        "If the checkout is still inconsistent, run `atlas update --force`.",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -2147,7 +2154,7 @@ def _launch_tui(
             except Exception:
                 pass
 
-    # Exit code 42 = TUI requested an update. Relaunch as `hermes update` so
+    # Exit code 42 = TUI requested an update. Relaunch as `atlas update` so
     # the user sees update output directly and gets the new version.
     # preserve_inherited=False ensures --tui and other flags are NOT carried
     # into the update subcommand.
@@ -2305,18 +2312,18 @@ def cmd_chat(args):
             for _ref in _retired_xai_refs:
                 sys.stderr.write(f"  \033[33m⚠\033[0m {format_issue(_ref)}\n")
             sys.stderr.write(f"  \033[2mMigration guide: {MIGRATION_GUIDE_URL}\033[0m\n")
-            sys.stderr.write("  \033[2mRun 'hermes doctor' for details.\033[0m\n\n")
+            sys.stderr.write("  \033[2mRun 'atlas doctor' for details.\033[0m\n\n")
     except Exception:
         pass
 
     # First-run guard: check if any provider is configured before launching
     if not _has_any_provider_configured():
         print()
-        print(
+        print(brand_text(
             "It looks like Hermes isn't configured yet -- no API keys or providers found."
-        )
+        ))
         print()
-        print("  Run:  hermes setup")
+        print(f"  Run:  {command_name()} setup")
         print()
 
         from hermes_cli.setup import (
@@ -2338,7 +2345,7 @@ def cmd_chat(args):
             cmd_setup(args)
             return
         print()
-        print("You can run 'hermes setup' at any time to configure.")
+        print(f"You can run '{command_name()} setup' at any time to configure.")
         sys.exit(1)
 
     # Start update check in background (runs while other init happens).
@@ -2675,14 +2682,14 @@ def cmd_whatsapp(args):
             print("    2. Send a message to the bot's WhatsApp number")
             print("    3. The agent will reply automatically")
             print()
-            print("  Tip: Agent responses are prefixed with '⚕ Hermes Agent'")
+            print("  Tip: Agent responses are prefixed with '⚕ Atlas'")
         else:
             print("  Next steps:")
             print("    1. Start the gateway:  hermes gateway")
             print("    2. Open WhatsApp → Message Yourself")
             print("    3. Type a message — the agent will reply")
             print()
-            print("  Tip: Agent responses are prefixed with '⚕ Hermes Agent'")
+            print("  Tip: Agent responses are prefixed with '⚕ Atlas'")
             print("  so you can tell them apart from your own messages.")
         print()
         print("  Or install as a service: hermes gateway install")
@@ -2768,7 +2775,7 @@ def _is_profile_api_key_provider(provider_id: str) -> bool:
 def select_provider_and_model(args=None):
     """Core provider selection + model picking logic.
 
-    Shared by ``cmd_model`` (``hermes model``) and the setup wizard
+    Shared by ``cmd_model`` (``atlas model``) and the setup wizard
     (``setup_model_provider`` in setup.py).  Handles the full flow:
     provider picker, credential prompting, model selection, and config
     persistence.
@@ -2961,8 +2968,8 @@ def select_provider_and_model(args=None):
             active = active_def.id
         else:
             warning = (
-                f"Unknown provider '{effective_provider}'. Check 'hermes model' for "
-                "available providers, or run 'hermes doctor' to diagnose config "
+                f"Unknown provider '{effective_provider}'. Check 'atlas model' for "
+                "available providers, or run 'atlas doctor' to diagnose config "
                 "issues."
             )
             print(f"Warning: {warning} Falling back to auto provider detection.")
@@ -3217,9 +3224,9 @@ def _clear_stale_openai_base_url():
 # its own provider+model pair in config.yaml under `auxiliary.<task>`.
 #
 # The UI lives behind "Configure auxiliary models..." at the bottom of the
-# `hermes model` provider picker. It does NOT re-run credential setup — it
+# `atlas model` provider picker. It does NOT re-run credential setup — it
 # only routes already-authenticated providers to specific aux tasks. Users
-# configure new providers through the normal `hermes model` flow first.
+# configure new providers through the normal `atlas model` flow first.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # (task_key, display_name, short_description)
@@ -3409,7 +3416,7 @@ def _aux_select_for_task(task: str) -> None:
     Uses ``list_authenticated_providers()`` to only show providers the user
     has already configured. This avoids re-running OAuth/credential flows
     inside the aux picker — users set up new providers through the normal
-    ``hermes model`` flow, then route aux tasks to them here.
+    ``atlas model`` flow, then route aux tasks to them here.
     """
     from hermes_cli.config import load_config
     from hermes_cli.model_switch import list_authenticated_providers
@@ -4003,7 +4010,7 @@ def _prompt_reasoning_effort_selection(efforts, current_effort=""):
 
 
 def _prompt_api_key(pconfig, existing_key: str, provider_id: str = "") -> tuple:
-    """Shared API-key entry point for ``hermes setup`` / ``hermes model``.
+    """Shared API-key entry point for ``atlas setup`` / ``atlas model``.
 
     Handles both first-time entry and the already-configured case.  When a key
     is already present, offers [K]eep / [R]eplace / [C]lear so the user can
@@ -4076,7 +4083,7 @@ def _prompt_api_key(pconfig, existing_key: str, provider_id: str = "") -> tuple:
     if choice.startswith("c"):
         save_env_value(key_env, "")
         print(
-            f"  API key cleared.  Re-run `hermes setup` to configure {pconfig.name} again."
+            f"  API key cleared.  Re-run `atlas setup` to configure {pconfig.name} again."
         )
         return "", True
 
@@ -4190,7 +4197,7 @@ def _run_anthropic_oauth_flow(save_env_value):
         print("    1. Install Claude Code:  npm install -g @anthropic-ai/claude-code")
         print("    2. Run:                  claude setup-token")
         print("    3. Follow the browser prompts to authorize")
-        print("    4. Re-run:               hermes model")
+        print("    4. Re-run:               atlas model")
         print()
         print("  Or paste an existing setup-token now (sk-ant-oat-...):")
         print()
@@ -4416,7 +4423,7 @@ def cmd_version(args):
 
 
 def cmd_uninstall(args):
-    """Uninstall Hermes Agent (or just the Chat GUI with --gui)."""
+    """Uninstall Atlas (or just the Chat GUI with --gui)."""
     # Machine-readable install snapshot for the desktop app's uninstall UI.
     # Must run before any TTY gate — it's called from a non-interactive child.
     if getattr(args, "gui_summary", False):
@@ -4555,7 +4562,7 @@ def _gateway_prompt(prompt_text: str, default: str = "", timeout: float = 300.0)
     Writes a prompt marker file so the gateway can forward the question to the
     user, then polls for a response file.  Falls back to *default* on timeout.
 
-    Used by ``hermes update --gateway`` so interactive prompts (stash restore,
+    Used by ``atlas update --gateway`` so interactive prompts (stash restore,
     config migration) are forwarded to the messenger instead of being silently
     skipped.
     """
@@ -4809,7 +4816,7 @@ def _run_npm_install_deterministic(
     falls back to ``npm install`` only if ``npm ci`` fails (e.g. lockfile out of
     sync on a WIP checkout).  Without this, ``npm install`` on npm ≥ 10 silently
     rewrites committed lockfiles (stripping ``"peer": true`` etc.), which leaves
-    the working tree dirty and causes the next ``hermes update`` to stash the
+    the working tree dirty and causes the next ``atlas update`` to stash the
     lockfile — repeatedly.
     """
     # unicode-animations' postinstall animates to /dev/tty (bypasses
@@ -4985,9 +4992,9 @@ def _desktop_dist_exists(desktop_dir: Path) -> bool:
 # SHA-256 content hash of the source tree so that:
 #   - ``git checkout`` / ``git pull`` that touch mtimes but not content
 #     don't trigger a rebuild
-#   - ``hermes update`` can unconditionally call ``hermes desktop --build-only``
+#   - ``atlas update`` can unconditionally call ``atlas desktop --build-only``
 #     and it will skip if nothing actually changed
-#   - ``hermes desktop`` (interactive launch) skips the build when the
+#   - ``atlas desktop`` (interactive launch) skips the build when the
 #     stamp matches, making repeated launches fast
 #
 # Stamp file: $HERMES_HOME/desktop-build-stamp.json
@@ -5069,7 +5076,7 @@ def _desktop_build_needed(desktop_dir: Path, project_root: Path, *, source_mode:
 
     Compares the current content hash against the saved stamp. Also returns
     True if the expected build artifact doesn't exist (e.g. first run after
-    ``hermes update`` that pulled new source but hasn't built yet).
+    ``atlas update`` that pulled new source but hasn't built yet).
     """
     # If there's no build output at all, we definitely need to build
     if source_mode:
@@ -5462,7 +5469,7 @@ def _force_adhoc_macos_signing(env: dict, *, source_mode: bool) -> bool:
     """Stop electron-builder grabbing a random keychain identity on self-update.
 
     The desktop self-updater rebuilds *and re-signs the .app on the end user's
-    machine* (``hermes desktop --build-only`` → electron-builder ``--dir``).
+    machine* (``atlas desktop --build-only`` → electron-builder ``--dir``).
     With ``CSC_IDENTITY_AUTO_DISCOVERY`` on (its default), electron-builder
     signs the ``type=distribution``, hardened-runtime bundle with whatever it
     finds in that user's keychain — typically a personal "Apple Development"
@@ -5533,7 +5540,7 @@ def _desktop_linux_sandbox_fixup(packaged_executable: Path) -> bool:
 
     sandbox = packaged_executable.parent / "chrome-sandbox"
     if not sandbox.exists():
-        print(f"✗ Hermes Desktop is missing Electron's Linux sandbox helper: {sandbox}")
+        print(f"✗ Atlas Desktop is missing Electron's Linux sandbox helper: {sandbox}")
         return False
 
     # Reject symlinks — chown/chmod must not follow an attacker-controlled
@@ -5553,7 +5560,7 @@ def _desktop_linux_sandbox_fixup(packaged_executable: Path) -> bool:
 
     sudo = shutil.which("sudo")
     if not sudo:
-        print("✗ Hermes Desktop requires sudo to configure Electron's Linux sandbox helper.")
+        print("✗ Atlas Desktop requires sudo to configure Electron's Linux sandbox helper.")
         return False
 
     print("→ Configuring Electron Linux sandbox helper (sudo required)...")
@@ -5633,7 +5640,7 @@ def cmd_gui(args: argparse.Namespace):
     # Desktop launch options from config.yaml (`desktop.electron_flags`,
     # `desktop.disable_gpu`). The GPU policy is bridged to the env var the
     # Electron app already reads; an explicit env var still wins over config so
-    # `HERMES_DESKTOP_DISABLE_GPU=... hermes desktop` keeps working.
+    # `HERMES_DESKTOP_DISABLE_GPU=... atlas desktop` keeps working.
     config_electron_flags, config_disable_gpu = _desktop_launch_options()
     if config_disable_gpu != "auto" and "HERMES_DESKTOP_DISABLE_GPU" not in os.environ:
         env["HERMES_DESKTOP_DISABLE_GPU"] = config_disable_gpu
@@ -5768,7 +5775,7 @@ def cmd_gui(args: argparse.Namespace):
                     print("  If this says \"Access is denied\" on Hermes.exe, close any")
                     print("  running Hermes desktop window and retry.")
                 print("  If the log shows Electron download retries, rebuild via a mirror:")
-                print("    ELECTRON_MIRROR=<mirror-base-url> hermes desktop --force-build")
+                print("    ELECTRON_MIRROR=<mirror-base-url> atlas desktop --force-build")
                 sys.exit(build_result.returncode or 1)
             packaged_executable = _desktop_packaged_executable(desktop_dir)
             if not source_mode:
@@ -5801,7 +5808,7 @@ def cmd_gui(args: argparse.Namespace):
         return
 
     if source_mode:
-        print("→ Launching Hermes Desktop from source build...")
+        print("→ Launching Atlas Desktop from source build...")
         launch_result = subprocess.run([npm, "exec", "--", "electron", "."], cwd=desktop_dir, env=env, check=False)
         sys.exit(launch_result.returncode)
 
@@ -5819,7 +5826,7 @@ def cmd_gui(args: argparse.Namespace):
             sys.exit(1)
 
     launch_command.extend(config_electron_flags)
-    print(f"→ Launching packaged Hermes Desktop: {' '.join(launch_command)}")
+    print(f"→ Launching packaged Atlas Desktop: {' '.join(launch_command)}")
     launch_result = subprocess.run(launch_command, cwd=desktop_dir, env=env, check=False)
     sys.exit(launch_result.returncode)
 
@@ -5831,7 +5838,7 @@ def _find_stale_dashboard_pids(
     """Return PIDs of ``hermes dashboard`` processes other than ourselves.
 
     ``hermes dashboard`` is a long-lived server process commonly started and
-    forgotten.  When ``hermes update`` replaces files on disk, the running
+    forgotten.  When ``atlas update`` replaces files on disk, the running
     process keeps the old Python backend in memory while the JS bundle on
     disk is updated, causing a silent frontend/backend mismatch (e.g. new
     auth headers the old backend doesn't recognise → every API call 401s).
@@ -5843,7 +5850,7 @@ def _find_stale_dashboard_pids(
     ``_kill_stale_dashboard_processes`` for the kill.
 
     *exclude_pids* is an optional set of PIDs that must never be returned.
-    This is used by the Hermes Desktop Electron app to protect its own
+    This is used by the Atlas Desktop Electron app to protect its own
     backend child process: when the desktop spawns ``hermes serve`` as
     a backend and triggers an auto-update, the update must not kill the
     backend that the desktop itself manages.  The desktop sets the
@@ -5944,7 +5951,7 @@ def _find_stale_dashboard_pids(
 
 
 def _print_curator_first_run_notice() -> None:
-    """Print a short heads-up about the skill curator after `hermes update`.
+    """Print a short heads-up about the skill curator after `atlas update`.
 
     Only fires when the curator is enabled AND has no recorded run yet, which
     is exactly the window where the gateway ticker used to fire Curator
@@ -5989,11 +5996,11 @@ def _print_curator_recent_run_notice() -> None:
 
     The curator runs in the background (gateway tick + CLI session start),
     so users learn about skill consolidations only by stumbling into a
-    rename. ``hermes update`` is a high-attention surface — surface the
+    rename. ``atlas update`` is a high-attention surface — surface the
     most recent run's rename map here, once.
 
     Show-once: state stamps ``last_run_summary_shown_at`` after printing.
-    Subsequent ``hermes update`` invocations skip the block until a newer
+    Subsequent ``atlas update`` invocations skip the block until a newer
     curator run lands. Silent when the curator has never run, when the
     most recent summary has already been shown, or when the summary has
     no rename information to display (no archives).
@@ -6075,7 +6082,7 @@ def _kill_stale_dashboard_processes(
 ) -> None:
     """Kill running ``hermes dashboard`` processes.
 
-    Called at the end of ``hermes update`` (default ``reason``) and also
+    Called at the end of ``atlas update`` (default ``reason``) and also
     from ``hermes dashboard --stop`` (which overrides ``reason``).  The
     dashboard has no service manager, so after a code update the running
     process is guaranteed to be serving stale Python against a
@@ -6091,7 +6098,7 @@ def _kill_stale_dashboard_processes(
     launch args (--host, --port, --insecure, --tui, --no-open).  The user
     restarts it manually; a hint is printed.
     """
-    # When the Hermes Desktop Electron app spawns this dashboard as a
+    # When the Atlas Desktop Electron app spawns this dashboard as a
     # backend child, it sets HERMES_DESKTOP_CHILD_PID so that the update
     # path can skip killing the desktop-managed process.  (#37532)
     exclude: set[int] | None = None
@@ -6232,7 +6239,7 @@ def _atomic_replace_dir(src: str, dst: str) -> None:
 
 
 def _update_via_zip(args):
-    """Update Hermes Agent by downloading a ZIP archive.
+    """Update Atlas by downloading a ZIP archive.
 
     Used on Windows when git file I/O is broken (antivirus, NTFS filter
     drivers causing 'Invalid argument' errors on file creation).
@@ -6256,8 +6263,8 @@ def _update_via_zip(args):
         print(
             "  This path runs when git file I/O is broken on the system. "
             "Either resolve the git-side breakage (typically an antivirus "
-            "or NTFS filter holding files open) and rerun `hermes update "
-            f"--branch {branch}`, or update against main with `hermes update`."
+            "or NTFS filter holding files open) and rerun `atlas update "
+            f"--branch {branch}`, or update against main with `atlas update`."
         )
         sys.exit(1)
     zip_url = (
@@ -6665,7 +6672,7 @@ def _discard_stashed_changes(
 
 
 # =========================================================================
-# Fork detection and upstream management for `hermes update`
+# Fork detection and upstream management for `atlas update`
 # =========================================================================
 
 OFFICIAL_REPO_URLS = {
@@ -6910,7 +6917,7 @@ def _invalidate_update_cache():
     reports a stale "commits behind" count after a successful update.
 
     The git repo is shared across profiles — when one profile runs
-    ``hermes update``, every profile is now current.
+    ``atlas update``, every profile is now current.
     """
     homes = []
     # Default profile home (Docker-aware — uses /opt/data in Docker)
@@ -6962,7 +6969,7 @@ def _load_installable_optional_extras(group: str = "all") -> list[str]:
     return referenced
 
 
-# Install-scoped breadcrumb dropped right before ``hermes update`` mutates the
+# Install-scoped breadcrumb dropped right before ``atlas update`` mutates the
 # venv and cleared only after the dependency install verifies clean.  If a user
 # kills the update mid-install (Ctrl-C, terminal close, WSL OOM), the marker
 # survives and the next ``hermes`` launch finishes the install instead of
@@ -6994,7 +7001,7 @@ def _clear_update_incomplete_marker() -> None:
 
 
 def _recover_from_interrupted_install() -> None:
-    """Finish a dependency install that a prior ``hermes update`` left half-done.
+    """Finish a dependency install that a prior ``atlas update`` left half-done.
 
     Triggered on launch when ``.update-incomplete`` is present — meaning the
     code was pulled but the dep install was killed before it verified clean.
@@ -7111,7 +7118,7 @@ def _recover_from_interrupted_install() -> None:
         sys.stdout = sys.stderr
 
         print(
-            "⚠ A previous `hermes update` was interrupted mid-install — "
+            "⚠ A previous `atlas update` was interrupted mid-install — "
             "finishing dependency installation now..."
         )
 
@@ -7182,7 +7189,7 @@ def _run_install_with_heartbeat(
 
     Some resolvers/build backends (especially when compiling Rust/C extensions)
     can stay quiet for minutes. Emit a simple elapsed-time heartbeat so users
-    know ``hermes update`` is still progressing even if pip/uv itself is silent.
+    know ``atlas update`` is still progressing even if pip/uv itself is silent.
     """
     done = threading.Event()
     start = _time.time()
@@ -7248,15 +7255,15 @@ def _detect_concurrent_hermes_instances(
 
     Windows blocks DELETE/REPLACE on a running .exe — and even RENAME on the
     same .exe when another process opened it without ``FILE_SHARE_DELETE``.
-    The Hermes Desktop Electron app spawns ``hermes.EXE`` as a backend child,
-    so during ``hermes update`` the user-invoked process and the desktop's
+    The Atlas Desktop Electron app spawns ``hermes.EXE`` as a backend child,
+    so during ``atlas update`` the user-invoked process and the desktop's
     child both hold the same file. The quarantine rename then fails with
     ``[WinError 32]`` and uv inherits the lock.
 
     This helper enumerates processes whose ``exe`` matches one of the venv's
     shims (``hermes.exe`` / ``hermes-gateway.exe``) and returns ``(pid,
     process_name)`` pairs. The caller's own PID and its entire ancestor
-    chain are excluded so the running ``hermes update`` invocation never
+    chain are excluded so the running ``atlas update`` invocation never
     reports itself — this matters on Windows where the setuptools .exe
     launcher (``hermes.exe``) is a separate process from the Python
     interpreter it loads (``python.exe``).
@@ -7287,7 +7294,7 @@ def _detect_concurrent_hermes_instances(
     # setuptools-generated hermes.exe launcher is a separate native process
     # that spawns python.exe (the interpreter that runs our code).
     # os.getpid() returns the Python PID, but the launcher (which holds the
-    # file lock) is the parent. Without excluding it, every ``hermes update``
+    # file lock) is the parent. Without excluding it, every ``atlas update``
     # reports its own launcher as a concurrent instance — a false positive
     # (issues #29341, #34795).
     #
@@ -7370,7 +7377,7 @@ def _format_concurrent_instances_message(
     lines.append(f"  Updating now would fail to overwrite {shim} because")
     lines.append("  Windows blocks REPLACE on a running executable.")
     lines.append("")
-    lines.append("  Close Hermes Desktop, exit any open `hermes` REPLs, and")
+    lines.append("  Close Atlas Desktop, exit any open `hermes` REPLs, and")
     lines.append("  stop the gateway (`hermes gateway stop`) before retrying.")
     lines.append("")
     if matches:
@@ -7379,7 +7386,7 @@ def _format_concurrent_instances_message(
         lines.append("  stale, terminate them directly, then retry the update:")
         lines.append(f"      taskkill {pid_args} /F")
         lines.append("")
-    lines.append("  Override with `hermes update --force` if you've already")
+    lines.append("  Override with `atlas update --force` if you've already")
     lines.append("  confirmed those processes will not write to the venv.")
     return "\n".join(lines)
 
@@ -7392,7 +7399,7 @@ def _quarantine_running_hermes_exe(
     Windows allows RENAMING a mapped/running executable (the kernel tracks the
     file by handle, not path), but blocks DELETE/REPLACE while it's loaded. uv
     needs to overwrite the entry-point shims during ``pip install -e .``;
-    when ``hermes update`` runs, ``hermes.exe`` IS the live process, and uv
+    when ``atlas update`` runs, ``hermes.exe`` IS the live process, and uv
     fails with ``Access is denied. (os error 5)``.
 
     We rename live shims to ``hermes.exe.old.<unix-ms>`` first. uv then writes
@@ -7401,7 +7408,7 @@ def _quarantine_running_hermes_exe(
 
     Rename can still fail when *another* process has opened the .exe without
     ``FILE_SHARE_DELETE`` — typically AV real-time scanners with transient
-    handles (recovers in <1s), or the Hermes Desktop backend child process
+    handles (recovers in <1s), or the Atlas Desktop backend child process
     (won't recover until the user closes it). We mitigate:
 
     1. Retry up to ``max_attempts`` times with exponential backoff
@@ -7413,7 +7420,7 @@ def _quarantine_running_hermes_exe(
        update can complete; the user just needs to reboot to fully unload
        the stale image.
     3. Print a clear warning naming the most likely culprit (running
-       Hermes Desktop / gateway / REPL) and pointing to ``--force``.
+       Atlas Desktop / gateway / REPL) and pointing to ``--force``.
 
     Returns the list of (original, quarantined) pairs so the caller can roll
     back if the install itself fails before uv writes a replacement. Pairs
@@ -7480,8 +7487,8 @@ def _quarantine_running_hermes_exe(
             f"another process is holding it open)."
         )
         print(
-            "    Close Hermes Desktop, exit other `hermes` REPLs, stop the "
-            "gateway, or pause AV scanning, then re-run `hermes update`."
+            "    Close Atlas Desktop, exit other `hermes` REPLs, stop the "
+            "gateway, or pause AV scanning, then re-run `atlas update`."
         )
 
     return moved
@@ -7594,7 +7601,7 @@ def _refresh_active_lazy_features() -> None:
 
     When pyproject.toml's ``[all]`` extra was slimmed down (May 2026), most
     optional backends moved to ``tools/lazy_deps.py`` and only install on
-    first use. ``hermes update`` runs ``uv pip install -e .[all]`` which
+    first use. ``atlas update`` runs ``uv pip install -e .[all]`` which
     leaves those packages untouched — so if we bump a pin in
     :data:`LAZY_DEPS` (CVE response, transitive bug fix), users who already
     activated the backend keep the stale version forever.
@@ -7654,7 +7661,7 @@ def _refresh_active_lazy_features() -> None:
                 reason = reason[:200] + "..."
             print(f"  ⚠ {feature} failed to refresh: {reason}")
         print("  Backends keep their previously-installed version; rerun")
-        print("  `hermes update` once the upstream issue is resolved.")
+        print("  `atlas update` once the upstream issue is resolved.")
 
 
 def _install_python_dependencies_with_optional_fallback(
@@ -7715,7 +7722,7 @@ def _install_python_dependencies_with_optional_fallback(
     # partial installs where a newly added base dep (e.g. ``pathspec``)
     # silently fails to land on top of a half-stale venv, and the only
     # symptom is a downstream subprocess crashing with ModuleNotFoundError
-    # hours later inside ``hermes update``'s desktop-rebuild or skill-sync
+    # hours later inside ``atlas update``'s desktop-rebuild or skill-sync
     # stage. Reinstall with --reinstall to force resolution if anything is
     # missing, then re-verify so the failure surfaces here instead of
     # downstream.
@@ -7753,7 +7760,7 @@ def _verify_console_scripts_installed(
 
     On Windows, ``uv pip install -e .`` can register ``hermes.exe`` in the
     wheel RECORD while the file never lands on disk — typically when the live
-    ``hermes.exe`` shim is locked during ``hermes update``, or when uv/distlib
+    ``hermes.exe`` shim is locked during ``atlas update``, or when uv/distlib
     skips a launcher write. The symptom is ``hermes-agent.exe`` and
     ``hermes-acp.exe`` present but ``hermes.exe`` missing, so ``hermes`` drops
     off PATH even though the install reported success (issue #52931).
@@ -7798,7 +7805,7 @@ def _verify_console_scripts_installed(
     except subprocess.CalledProcessError as e:
         logger.warning("console script verification: repair install failed: %s", e)
         print(
-            "  ⚠ Entry point repair failed; try `hermes update --force` after "
+            "  ⚠ Entry point repair failed; try `atlas update --force` after "
             "closing other hermes processes."
         )
         return
@@ -7891,7 +7898,7 @@ def _verify_core_dependencies_installed(
         return
 
     # Run the check inside the venv Python — sys.executable here may be the
-    # outer Python that drove ``hermes update``, not the venv we just wrote
+    # outer Python that drove ``atlas update``, not the venv we just wrote
     # to. The uv install_cmd_prefix encodes which environment we targeted
     # (either ``[uv, pip]`` with VIRTUAL_ENV in env, or
     # ``[sys.executable, -m, pip]`` for the in-process Python); resolve the
@@ -7949,7 +7956,7 @@ def _verify_core_dependencies_installed(
         )
     except subprocess.CalledProcessError as e:
         logger.warning("dep verification: repair install failed: %s", e)
-        print("  ⚠ Repair install failed; check `hermes update` output above.")
+        print("  ⚠ Repair install failed; check `atlas update` output above.")
         return
 
     still_missing = _missing_deps()
@@ -7982,7 +7989,7 @@ def _verify_core_dependencies_installed(
         logger.warning("dep verification: per-package repair failed: %s", e)
         print(
             f"  ⚠ Could not install: {', '.join(still_missing)}. "
-            "Run `hermes update --force` after closing other hermes processes."
+            "Run `atlas update --force` after closing other hermes processes."
         )
         return
 
@@ -7990,7 +7997,7 @@ def _verify_core_dependencies_installed(
     if final_missing:
         print(
             f"  ⚠ Still missing after repair: {', '.join(final_missing)}. "
-            "Run `hermes update --force` after closing other hermes processes."
+            "Run `atlas update --force` after closing other hermes processes."
         )
     else:
         print("  ✓ All declared core dependencies now installed")
@@ -8118,7 +8125,7 @@ def _update_node_dependencies() -> None:
     # With a single workspace lockfile the root install would cover ALL
     # workspaces — but apps/desktop pulls in Electron as a devDependency,
     # and its postinstall downloads a ~200MB binary.  Most users don't
-    # need desktop during `hermes update`, so we install root-only first
+    # need desktop during `atlas update`, so we install root-only first
     # then add just the workspaces the CLI/TUI/web build actually requires.
     # Desktop deps are installed on demand by the desktop launcher
     # (see _desktop_build_needed).
@@ -8131,7 +8138,7 @@ def _update_node_dependencies() -> None:
     # NOTE: capture_output=False here is deliberate (#18840) — optional
     # postinstall scripts (e.g. @askjo/camofox-browser's browser-binary fetch)
     # print download progress, and capturing it makes a long download look
-    # hung. The chatty npm-deprecation noise during `hermes update` comes from
+    # hung. The chatty npm-deprecation noise during `atlas update` comes from
     # the *desktop* build, not this step; that one is captured to update.log.
     root_args = [*extra_args, "--workspaces=false"]
     root_result = _run_npm_install_deterministic(
@@ -8168,7 +8175,7 @@ def _update_node_dependencies() -> None:
 
 
 class _UpdateOutputStream:
-    """Stream wrapper used during ``hermes update`` to survive terminal loss.
+    """Stream wrapper used during ``atlas update`` to survive terminal loss.
 
     Wraps the process's original stdout/stderr so that:
 
@@ -8181,7 +8188,7 @@ class _UpdateOutputStream:
       stops.
 
     Combined with ``SIGHUP -> SIG_IGN`` installed by
-    ``_install_hangup_protection``, this makes ``hermes update`` safe to
+    ``_install_hangup_protection``, this makes ``atlas update`` safe to
     run in a plain SSH session that might disconnect mid-install.
     """
 
@@ -8243,7 +8250,7 @@ class _UpdateOutputStream:
 def _install_hangup_protection(gateway_mode: bool = False):
     """Protect ``cmd_update`` from SIGHUP and broken terminal pipes.
 
-    Users commonly run ``hermes update`` in an SSH session or a terminal
+    Users commonly run ``atlas update`` in an SSH session or a terminal
     that may close mid-install.  Without protection, ``SIGHUP`` from the
     terminal kills the Python process during ``pip install`` and leaves
     the venv half-installed; the documented workaround ("use screen /
@@ -8262,7 +8269,7 @@ def _install_hangup_protection(gateway_mode: bool = False):
     **intentionally left alone** — those are legitimate cancellation
     signals the user or OS sent on purpose.
 
-    In gateway mode (``hermes update --gateway``) the update is already
+    In gateway mode (``atlas update --gateway``) the update is already
     spawned detached from a terminal, so this function is a no-op.
 
     Returns a dict that ``cmd_update`` can pass to
@@ -8305,7 +8312,7 @@ def _install_hangup_protection(gateway_mode: bool = False):
         import datetime as _dt
 
         log_file.write(
-            f"\n=== hermes update started "
+            f"\n=== atlas update started "
             f"{_dt.datetime.now().isoformat(timespec='seconds')} ===\n"
         )
 
@@ -8324,7 +8331,7 @@ def _install_hangup_protection(gateway_mode: bool = False):
 def _log_only_write(text: str) -> None:
     """Write ``text`` to ``~/.hermes/logs/update.log`` only, never the terminal.
 
-    During ``hermes update`` ``sys.stdout`` is an ``_UpdateOutputStream`` that
+    During ``atlas update`` ``sys.stdout`` is an ``_UpdateOutputStream`` that
     mirrors to both the terminal and ``update.log``. Loud, low-signal
     subprocess output (npm installs, the Electron/vite build, the cua-driver
     installer's "Next steps" wall) should be captured and tucked into the log
@@ -8399,7 +8406,7 @@ def _resolve_update_branch(args) -> str:
 
 
 def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
-    """Implement ``hermes update --check``: fetch and report without installing.
+    """Implement ``atlas update --check``: fetch and report without installing.
 
     ``branch`` selects which branch the check compares against. Default is
     "main"; callers can pass another branch to ask "are there new commits
@@ -8420,7 +8427,7 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
         print(f"⚠ {format_unsupported_install_warning(method)}")
     if method == "docker":
         # Docker can't ``git fetch`` from within the container.  Surface the
-        # same long-form ``docker pull`` guidance ``hermes update`` (apply
+        # same long-form ``docker pull`` guidance ``atlas update`` (apply
         # path) uses — telling the user to "reinstall via curl" or that
         # ".git is missing" would point them at the wrong remediation.
         from hermes_cli.config import format_docker_update_message
@@ -8577,16 +8584,16 @@ def _ensure_fhs_path_guard() -> None:
 
     Mirrors the post-symlink probe added to ``scripts/install.sh`` so that
     existing FHS-layout root installs on RHEL/CentOS/Rocky/Alma 8+ get
-    repaired on ``hermes update`` without requiring a reinstall.  The
+    repaired on ``atlas update`` without requiring a reinstall.  The
     installer's assumption that ``/usr/local/bin`` is on PATH for every
     standard shell breaks on those distros in non-login interactive shells
     (su, sudo -s, tmux panes, some web terminals): /etc/bashrc doesn't
     add /usr/local/bin and /root/.bash_profile doesn't either.  Symptom:
-    ``hermes`` prints ``command not found`` even though the symlink lives
-    at /usr/local/bin/hermes.
+    ``atlas`` prints ``command not found`` even though the symlink lives
+    at /usr/local/bin/atlas.
 
     Silent no-op on: non-Linux, non-root, non-FHS installs, and any system
-    where ``bash -i -c 'command -v hermes'`` already resolves.  Idempotent.
+    where ``bash -i -c 'command -v atlas'`` already resolves.  Idempotent.
     """
     if sys.platform != "linux":
         return
@@ -8595,9 +8602,9 @@ def _ensure_fhs_path_guard() -> None:
             return
     except AttributeError:
         return
-    # Only act when this is actually an FHS-layout install (command link at
-    # /usr/local/bin/hermes, code at /usr/local/lib/hermes-agent).
-    fhs_link = Path("/usr/local/bin/hermes")
+    # Only act when this is actually an FHS-layout install.
+    public_command = command_name()
+    fhs_link = Path("/usr/local/bin") / public_command
     if not fhs_link.is_symlink() and not fhs_link.exists():
         return
 
@@ -8615,7 +8622,7 @@ def _ensure_fhs_path_guard() -> None:
                 "bash",
                 "-i",
                 "-c",
-                "command -v hermes",
+                f"command -v {public_command}",
             ],
             capture_output=True,
             text=True,
@@ -8628,7 +8635,7 @@ def _ensure_fhs_path_guard() -> None:
 
     path_line = 'export PATH="/usr/local/bin:$PATH"'
     path_comment = (
-        "# Hermes Agent — ensure /usr/local/bin is on PATH " "(RHEL non-login shells)"
+        "# Atlas — ensure /usr/local/bin is on PATH " "(RHEL non-login shells)"
     )
     wrote_any = False
     for candidate in (".bashrc", ".bash_profile"):
@@ -8666,7 +8673,7 @@ def _run_pre_update_backup(args) -> None:
 
     Gated on ``updates.pre_update_backup`` in config (default false).  Off
     by default because the zip can add minutes to every update on large
-    HERMES_HOME directories.  The ``--backup`` flag on ``hermes update``
+    HERMES_HOME directories.  The ``--backup`` flag on ``atlas update``
     opts in for a single run; ``--no-backup`` forces it off when config
     has it enabled.  Never raises — a backup failure should not block the
     update itself.
@@ -8822,11 +8829,11 @@ def _venv_core_imports_healthy() -> tuple[bool, str]:
     """Probe the project venv for the core imports the backend needs to boot.
 
     Runs a tiny import check inside the venv interpreter (NOT this process —
-    ``hermes update`` may be driven by a different Python). Catches the
+    ``atlas update`` may be driven by a different Python). Catches the
     half-updated-venv state: git checkout current but a dependency sync that
     failed or was killed partway (e.g. Windows access-denied on a loaded
     .pyd), leaving imports like ``fastapi``'s new transitive deps missing.
-    Without this probe, ``hermes update`` on a current checkout prints
+    Without this probe, ``atlas update`` on a current checkout prints
     "Already up to date!" and returns without ever re-syncing dependencies —
     the user's install stays broken no matter how many times they update
     (ryanc's incident, July 2026).
@@ -8984,7 +8991,7 @@ def _format_venv_python_holders_message(matches: list[tuple[int, str, str]]) -> 
         hint = ""
         low = cmdline.lower()
         if "serve" in low or "dashboard" in low:
-            hint = "  ← Hermes Desktop backend (close the desktop app)"
+            hint = "  ← Atlas Desktop backend (close the desktop app)"
         elif "gateway" in low:
             hint = "  ← gateway"
         lines.append(f"  PID {pid}  {name}  {cmdline}{hint}")
@@ -9000,8 +9007,8 @@ def _format_venv_python_holders_message(matches: list[tuple[int, str, str]]) -> 
     lines.append(
         "  Close the Hermes desktop app / other Hermes terminals, then re-run:"
     )
-    lines.append("    hermes update")
-    lines.append("  (or use `hermes update --force-venv` to proceed anyway at your own risk)")
+    lines.append("    atlas update")
+    lines.append("  (or use `atlas update --force-venv` to proceed anyway at your own risk)")
     return "\n".join(lines)
 
 
@@ -9252,7 +9259,7 @@ def _discard_lockfile_churn(git_cmd, repo_root):
 
     npm rewrites lockfiles non-deterministically at install/build time. On a
     managed install those diffs are never intentional, so we discard them so
-    ``hermes update`` sees a clean tree instead of autostashing every run.
+    ``atlas update`` sees a clean tree instead of autostashing every run.
     Best-effort; only ever touches files named ``package-lock.json``.
     """
     try:
@@ -9291,7 +9298,7 @@ def _discard_lockfile_churn(git_cmd, repo_root):
 
 
 def cmd_update(args):
-    """Update Hermes Agent to the latest version.
+    """Update Atlas to the latest version.
 
     Thin wrapper around ``_cmd_update_impl``: installs hangup protection,
     runs the update, then restores stdio on the way out (even on
@@ -9316,7 +9323,7 @@ def cmd_update(args):
         print(f"⚠ {format_unsupported_install_warning(_install_method_for_warning)}")
 
     if is_managed():
-        managed_error("update Hermes Agent")
+        managed_error("update Atlas")
         return
 
     # Docker users can't ``git pull`` — the image excludes ``.git`` from
@@ -9331,7 +9338,7 @@ def cmd_update(args):
 
     if getattr(args, "check", False):
         # --check honors --branch so the "any new commits?" answer matches
-        # what a subsequent `hermes update --branch=<x>` would actually pull.
+        # what a subsequent `atlas update --branch=<x>` would actually pull.
         branch = _resolve_update_branch(args)
         _cmd_update_check(
             branch=branch,
@@ -9447,7 +9454,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
             logger.debug("Could not read updates.non_interactive_local_changes: %s", exc)
             discard_local_changes = False
 
-    print("⚕ Updating Hermes Agent...")
+    print("⚕ Updating Atlas...")
     print()
 
     # On Windows, abort early if another hermes.exe is holding the venv shim
@@ -9741,7 +9748,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     print("✓ Dependencies repaired!")
                 else:
                     print(f"⚠ Venv still unhealthy after repair: {detail_after}")
-                    print("  Close all Hermes windows/gateways and re-run: hermes update")
+                    print("  Close all Hermes windows/gateways and re-run: atlas update")
             else:
                 print("✓ Already up to date!")
             _resume_windows_gateways_after_update(_windows_gateway_resume)
@@ -9771,7 +9778,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # Capture the pre-pull SHA so we can auto-roll-back if the new code
         # has a syntax error in a critical-path file (PR #28452 incident:
         # orphan merge-conflict markers in hermes_cli/config.py bricked
-        # every user who ran ``hermes update`` for the 7 minutes between
+        # every user who ran ``atlas update`` for the 7 minutes between
         # the bad commit and the fix landing).
         pre_pull_sha = _capture_head_sha(git_cmd, PROJECT_ROOT)
         try:
@@ -9832,7 +9839,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     )
                     if rollback_result.returncode == 0:
                         print("  ✓ Rollback complete — your install is unchanged.")
-                        print("  Try ``hermes update`` again later once a fix lands.")
+                        print("  Try ``atlas update`` again later once a fix lands.")
                     else:
                         print("  ✗ Rollback failed. Recover manually with:")
                         print(f"    cd {PROJECT_ROOT} && git reset --hard {pre_pull_sha}")
@@ -9962,12 +9969,12 @@ def _cmd_update_impl(args, gateway_mode: bool):
         _build_web_ui(PROJECT_ROOT / "web")
 
         # Rebuild the desktop app if the source tree changed since the last
-        # build.  ``hermes desktop --build-only`` uses the content-hash stamp
+        # build.  ``atlas desktop --build-only`` uses the content-hash stamp
         # internally, so this is effectively a no-op when nothing changed.
         # Only bother if the user has a desktop app installed (indicated by
         # an existing packaged executable or desktop dist); people who have
-        # never run ``hermes desktop`` shouldn't be forced into a full
-        # Electron build by ``hermes update``.
+        # never run ``atlas desktop`` shouldn't be forced into a full
+        # Electron build by ``atlas update``.
         desktop_dir = PROJECT_ROOT / "apps" / "desktop"
         has_desktop_app = _desktop_packaged_executable(desktop_dir) is not None or _desktop_dist_exists(desktop_dir)
         from hermes_constants import find_node_executable
@@ -9985,7 +9992,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
             if build_result.returncode != 0:
                 build_result = _run_logged_subprocess(_desktop_build_cmd, cwd=PROJECT_ROOT)
             if build_result.returncode != 0:
-                print("  ⚠ Desktop build failed (non-fatal; run `hermes desktop` to retry)")
+                print("  ⚠ Desktop build failed (non-fatal; run `atlas desktop` to retry)")
                 tail = "\n".join((build_result.stdout or "").strip().splitlines()[-15:])
                 if tail:
                     print(tail)
@@ -10153,7 +10160,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 print("  ✓ Config format updated (no new settings to configure)")
             except Exception as _mig_err:
                 print(f"  ⚠️  Config format update failed: {_mig_err}")
-                print("     Run 'hermes config migrate' to retry.")
+                print("     Run 'atlas config migrate' to retry.")
         elif needs_migration:
             print()
             # Show WHAT changed, not just a count, so the user can make an
@@ -10231,10 +10238,10 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     print()
                     print("✓ Configuration updated!")
                 if (gateway_mode or assume_yes or response == "auto") and missing_env:
-                    print("  ℹ API keys require manual entry: hermes config migrate")
+                    print("  ℹ API keys require manual entry: atlas config migrate")
             else:
                 print()
-                print("Skipped. Run 'hermes config migrate' later to configure.")
+                print("Skipped. Run 'atlas config migrate' later to configure.")
         else:
             print("  ✓ Configuration is up to date")
 
@@ -10291,7 +10298,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # Refresh the cua-driver binary used by the Computer Use toolset.
         # The upstream installer is gated on supported platforms and on the
         # binary already being on PATH, so this is a no-op for users who
-        # don't have it. Tying the refresh to ``hermes update`` gives users a
+        # don't have it. Tying the refresh to ``atlas update`` gives users a
         # predictable cadence (matches when they pull new agent code) without
         # adding startup latency or a per-launch GitHub API call.
         try:
@@ -10321,7 +10328,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
             logger.debug("cua-driver refresh failed: %s", e)
 
         # Write exit code *before* the gateway restart attempt.
-        # When running as ``hermes update --gateway`` (spawned by the gateway's
+        # When running as ``atlas update --gateway`` (spawned by the gateway's
         # /update command), this process lives inside the gateway's systemd
         # cgroup.  A graceful SIGUSR1 restart keeps the drain loop alive long
         # enough for the exit-code marker to be written below, but the
@@ -10727,7 +10734,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                                     f"  ⚠ {svc_name} is a system service and restarting it needs root.\n"
                                     f"    Restart it manually to load the new version:\n"
                                     f"      sudo systemctl restart {svc_name}\n"
-                                    f"    To let `hermes update` restart it automatically, allow\n"
+                                    f"    To let `atlas update` restart it automatically, allow\n"
                                     f"    passwordless sudo for systemctl, or run updates with sudo."
                                 )
                                 continue
@@ -10988,7 +10995,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # When both hermes.service (from a pre-rename install) and the
         # current hermes-gateway.service are enabled, they SIGTERM-fight
         # for the same bot token (see PR #11909). Flagging here means
-        # every `hermes update` surfaces the issue until the user migrates.
+        # every `atlas update` surfaces the issue until the user migrates.
         try:
             from hermes_cli.gateway import (
                 has_legacy_hermes_units,
@@ -11022,7 +11029,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
         print()
         print("Tip: You can now select a provider and model:")
-        print("  hermes model              # Select provider and model")
+        print("  atlas model              # Select provider and model")
 
     except subprocess.CalledProcessError as e:
         if sys.platform == "win32":
@@ -11967,7 +11974,7 @@ def cmd_dashboard(args):
         if not pids:
             print("No hermes dashboard processes running.")
             sys.exit(0)
-        # Reuse the same SIGTERM-grace-SIGKILL path used after `hermes update`.
+        # Reuse the same SIGTERM-grace-SIGKILL path used after `atlas update`.
         _kill_stale_dashboard_processes(reason="requested via --stop")
         # _kill_stale_dashboard_processes prints outcomes itself.  Exit 0 if
         # we killed at least one, 1 if they were all unkillable.
@@ -12692,7 +12699,7 @@ def cmd_memory(args):
 
 
 def cmd_acp(args):
-    """Launch Hermes Agent as an ACP server."""
+    """Launch Atlas as an ACP server."""
     try:
         from acp_adapter.entry import main as acp_main
 
@@ -12796,14 +12803,14 @@ def main():
         pass
 
     # Sweep stale ``hermes.exe.old.*`` quarantine files left by previous
-    # ``hermes update`` runs on Windows. Silent no-op on non-Windows or when
+    # ``atlas update`` runs on Windows. Silent no-op on non-Windows or when
     # there's nothing to clean. See ``_quarantine_running_hermes_exe``.
     try:
         _cleanup_quarantined_exes()
     except Exception:
         pass
 
-    # Self-heal a venv left half-built by an interrupted ``hermes update``
+    # Self-heal a venv left half-built by an interrupted ``atlas update``
     # (Ctrl-C, terminal close, WSL OOM mid-install). Skip when the user is
     # *running* update — that flow writes and clears its own marker, and we
     # don't want a recovery install racing the real one. Never raises.
@@ -12872,7 +12879,7 @@ def main():
     )
     fallback_subparsers.add_parser(
         "add",
-        help="Pick a provider + model (same picker as `hermes model`) and append to the chain",
+        help="Pick a provider + model (same picker as `atlas model`) and append to the chain",
     )
     fallback_subparsers.add_parser(
         "remove",
@@ -14554,7 +14561,7 @@ def main():
     #
     # The canonical name is "desktop"; "gui" is kept as a deprecated alias
     # for one release. The Hermes-Setup.exe success screen tells users to
-    # run `hermes desktop` from a terminal, so the canonical name needs
+    # run `atlas desktop` from a terminal, so the canonical name needs
     # to be the one that appears in --help (argparse promotes the primary
     # name; aliases stay hidden).
     # =========================================================================
@@ -14571,6 +14578,10 @@ def main():
     # prompt-size command  (parser built in hermes_cli/subcommands/prompt_size.py)
     # =========================================================================
     build_prompt_size_parser(subparsers, cmd_prompt_size=cmd_prompt_size)
+
+    # Subcommands are registered across multiple upstream modules. Brand the
+    # completed parser tree once so their help copy presents Atlas too.
+    brand_argparse(parser)
 
     # =========================================================================
     # Parse and execute

@@ -282,7 +282,7 @@ def _run_agent_tool_execution_middleware(
 ) -> tuple[Any, dict]:
     # Agent-owned tools (memory, session recall, delegation, desktop terminal
     # reads, context-engine tools, and memory-provider tools) do not pass
-    # through model_tools.handle_function_call(). Keep their mandatory Altas
+    # through model_tools.handle_function_call(). Keep their mandatory Atlas
     # authorization at this shared boundary so neither sequential nor
     # concurrent dispatch can bypass it. Check before execution middleware;
     # the guard is a no-op for ordinary upstream development sessions.

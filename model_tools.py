@@ -1068,14 +1068,14 @@ def handle_function_call(
         function_args = {}
     _tool_middleware_trace = list(tool_request_middleware_trace or [])
 
-    # Altas managed mode has one mandatory, fail-closed authorization gate.
+    # Atlas managed mode has one mandatory, fail-closed authorization gate.
     # It deliberately runs before Tool Search bridge dispatch, middleware, plugin
     # hooks, or registry dispatch, and it is not affected by any of the
     # skip_* flags above. Upstream plugin and middleware callback failures are
     # generally logged and allowed to continue; that behavior is useful for
     # extension points but is not a suitable commercial entitlement boundary.
     #
-    # Keep product policy out of this upstream seam. The imported Altas module
+    # Keep product policy out of this upstream seam. The imported Atlas module
     # owns device/lease context, server-side authorization, reason codes, and
     # audit behavior. Non-managed Hermes development sessions pass through.
     from altas.managed.policy_guard import guard_tool_call as _altas_guard_tool_call

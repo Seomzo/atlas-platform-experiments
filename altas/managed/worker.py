@@ -1,4 +1,4 @@
-"""Altas worker supervisor for the prototype walking skeleton."""
+"""Atlas worker supervisor for the prototype walking skeleton."""
 
 from __future__ import annotations
 
@@ -37,17 +37,17 @@ class WorkerSettings:
 
         return cls(
             control_plane_url=os.getenv(
-                "ALTAS_CONTROL_PLANE_URL", "http://127.0.0.1:8787"
+                "ATLAS_CONTROL_PLANE_URL", "http://127.0.0.1:8787"
             ).rstrip("/"),
-            device_token=required("ALTAS_DEVICE_TOKEN"),
-            device_id=required("ALTAS_DEVICE_ID"),
-            tenant_id=required("ALTAS_TENANT_ID"),
-            store_id=required("ALTAS_STORE_ID"),
-            agent_id=required("ALTAS_AGENT_ID"),
-            model_id=os.getenv("ALTAS_MODEL_ID", "altas-fixed-ops"),
-            poll_interval_seconds=float(os.getenv("ALTAS_POLL_INTERVAL_SECONDS", "3")),
+            device_token=required("ATLAS_DEVICE_TOKEN"),
+            device_id=required("ATLAS_DEVICE_ID"),
+            tenant_id=required("ATLAS_TENANT_ID"),
+            store_id=required("ATLAS_STORE_ID"),
+            agent_id=required("ATLAS_AGENT_ID"),
+            model_id=os.getenv("ATLAS_MODEL_ID", "altas-fixed-ops"),
+            poll_interval_seconds=float(os.getenv("ATLAS_POLL_INTERVAL_SECONDS", "3")),
             request_timeout_seconds=float(
-                os.getenv("ALTAS_REQUEST_TIMEOUT_SECONDS", "8")
+                os.getenv("ATLAS_REQUEST_TIMEOUT_SECONDS", "8")
             ),
         )
 
@@ -218,7 +218,7 @@ class AltasWorker:
                     {
                         "role": "system",
                         "content": (
-                            "You are Altas for Fixed Ops. Use only supplied "
+                            "You are Atlas for Fixed Ops. Use only supplied "
                             "synthetic aggregate metrics and never invent data."
                         ),
                     },

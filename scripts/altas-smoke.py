@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic end-to-end smoke test for the Altas walking skeleton."""
+"""Deterministic end-to-end smoke test for the Atlas walking skeleton."""
 
 from __future__ import annotations
 
@@ -61,10 +61,10 @@ def main() -> None:
             lease = heartbeat.json()["lease"]["token"]
             scope = {
                 **device,
-                "X-Altas-Lease": lease,
-                "X-Altas-Tenant-ID": DEMO_TENANT_ID,
-                "X-Altas-Store-ID": DEMO_STORE_ID,
-                "X-Altas-Agent-ID": DEMO_AGENT_ID,
+                "X-Atlas-Lease": lease,
+                "X-Atlas-Tenant-ID": DEMO_TENANT_ID,
+                "X-Atlas-Store-ID": DEMO_STORE_ID,
+                "X-Atlas-Agent-ID": DEMO_AGENT_ID,
             }
 
             next_job = client.get("/api/v1/worker/jobs/next", headers=scope)
@@ -73,8 +73,8 @@ def main() -> None:
             assert job["capability"] == "fixed_ops.daily_report"
             job_scope = {
                 **scope,
-                "X-Altas-Job-ID": job["id"],
-                "X-Altas-Claim-Token": job["claim_token"],
+                "X-Atlas-Job-ID": job["id"],
+                "X-Atlas-Claim-Token": job["claim_token"],
             }
 
             policy = client.post(

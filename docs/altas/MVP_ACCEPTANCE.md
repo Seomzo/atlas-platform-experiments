@@ -2,7 +2,7 @@
 
 ## Objective
 
-Prove that Altas can manage one local worker through a real control contract
+Prove that Atlas can manage one local worker through a real control contract
 before adding live Tekion, billing, Slack, or installer complexity.
 
 ## Required scenario
@@ -35,7 +35,7 @@ before adding live Tekion, billing, Slack, or installer complexity.
 - Python tests cover authentication, lease validation, scope isolation, policy,
   job transitions, model usage, and device revocation.
 - Managed-mode engine policy fails closed when the Control Plane is unavailable.
-- Static product surfaces consistently spell the name “Altas.”
+- Static product surfaces consistently spell the name “Atlas.”
 - A local quickstart works without external accounts.
 - The dashboard is usable at desktop and narrow viewport sizes.
 - All mocked boundaries are visibly labeled.
@@ -59,10 +59,10 @@ before adding live Tekion, billing, Slack, or installer complexity.
 ## Definition of done
 
 ```text
-make altas-dev
-make altas-worker
-make altas-test
-make altas-smoke
+make atlas-dev
+make atlas-worker
+make atlas-test
+make atlas-smoke
 ```
 
 Each command must be documented, deterministic, and safe to run on a developer

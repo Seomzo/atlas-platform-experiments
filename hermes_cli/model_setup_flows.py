@@ -281,7 +281,13 @@ def _model_flow_moa(config, current_model=""):
     _print_moa_preset(selected_name, preset)
 
 
-def _model_flow_nous(config, current_model="", args=None):
+def _model_flow_nous(
+    config,
+    current_model="",
+    args=None,
+    *,
+    propagate_login_abort: bool = False,
+):
     """Nous Portal provider: ensure logged in, then pick model."""
     from hermes_cli.auth import (
         get_provider_auth_state,
@@ -325,6 +331,8 @@ def _model_flow_nous(config, current_model="", args=None):
             except Exception:
                 pass
         except SystemExit:
+            if propagate_login_abort:
+                raise
             print("Login cancelled or failed.")
             return
         except Exception as exc:

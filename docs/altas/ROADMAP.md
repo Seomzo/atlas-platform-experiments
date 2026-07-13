@@ -1,10 +1,10 @@
-# Altas Roadmap
+# Atlas Roadmap
 
 ## Phase 0 — Preserve the engine baseline
 
 - Pin and document Hermes upstream.
 - Preserve MIT attribution.
-- Keep Altas changes isolated and establish a patch ledger.
+- Keep Atlas changes isolated and establish a patch ledger.
 - Record current fixed-ops workflow assumptions and sample outputs.
 
 ## Phase 1 — Managed worker walking skeleton
@@ -25,7 +25,7 @@
 
 ## Phase 3 — Design-partner appliance
 
-- Rebrand and harden the existing Electron wrapper as Altas Desktop.
+- Rebrand and harden the existing Electron wrapper as Atlas Desktop.
 - One-click enrollment and managed service installation.
 - macOS and Windows credential-vault adapters.
 - Whole-process isolation and outbound network policy.

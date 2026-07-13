@@ -1,4 +1,4 @@
-"""Altas control-plane API.
+"""Atlas control-plane API.
 
 Run the local prototype with::
 

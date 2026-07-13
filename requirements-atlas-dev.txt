@@ -1,4 +1,4 @@
-# Minimal, reproducible dependency set for the Altas walking skeleton.
+# Minimal, reproducible dependency set for the Atlas walking skeleton.
 # Versions align with the pinned upstream uv.lock where applicable.
 fastapi==0.133.1
 httpx==0.28.1

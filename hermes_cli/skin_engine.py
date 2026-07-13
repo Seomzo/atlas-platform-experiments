@@ -118,6 +118,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_constants import get_hermes_home
+from hermes_cli.brand import brand_text
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +155,7 @@ class SkinConfig:
 
     def get_branding(self, key: str, fallback: str = "") -> str:
         """Get a branding value with fallback."""
-        return self.branding.get(key, fallback)
+        return brand_text(self.branding.get(key, fallback))
 
 
 # =============================================================================

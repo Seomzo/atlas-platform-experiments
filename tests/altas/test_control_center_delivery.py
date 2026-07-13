@@ -27,7 +27,7 @@ def test_control_center_and_assets_are_served_with_security_headers(
         icon = client.get("/static/altas-mark.svg")
 
     assert page.status_code == 200
-    assert "<title>Altas Control Center</title>" in page.text
+    assert "<title>Atlas Control Center</title>" in page.text
     assert page.headers["cache-control"] == "no-store"
     assert "default-src 'self'" in page.headers["content-security-policy"]
     assert page.headers["x-frame-options"] == "DENY"

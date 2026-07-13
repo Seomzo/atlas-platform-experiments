@@ -1,4 +1,4 @@
-"""Fail-closed authorization for managed Altas workers."""
+"""Fail-closed authorization for managed Atlas workers."""
 
 from __future__ import annotations
 

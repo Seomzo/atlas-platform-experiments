@@ -55,16 +55,16 @@ def test_managed_agent_owned_tools_fail_closed_before_handler(
     tool_name: str,
 ) -> None:
     _run_middleware_inline(monkeypatch)
-    monkeypatch.setenv("ALTAS_MANAGED_MODE", "1")
+    monkeypatch.setenv("ATLAS_MANAGED_MODE", "1")
     for name in (
-        "ALTAS_CONTROL_PLANE_URL",
-        "ALTAS_DEVICE_TOKEN",
-        "ALTAS_LEASE_TOKEN",
-        "ALTAS_TENANT_ID",
-        "ALTAS_STORE_ID",
-        "ALTAS_DEVICE_ID",
-        "ALTAS_AGENT_ID",
-        "ALTAS_JOB_ID",
+        "ATLAS_CONTROL_PLANE_URL",
+        "ATLAS_DEVICE_TOKEN",
+        "ATLAS_LEASE_TOKEN",
+        "ATLAS_TENANT_ID",
+        "ATLAS_STORE_ID",
+        "ATLAS_DEVICE_ID",
+        "ATLAS_AGENT_ID",
+        "ATLAS_JOB_ID",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -87,7 +87,7 @@ def test_managed_agent_owned_tools_fail_closed_before_handler(
     assert handler_called is False
     assert observed_args == {"query": "sensitive"}
     assert json.loads(result) == {
-        "error": "Altas could not verify permission for this action. No tool was run.",
+        "error": "Atlas could not verify permission for this action. No tool was run.",
         "reason_code": "POLICY_UNAVAILABLE",
     }
 
@@ -96,7 +96,7 @@ def test_agent_owned_tools_preserve_upstream_behavior_outside_managed_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _run_middleware_inline(monkeypatch)
-    monkeypatch.delenv("ALTAS_MANAGED_MODE", raising=False)
+    monkeypatch.delenv("ATLAS_MANAGED_MODE", raising=False)
 
     result, observed_args = _run_agent_tool_execution_middleware(
         _Agent(),
@@ -115,16 +115,16 @@ def test_concurrent_invoke_tool_path_cannot_bypass_managed_guard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _run_middleware_inline(monkeypatch)
-    monkeypatch.setenv("ALTAS_MANAGED_MODE", "1")
+    monkeypatch.setenv("ATLAS_MANAGED_MODE", "1")
     for name in (
-        "ALTAS_CONTROL_PLANE_URL",
-        "ALTAS_DEVICE_TOKEN",
-        "ALTAS_LEASE_TOKEN",
-        "ALTAS_TENANT_ID",
-        "ALTAS_STORE_ID",
-        "ALTAS_DEVICE_ID",
-        "ALTAS_AGENT_ID",
-        "ALTAS_JOB_ID",
+        "ATLAS_CONTROL_PLANE_URL",
+        "ATLAS_DEVICE_TOKEN",
+        "ATLAS_LEASE_TOKEN",
+        "ATLAS_TENANT_ID",
+        "ATLAS_STORE_ID",
+        "ATLAS_DEVICE_ID",
+        "ATLAS_AGENT_ID",
+        "ATLAS_JOB_ID",
     ):
         monkeypatch.delenv(name, raising=False)
 

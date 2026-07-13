@@ -2,7 +2,7 @@
 
 ## Hermes Agent
 
-Altas incorporates and adapts Hermes Agent:
+Atlas incorporates and adapts Hermes Agent:
 
 - Project: Hermes Agent
 - Copyright: Copyright (c) 2025 Nous Research
@@ -12,18 +12,18 @@ Altas incorporates and adapts Hermes Agent:
 - License: MIT
 
 The complete upstream MIT license is preserved in the repository root at
-`LICENSE`. Altas modifications include a managed control plane, worker
+`LICENSE`. Atlas modifications include a managed control plane, worker
 supervisor, policy guard, model-gateway adapter, fixed-operations workflow
 prototype, product documentation, operator console, and product-facing
 branding.
 
 The MIT license grants rights in the upstream code. It does not grant rights
-to third-party trademarks or imply that Nous Research endorses Altas.
+to third-party trademarks or imply that Nous Research endorses Atlas.
 
 ## Distribution review
 
 Before any commercial binary release, generate a complete software bill of
 materials and review the licenses and redistribution terms of all bundled
 Python, npm, Rust, browser, font, image, and native-binary dependencies.
-Existing upstream artwork and product identity must not be reused as Altas
+Existing upstream artwork and product identity must not be reused as Atlas
 branding without a separate rights review.

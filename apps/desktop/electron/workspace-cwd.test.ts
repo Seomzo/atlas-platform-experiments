@@ -10,7 +10,7 @@ import test from 'node:test'
 
 import { isPackagedInstallPath } from './workspace-cwd'
 
-const installRoot = path.resolve('/opt/Hermes')
+const installRoot = path.resolve('/opt/Atlas')
 
 test('isPackagedInstallPath returns false when not packaged', () => {
   assert.equal(isPackagedInstallPath(installRoot, { isPackaged: false, installRoots: [installRoot] }), false)

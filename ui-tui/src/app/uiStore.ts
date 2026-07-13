@@ -1,5 +1,6 @@
 import { atom, computed } from 'nanostores'
 
+import { SHORT_NAME } from '../brand.js'
 import { MOUSE_TRACKING } from '../config/env.js'
 import { ZERO } from '../domain/usage.js'
 import { DEFAULT_THEME } from '../theme.js'
@@ -25,7 +26,7 @@ const buildUiState = (): UiState => ({
   sessionTitle: '',
   showReasoning: false,
   sid: null,
-  status: 'summoning hermes…',
+  status: `summoning ${SHORT_NAME.toLowerCase()}…`,
   statusBar: 'top',
   streaming: true,
   theme: DEFAULT_THEME,
