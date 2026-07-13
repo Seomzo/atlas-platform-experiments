@@ -1,5 +1,21 @@
 # Atlas Roadmap
 
+## Active track — Desktop setup parity
+
+This track runs before Atlas narrows the experience into commercial managed
+defaults. It is the current product directive.
+
+- Preserve Quick Setup, Full Setup, and Blank Slate.
+- Reproduce every current `atlas setup` section and choice in Atlas Desktop.
+- Reuse the terminal setup/configuration logic as the source of truth.
+- Add safe desktop secret persistence without exposing values to the renderer,
+  prompts, logs, or analytics.
+- Add first-run, reconfigure, section-only, reset, cancel, validation, backup,
+  and recovery coverage.
+- Keep the existing Atlas dark-blue workstation setup aesthetic.
+- Treat any hiding or removal of terminal options as a later explicit product
+  decision, not part of parity work.
+
 ## Phase 0 — Preserve the engine baseline
 
 - Pin and document Hermes upstream.

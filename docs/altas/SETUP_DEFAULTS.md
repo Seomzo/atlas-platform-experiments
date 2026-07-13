@@ -2,16 +2,52 @@
 
 ## Status
 
-- Decision stage: proposed design-partner defaults
+- Current implementation: full terminal-to-desktop setup parity
+- Future product policy: proposed design-partner managed defaults
 - Applies to: managed local Atlas worker and Atlas Desktop
 - Last reviewed: 2026-07-13
 - Source baseline: the current `atlas setup` full-configuration flow
 
-This document turns the upstream terminal wizard into a product policy. It is
-not a promise that every item below is implemented yet. The **Implementation**
-column distinguishes working behavior from launch work.
+This document has two deliberately separate layers:
 
-## Product rule
+1. The active development directive: reproduce the complete `atlas setup`
+   terminal workflow in Atlas Desktop without removing choices or changing
+   behavior.
+2. The future managed-product proposal: decide which choices Atlas should own
+   for dealerships after the team has reviewed every setup page.
+
+The managed defaults below are not permission to hide or delete setup options
+from the current desktop build. The **Implementation** column distinguishes
+working behavior from launch work.
+
+## Confirmed current directive: desktop parity first
+
+Until Omar and Joe approve a narrower commercial setup, Atlas Desktop must:
+
+- Offer the same first-run modes as the terminal wizard: Quick Setup, Full
+  Setup, and Blank Slate.
+- Offer every section available through `atlas setup`: Model & Provider,
+  Text-to-Speech, Terminal Backend, Messaging Platforms, Tools, and Agent
+  Settings.
+- Preserve provider, model, terminal, gateway, tool, skill, plugin, MCP,
+  memory, and agent choices exposed by the corresponding terminal flows.
+- Show current values when reconfiguring and preserve the terminal behavior of
+  keeping a value when the user does not change it.
+- Support section-specific reconfiguration, missing-items-only setup, reset,
+  cancellation, validation, summaries, and safe config backups.
+- Use one setup/configuration implementation underneath both terminal and
+  desktop surfaces. The desktop must not fork a second set of defaults or
+  reimplement secret-writing rules independently.
+- Present the workflow as polished Atlas UI using the established dark-blue
+  workstation aesthetic, clear progress, explanations, validation, back/cancel
+  behavior, and accessible controls.
+- Keep the terminal setup supported as a reference and recovery path.
+
+The desktop may explain which options are recommended, advanced, or intended
+for engineering use, but it must not remove an option solely because a future
+managed default is proposed below.
+
+## Future commercial product rule
 
 Dealership users should make dealership decisions, not infrastructure
 decisions.
@@ -29,7 +65,7 @@ skill installation, service configuration, updates, and raw credentials. Those
 settings remain visible to Atlas operators in diagnostics, but they are not
 normal customer choices.
 
-## Customer setup sequence
+## Proposed future customer setup sequence
 
 | Stage | Customer sees | Atlas default | Implementation |
 | --- | --- | --- | --- |
@@ -39,9 +75,9 @@ normal customer choices.
 | 4. Tekion | Connect, sign in, test access, and select permitted stores | Dedicated persistent Chromium profile; read-only first | CDP attachment exists; Atlas browser profile manager remains |
 | 5. Permissions | Plain-language action policy | Read, navigate, analyze, and draft; ask before submit, export, message, or mutate | Policy engine prototype exists; workflow approval UI remains |
 | 6. Delivery | Atlas Desktop, Slack, and email | Desktop on; Slack/email opt-in | Desktop works; managed Slack/email enrollment remains |
-| 7. Review | Store, access, permissions, delivery, and health summary | Explicit confirmation before activation | First desktop blueprint is being implemented |
+| 7. Review | Store, access, permissions, delivery, and health summary | Explicit confirmation before activation | First desktop blueprint implemented; complete setup parity remains |
 
-## Translation of the current full setup
+## Proposed managed translation of the current full setup
 
 ### 1. Model and provider
 

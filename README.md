@@ -154,6 +154,10 @@ altas-platform/
 ## Documentation
 
 - [Product definition](PRODUCT.md)
+- [Canonical project context](docs/altas/PROJECT_CONTEXT.md)
+- [Decision log](docs/altas/DECISIONS.md)
+- [Parallel agent workstreams and paste-ready prompts](docs/altas/AGENT_WORKSTREAMS.md)
+- [Desktop setup parity and future defaults](docs/altas/SETUP_DEFAULTS.md)
 - [System architecture](docs/altas/ARCHITECTURE.md)
 - [Security and trust model](docs/altas/SECURITY.md)
 - [Prototype acceptance criteria](docs/altas/MVP_ACCEPTANCE.md)
