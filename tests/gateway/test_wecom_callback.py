@@ -5,6 +5,11 @@ from xml.etree import ElementTree as ET
 
 import pytest
 
+# The adapter's XML core is gated on the [wecom] extra (defusedxml) and
+# fails closed (ET = None) without it — skip the suite rather than fail
+# on environments that haven't installed the extra.
+pytest.importorskip("defusedxml", reason="wecom extra not installed (pip install 'hermes-agent[wecom]')")
+
 from gateway.config import PlatformConfig
 from plugins.platforms.wecom.callback_adapter import WecomCallbackAdapter
 from plugins.platforms.wecom.wecom_crypto import WXBizMsgCrypt

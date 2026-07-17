@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -254,8 +255,19 @@ def spawn_async_diagnostic(
         # would also reap us anyway, but defense in depth).  Without
         # start_new_session, a SIGKILL on our cgroup takes the diag down
         # before it can flush.
+        #
+        # `timeout` is GNU coreutils — present on Linux, absent on stock
+        # macOS (only `gtimeout` via brew coreutils). Falling back to bare
+        # bash keeps the diagnostic alive on macOS; the script is bounded
+        # anyway (every command pipes to head / || true).
+        if shutil.which("timeout"):
+            argv = ["timeout", f"{timeout_seconds:.0f}", "bash", "-c", script]
+        elif shutil.which("gtimeout"):
+            argv = ["gtimeout", f"{timeout_seconds:.0f}", "bash", "-c", script]
+        else:
+            argv = ["bash", "-c", script]
         proc = subprocess.Popen(
-            ["timeout", f"{timeout_seconds:.0f}", "bash", "-c", script],
+            argv,
             stdout=fd,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
