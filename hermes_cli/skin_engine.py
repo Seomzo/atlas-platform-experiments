@@ -118,7 +118,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_constants import get_hermes_home
-from hermes_cli.brand import brand_text
+from hermes_cli.brand import brand_text, is_atlas_branded
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +163,42 @@ class SkinConfig:
 # =============================================================================
 
 _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
+    "atlas": {
+        "name": "atlas",
+        "description": "Atlas — dark-navy workstation, by DealerBox",
+        "colors": {
+            "banner_border": "#101C3D",
+            "banner_title": "#7FA3F5",
+            "banner_accent": "#4F7BE8",
+            "banner_dim": "#3A4A75",
+            "banner_text": "#F4F2EC",
+            "ui_accent": "#4F7BE8",
+            "ui_label": "#7FA3F5",
+            "ui_ok": "#4caf50",
+            "ui_error": "#ef5350",
+            "ui_warn": "#ffa726",
+            "prompt": "#F4F2EC",
+            "input_rule": "#101C3D",
+            "response_border": "#4F7BE8",
+            "status_bar_bg": "#0A1228",
+            "status_bar_text": "#F4F2EC",
+            "status_bar_strong": "#7FA3F5",
+            "session_label": "#7FA3F5",
+            "session_border": "#3A4A75",
+        },
+        "spinner": {
+            "thinking_verbs": ["working", "checking", "tracing", "reviewing", "assembling"],
+        },
+        "branding": {
+            "agent_name": "Atlas",
+            "welcome": "Welcome to Atlas! Type your message or /help for commands.",
+            "goodbye": "Atlas signing off.",
+            "response_label": " ⬡ Atlas ",
+            "prompt_symbol": "❯",
+            "help_header": "⬡ Available Commands",
+        },
+        "tool_prefix": "▏",
+    },
     "default": {
         "name": "default",
         "description": "Classic Hermes — gold and kawaii",
@@ -651,7 +687,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
 # =============================================================================
 
 _active_skin: Optional[SkinConfig] = None
-_active_skin_name: str = "default"
+_active_skin_name: str = "atlas" if is_atlas_branded() else "default"
 
 
 def _skins_dir() -> Path:
@@ -796,11 +832,14 @@ def init_skin_from_config(config: dict) -> None:
     display = config.get("display") or {}
     if not isinstance(display, dict):
         display = {}
-    skin_name = display.get("skin", "default")
+    # Atlas builds default to the first-class "atlas" skin; users can still
+    # pick any skin explicitly via display.skin.
+    _default_skin = "atlas" if is_atlas_branded() else "default"
+    skin_name = display.get("skin", _default_skin)
     if isinstance(skin_name, str) and skin_name.strip():
         set_active_skin(skin_name.strip())
     else:
-        set_active_skin("default")
+        set_active_skin(_default_skin)
 
 
 # =============================================================================

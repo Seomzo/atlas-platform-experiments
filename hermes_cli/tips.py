@@ -482,4 +482,6 @@ def get_random_tip(exclude_recent: int = 0) -> str:
         exclude_recent: not used currently; reserved for future
             deduplication across sessions.
     """
-    return random.choice(TIPS)
+    from hermes_cli.brand import brand_text
+
+    return brand_text(random.choice(TIPS))

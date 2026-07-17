@@ -14,6 +14,7 @@ from pathlib import Path
 
 from hermes_constants import get_hermes_home
 
+from hermes_cli.brand import brand_text
 from hermes_cli.colors import Colors, color
 
 def log_info(msg: str):
@@ -520,7 +521,7 @@ def run_gui_uninstall(args):
     print()
 
     if not summary["gui_installed"]:
-        print("No Hermes Chat GUI installation was found.")
+        print(brand_text("No Hermes Chat GUI installation was found."))
         print(f"  Checked: {hermes_home}, and the standard app locations for this OS.")
         return
 
@@ -536,7 +537,7 @@ def run_gui_uninstall(args):
     print()
     if agent_is_installed(hermes_home):
         print(color("Kept intact:", Colors.GREEN, Colors.BOLD))
-        print(f"  • The Hermes agent at {hermes_home / 'hermes-agent'}")
+        print(brand_text(f"  • The Hermes agent at {hermes_home / 'hermes-agent'}"))
         print(f"  • Your config, sessions, and secrets under {hermes_home}")
         print()
 
@@ -562,8 +563,8 @@ def run_gui_uninstall(args):
     print(color("│            ✓ Chat GUI Uninstalled!                      │", Colors.GREEN, Colors.BOLD))
     print(color("└─────────────────────────────────────────────────────────┘", Colors.GREEN, Colors.BOLD))
     print()
-    print("The Hermes agent is still installed. Run 'hermes' to use the CLI,")
-    print("or 'hermes uninstall' to remove the agent too.")
+    print(brand_text("The Hermes agent is still installed. Run 'hermes' to use the CLI,"))
+    print(brand_text("or 'hermes uninstall' to remove the agent too."))
     print()
 
 
@@ -691,7 +692,7 @@ def run_uninstall(args):
                 Colors.RED
             ))
     else:
-        print("This will remove the Hermes code but keep your configuration and data.")
+        print(brand_text("This will remove the Hermes code but keep your configuration and data."))
     
     print()
     try:
@@ -722,8 +723,8 @@ def _print_uninstall_dry_run(*, project_root: Path, hermes_home: Path, full_unin
     print()
     print(color("Would inspect/remove:", Colors.YELLOW, Colors.BOLD))
     print("  • Gateway services and standalone gateway processes")
-    print("  • Hermes PATH entries from shell configs / Windows User PATH")
-    print("  • Hermes wrapper scripts and Hermes-managed node/npm/npx symlinks")
+    print(brand_text("  • Hermes PATH entries from shell configs / Windows User PATH"))
+    print(brand_text("  • Hermes wrapper scripts and Hermes-managed node/npm/npx symlinks"))
     print("  • Desktop Chat GUI artifacts")
     print(f"  • Code checkout: {project_root}")
     if full_uninstall:
@@ -914,7 +915,7 @@ def _perform_uninstall(
         print(color("Reload your shell to complete the process:", Colors.YELLOW))
         print("  source ~/.bashrc  # or ~/.zshrc")
     print()
-    print("Thank you for using Hermes Agent! ⚕")
+    print(brand_text("Thank you for using Hermes Agent! ⚕"))
     print()
 
 

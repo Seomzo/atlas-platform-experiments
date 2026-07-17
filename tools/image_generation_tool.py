@@ -504,6 +504,8 @@ def _submit_fal_request(model: str, arguments: Dict[str, Any]):
         # of a raw HTTP error from httpx.
         status = _extract_http_status(exc)
         if status is not None and 400 <= status < 500:
+            from hermes_cli.brand import command_name
+
             gateway_message = ""
             if status in {401, 402, 403}:
                 gateway_message = (
@@ -514,11 +516,11 @@ def _submit_fal_request(model: str, arguments: Dict[str, Any]):
                     )
                 )
             raise ValueError(
-                f"Nous Subscription gateway rejected model '{model}' "
-                f"(HTTP {status}). This model may not yet be enabled on "
-                f"the Nous Portal's FAL proxy. Either:\n"
+                f"Managed image gateway rejected model '{model}' "
+                f"(HTTP {status}). This model may not be enabled on the "
+                f"managed FAL proxy. Either:\n"
                 f"  • Set FAL_KEY in your environment to use FAL.ai directly, or\n"
-                f"  • Pick a different model via `hermes tools` → Image Generation."
+                f"  • Pick a different model via `{command_name()} tools` → Image Generation."
                 f"{gateway_message}"
             ) from exc
         raise

@@ -62,6 +62,17 @@ def nous_tool_gateway_unavailable_message(
             return message
     except Exception:
         pass
+    try:
+        from hermes_cli.brand import is_atlas_branded
+
+        if is_atlas_branded():
+            # Atlas builds have no Nous Portal — point at direct provider config.
+            return (
+                f"{capability} is unavailable. Configure a provider key for this "
+                "tool via `atlas tools` or `atlas setup tools`."
+            )
+    except Exception:
+        pass
     return (
         f"{capability} is unavailable. Run `hermes model` to refresh your "
         "Nous Portal login and billing status."

@@ -154,13 +154,18 @@ def looks_like_table_row(*args, **kwargs):
 
 
 def realign_markdown_tables(*args, **kwargs):
-    from agent.markdown_tables import realign_markdown_tables as _realign_markdown_tables
+    from agent.markdown_tables import (
+        realign_markdown_tables as _realign_markdown_tables,
+    )
 
     return _realign_markdown_tables(*args, **kwargs)
+
+
 # NOTE: `from agent.account_usage import ...` is deliberately NOT at module
 # top — it transitively pulls the OpenAI SDK chain (~230 ms cold) and is only
 # needed when the user runs `/limits`. Lazy-imported inside the handler below.
 from hermes_cli.banner import _format_context_length, format_banner_version_label
+from hermes_cli.brand import brand_text, command_name, is_atlas_branded, product_name
 
 _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
@@ -3488,10 +3493,18 @@ def _build_compact_banner() -> str:
     dim_color = _skin.get_color("banner_dim", "#B8860B") if _skin else "#B8860B"
 
     if skin_name == "default":
-        line1 = "⚕ NOUS HERMES - AI Agent Framework"
-        tiny_line = "⚕ NOUS HERMES"
+        if is_atlas_branded():
+            line1 = "⚕ ATLAS - AI Workers by DealerBox"
+            tiny_line = "⚕ ATLAS"
+        else:
+            line1 = "⚕ NOUS HERMES - AI Agent Framework"
+            tiny_line = "⚕ NOUS HERMES"
     else:
-        agent_name = _skin.get_branding("agent_name", "Hermes Agent") if _skin else "Hermes Agent"
+        agent_name = (
+            _skin.get_branding("agent_name", "Hermes Agent")
+            if _skin
+            else "Hermes Agent"
+        )
         line1 = f"{agent_name} - AI Agent Framework"
         tiny_line = agent_name
 
@@ -3499,13 +3512,14 @@ def _build_compact_banner() -> str:
         from hermes_cli import __release_date__ as _release_date
         from hermes_cli import __version__ as _version
 
-        version_line = f"Hermes Agent v{_version} ({_release_date})"
+        version_line = f"{product_name()} v{_version} ({_release_date})"
     else:
         version_line = format_banner_version_label()
 
     w = min(shutil.get_terminal_size().columns - 2, 88)
     if w < 30:
-        return f"\n[{title_color}]{tiny_line}[/] [dim {dim_color}]- Nous Research[/]\n"
+        _suffix = "- DealerBox" if is_atlas_branded() else "- Nous Research"
+        return f"\n[{title_color}]{tiny_line}[/] [dim {dim_color}]{_suffix}[/]\n"
 
     inner = w - 2  # inside the box border
     bar = "═" * w
@@ -5120,10 +5134,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 parts.append("⚠ YOLO")
             return self._trim_status_bar_text(" │ ".join(parts), width)
         except Exception:
-            return f"⚕ {self.model if getattr(self, 'model', None) else 'Hermes'}"
+            return f"⚕ {self.model if getattr(self, 'model', None) else product_name()}"
 
     def _get_status_bar_fragments(self):
-        if not self._status_bar_visible or getattr(self, '_model_picker_state', None):
+        if not self._status_bar_visible or getattr(self, "_model_picker_state", None):
             return []
         try:
             snapshot = self._get_status_bar_snapshot()
@@ -5783,11 +5797,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             self._stream_box_opened = True
             try:
                 from hermes_cli.skin_engine import get_active_skin
+
                 _skin = get_active_skin()
-                label = _skin.get_branding("response_label", "⚕ Hermes")
+                label = _skin.get_branding("response_label", f"⚕ {product_name()}")
                 _text_hex = _skin.get_color("banner_text", "#FFF8DC")
             except Exception:
-                label = "⚕ Hermes"
+                label = f"⚕ {product_name()}"
                 _text_hex = "#FFF8DC"
             # Build a true-color ANSI escape for the response text color
             # so streamed content matches the Rich Panel appearance.
@@ -6229,8 +6244,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         if is_nous_hermes_non_agentic(model_name):
             self._console_print()
             self._console_print(
-                "[bold yellow]⚠  Nous Research Hermes 3 & 4 models are NOT agentic and are not "
-                "designed for use with Hermes Agent.[/]"
+                f"[bold yellow]⚠  Nous Research Hermes 3 & 4 models are NOT agentic and are not "
+                f"designed for use with {product_name()}.[/]"
             )
             self._console_print(
                 "[dim]   They lack tool-calling capabilities required for agent workflows. "
@@ -6570,7 +6585,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         is_running = bool(getattr(self, "_agent_running", False))
 
         lines = [
-            "Hermes CLI Status",
+            f"{product_name()} CLI Status",
             "",
             f"Session ID: {self.session_id}",
             f"Path: {display_hermes_home()}",
@@ -6645,29 +6660,35 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
         quick_commands = self.config.get("quick_commands", {})
         if quick_commands:
-            _cprint(f"\n  ⚡ {_BOLD}Quick Commands{_RST} ({len(quick_commands)} configured):")
+            _cprint(
+                f"\n  ⚡ {_BOLD}Quick Commands{_RST} ({len(quick_commands)} configured):"
+            )
             for name, qcmd in sorted(quick_commands.items()):
                 desc = qcmd.get("description", qcmd.get("type", ""))
                 ChatConsole().print(
                     f"    [bold {_accent_hex()}]{('/' + name):<22}[/] [dim]-[/] {_escape(desc)}"
                 )
 
-        _cprint(f"\n  {_DIM}Tip: Just type your message to chat with Hermes!{_RST}")
+        _cprint(f"\n  {_DIM}Tip: Just type your message to chat with {product_name()}!{_RST}")
         _cprint(f"  {_DIM}Multi-line: Alt+Enter for a new line{_RST}")
         _cprint(f"  {_DIM}Draft editor: Ctrl+G (Alt+G in VSCode/Cursor){_RST}")
         if _is_termux_environment():
-            _cprint(f"  {_DIM}Attach image: /image {_termux_example_image_path()} or start your prompt with a local image path{_RST}\n")
+            _cprint(
+                f"  {_DIM}Attach image: /image {_termux_example_image_path()} or start your prompt with a local image path{_RST}\n"
+            )
         else:
             _cprint(f"  {_DIM}Paste image: Alt+V (or /paste){_RST}\n")
-    
+
     def show_tools(self):
         """Display available tools with kawaii ASCII art."""
-        tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True)
-        
+        tools = get_tool_definitions(
+            enabled_toolsets=self.enabled_toolsets, quiet_mode=True
+        )
+
         if not tools:
             print("(;_;) No tools available")
             return
-        
+
         # Header
         print()
         title = "(^_^)/ Available Tools"
@@ -12258,8 +12279,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     nonlocal _streaming_box_opened
                     if not _streaming_box_opened:
                         _streaming_box_opened = True
-                        w = self._scrollback_box_width(getattr(self.console, "width", 80))
-                        label = " ⚕ Hermes "
+                        w = self._scrollback_box_width(
+                            getattr(self.console, "width", 80)
+                        )
+                        label = f" ⚕ {product_name()} "
                         if self.show_timestamps:
                             label = f"{label}{datetime.now().strftime(getattr(self, 'timestamp_format', '%H:%M'))} "
                         fill = w - 2 - HermesCLI._status_bar_display_width(label)
@@ -12654,18 +12677,33 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 # Use skin engine for label/color with fallback
                 try:
                     from hermes_cli.skin_engine import get_active_skin
+
                     _skin = get_active_skin()
                     label = _skin.get_branding("response_label", "⚕ Hermes")
-                    _resp_color = _maybe_remap_for_light_mode(_skin.get_color("response_border", "#CD7F32"))
-                    _resp_text = _maybe_remap_for_light_mode(_skin.get_color("banner_text", "#FFF8DC"))
+                    _resp_color = _maybe_remap_for_light_mode(
+                        _skin.get_color("response_border", "#CD7F32")
+                    )
+                    _resp_text = _maybe_remap_for_light_mode(
+                        _skin.get_color("banner_text", "#FFF8DC")
+                    )
                 except Exception:
-                    label = "⚕ Hermes"
+                    label = f"⚕ {product_name()}"
                     _resp_color = _maybe_remap_for_light_mode("#CD7F32")
                     _resp_text = _maybe_remap_for_light_mode("#FFF8DC")
 
-                is_error_response = result and (result.get("failed") or result.get("partial"))
-                already_streamed = self._stream_started and self._stream_box_opened and not is_error_response
-                if use_streaming_tts and _streaming_box_opened and not is_error_response:
+                is_error_response = result and (
+                    result.get("failed") or result.get("partial")
+                )
+                already_streamed = (
+                    self._stream_started
+                    and self._stream_box_opened
+                    and not is_error_response
+                )
+                if (
+                    use_streaming_tts
+                    and _streaming_box_opened
+                    and not is_error_response
+                ):
                     # Text was already printed sentence-by-sentence; just close the box
                     w = self._scrollback_box_width()
                     _cprint(f"\n{_ACCENT}╰{'─' * (w - 2)}╯{_RST}")
@@ -12877,24 +12915,30 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             # profile names use the standard HERMES_HOME, so no -p needed.
             try:
                 from hermes_cli.profiles import get_active_profile_name
+
                 _active_profile = get_active_profile_name()
             except Exception:
                 _active_profile = "default"
             profile_flag = (
-                "" if _active_profile in ("default", "custom") else f" -p {_active_profile}"
+                ""
+                if _active_profile in ("default", "custom")
+                else f" -p {_active_profile}"
             )
-            print(f"  hermes --resume {self.session_id}{profile_flag}")
+            print(f"  {command_name()} --resume {self.session_id}{profile_flag}")
             if session_title:
-                print(f"  hermes -c \"{session_title}\"{profile_flag}")
+                print(f'  {command_name()} -c "{session_title}"{profile_flag}')
             print()
             print(f"Session:        {self.session_id}")
             if session_title:
                 print(f"Title:          {session_title}")
             print(f"Duration:       {duration_str}")
-            print(f"Messages:       {msg_count} ({user_msgs} user, {tool_calls} tool calls)")
+            print(
+                f"Messages:       {msg_count} ({user_msgs} user, {tool_calls} tool calls)"
+            )
         else:
             try:
                 from hermes_cli.skin_engine import get_active_goodbye
+
                 goodbye = get_active_goodbye("Goodbye! ⚕")
             except Exception:
                 goodbye = "Goodbye! ⚕"
@@ -13157,11 +13201,17 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
         try:
             from hermes_cli.skin_engine import get_active_skin
+
             _welcome_skin = get_active_skin()
-            _welcome_text = _welcome_skin.get_branding("welcome", "Welcome to Hermes Agent! Type your message or /help for commands.")
+            _welcome_text = _welcome_skin.get_branding(
+                "welcome",
+                "Welcome to Hermes Agent! Type your message or /help for commands.",
+            )
             _welcome_color = _welcome_skin.get_color("banner_text", "#FFF8DC")
         except Exception:
-            _welcome_text = "Welcome to Hermes Agent! Type your message or /help for commands."
+            _welcome_text = (
+                f"Welcome to {product_name()}! Type your message or /help for commands."
+            )
             _welcome_color = "#FFF8DC"
         self._console_print(f"[{_welcome_color}]{_welcome_text}[/]")
 
@@ -15828,12 +15878,13 @@ def main(
     # Signal to terminal_tool that we're in interactive mode
     # This enables interactive sudo password prompts with timeout
     os.environ["HERMES_INTERACTIVE"] = "1"
-    
+
     # Handle gateway mode (messaging + cron)
     if gateway:
         import asyncio
         from gateway.run import start_gateway
-        print("Starting Hermes Gateway (messaging platforms)...")
+
+        print(f"Starting {product_name()} Gateway (messaging platforms)...")
         asyncio.run(start_gateway())
         return
 

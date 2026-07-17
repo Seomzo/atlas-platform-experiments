@@ -2947,22 +2947,38 @@ def run_setup_wizard(args):
         if migration_ran:
             config = load_config()
 
-        setup_mode = prompt_choice(
-            "How would you like to set up Hermes?",
-            [
-                "Quick Setup (Nous Portal) — OAuth login, free models available, paid tools optional (recommended)",
-                "Full setup — configure every provider, tool & option yourself (bring your own keys)",
-                "Blank Slate — everything off except the bare minimum; opt in to each capability",
-            ],
-            0,
-        )
+        if is_atlas_branded():
+            # Atlas builds have no Nous Portal — the DealerBox Portal replaces
+            # it (docs/altas/DEALERBOX_PORTAL.md). Until that ships, first-time
+            # setup offers only the bring-your-own-keys paths.
+            setup_mode = prompt_choice(
+                f"How would you like to set up {product_name()}?",
+                [
+                    "Full setup — configure every provider, tool & option yourself (bring your own keys)",
+                    "Blank Slate — everything off except the bare minimum; opt in to each capability",
+                ],
+                0,
+            )
+            if setup_mode == 1:
+                _run_blank_slate_setup(config, hermes_home, is_existing)
+                return
+        else:
+            setup_mode = prompt_choice(
+                "How would you like to set up Hermes?",
+                [
+                    "Quick Setup (Nous Portal) — OAuth login, free models available, paid tools optional (recommended)",
+                    "Full setup — configure every provider, tool & option yourself (bring your own keys)",
+                    "Blank Slate — everything off except the bare minimum; opt in to each capability",
+                ],
+                0,
+            )
 
-        if setup_mode == 0:
-            _run_first_time_quick_setup(config, hermes_home, is_existing)
-            return
-        if setup_mode == 2:
-            _run_blank_slate_setup(config, hermes_home, is_existing)
-            return
+            if setup_mode == 0:
+                _run_first_time_quick_setup(config, hermes_home, is_existing)
+                return
+            if setup_mode == 2:
+                _run_blank_slate_setup(config, hermes_home, is_existing)
+                return
 
     # ── Full Setup — run all sections ──
     print_header("Configuration Location")

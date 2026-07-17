@@ -45,15 +45,25 @@ def build_login_parser(subparsers, *, cmd_login: Callable) -> None:
         default=None,
         help="(deprecated) Provider name; ignored — see `hermes model`",
     )
+    # On Atlas builds, keep the portal-era flags parseable (old scripts must
+    # still reach the deprecation handler) but hide their Nous-flavored help.
+    from argparse import SUPPRESS
+
+    from hermes_cli.brand import is_atlas_branded
+
+    _atlas = is_atlas_branded()
     login_parser.add_argument(
-        "--portal-url", help="Portal base URL (default: production portal)"
+        "--portal-url",
+        help=SUPPRESS if _atlas else "Portal base URL (default: production portal)",
     )
     login_parser.add_argument(
         "--inference-url",
-        help="Inference API base URL (default: production inference API)",
+        help=SUPPRESS if _atlas else "Inference API base URL (default: production inference API)",
     )
     login_parser.add_argument(
-        "--client-id", default=None, help="OAuth client id to use (default: hermes-cli)"
+        "--client-id",
+        default=None,
+        help=SUPPRESS if _atlas else "OAuth client id to use (default: hermes-cli)",
     )
     login_parser.add_argument("--scope", default=None, help="OAuth scope to request")
     login_parser.add_argument(

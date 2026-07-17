@@ -64,7 +64,7 @@ except ModuleNotFoundError:
 import os
 import sys
 
-from hermes_cli.brand import brand_argparse, brand_text, command_name, configure_runtime_brand, product_name
+from hermes_cli.brand import brand_argparse, brand_text, command_name, configure_runtime_brand, is_atlas_branded, product_name
 
 
 # The Atlas console script points directly at this module. Apply its state and
@@ -1727,14 +1727,16 @@ def _ensure_tui_workspace(tui_dir: Path) -> None:
         return
 
     print(
-        "Error: the TUI workspace is missing from this Hermes checkout.\n"
-        f"Expected directory: {tui_dir}\n"
-        "This usually means `atlas update` left tracked ui-tui files deleted.\n"
-        "Recovery:\n"
-        "  1. From the Hermes checkout, run `git restore -- ui-tui`\n"
-        "  2. Run `npm install --silent --no-fund --no-audit --progress=false`\n"
-        "  3. Retry `hermes --tui`\n"
-        "If the checkout is still inconsistent, run `atlas update --force`.",
+        brand_text(
+            "Error: the TUI workspace is missing from this Hermes checkout.\n"
+            f"Expected directory: {tui_dir}\n"
+            f"This usually means `{command_name()} update` left tracked ui-tui files deleted.\n"
+            "Recovery:\n"
+            "  1. From the Hermes checkout, run `git restore -- ui-tui`\n"
+            "  2. Run `npm install --silent --no-fund --no-audit --progress=false`\n"
+            f"  3. Retry `{command_name()} --tui`\n"
+            f"If the checkout is still inconsistent, run `{command_name()} update --force`."
+        ),
         file=sys.stderr,
     )
     sys.exit(1)
@@ -2730,7 +2732,7 @@ def cmd_postinstall(args):
 
     stamp_install_method("pip")
 
-    print("⚕ Hermes post-install bootstrap")
+    print(f"⚕ {product_name()} post-install bootstrap")
     print()
 
     for dep in ("node", "browser", "ripgrep", "ffmpeg"):
@@ -3367,8 +3369,8 @@ def _aux_config_menu() -> None:
         print()
         print("  Side tasks (vision, compression, web extraction, etc.) default")
         print('  to your main chat model.  "auto" means "use my main model" —')
-        print("  Hermes only falls back to a lightweight backend (OpenRouter,")
-        print("  Nous Portal) if the main model is unavailable.  Override a")
+        print(f"  {product_name()} only falls back to a lightweight backend")
+        print("  (OpenRouter) if the main model is unavailable.  Override a")
         print("  task below if you want it pinned to a specific provider/model.")
         print()
 
@@ -6808,6 +6810,11 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
     has_upstream = _has_upstream_remote(git_cmd, cwd)
 
     if not has_upstream:
+        # Atlas distribution: never prompt customers to track the upstream
+        # Hermes repo — update flow is DealerBox-managed (ADR-001).
+        if is_atlas_branded():
+            return
+
         # Check if user previously declined
         if _should_skip_upstream_prompt():
             return
@@ -7377,8 +7384,8 @@ def _format_concurrent_instances_message(
     lines.append(f"  Updating now would fail to overwrite {shim} because")
     lines.append("  Windows blocks REPLACE on a running executable.")
     lines.append("")
-    lines.append("  Close Atlas Desktop, exit any open `hermes` REPLs, and")
-    lines.append("  stop the gateway (`hermes gateway stop`) before retrying.")
+    lines.append(brand_text("  Close Hermes Desktop, exit any open `hermes` REPLs, and"))
+    lines.append(brand_text("  stop the gateway (`hermes gateway stop`) before retrying."))
     lines.append("")
     if matches:
         pid_args = " ".join(f"/PID {pid}" for pid, _ in matches)
@@ -7386,7 +7393,7 @@ def _format_concurrent_instances_message(
         lines.append("  stale, terminate them directly, then retry the update:")
         lines.append(f"      taskkill {pid_args} /F")
         lines.append("")
-    lines.append("  Override with `atlas update --force` if you've already")
+    lines.append(f"  Override with `{command_name()} update --force` if you've already")
     lines.append("  confirmed those processes will not write to the venv.")
     return "\n".join(lines)
 
@@ -8312,7 +8319,7 @@ def _install_hangup_protection(gateway_mode: bool = False):
         import datetime as _dt
 
         log_file.write(
-            f"\n=== atlas update started "
+            f"\n=== {command_name()} update started "
             f"{_dt.datetime.now().isoformat(timespec='seconds')} ===\n"
         )
 
@@ -9005,10 +9012,10 @@ def _format_venv_python_holders_message(matches: list[tuple[int, str, str]]) -> 
         "  dependency update would fail partway and leave a broken install."
     )
     lines.append(
-        "  Close the Hermes desktop app / other Hermes terminals, then re-run:"
+        brand_text("  Close the Hermes desktop app / other Hermes terminals, then re-run:")
     )
-    lines.append("    atlas update")
-    lines.append("  (or use `atlas update --force-venv` to proceed anyway at your own risk)")
+    lines.append(f"    {command_name()} update")
+    lines.append(f"  (or use `{command_name()} update --force-venv` to proceed anyway at your own risk)")
     return "\n".join(lines)
 
 
@@ -11870,7 +11877,8 @@ def _maybe_setup_dashboard_auth_interactively(args) -> None:
     print()
     print("  How do you want to authenticate the dashboard?")
     print("    [1] Username & password (quickest; for a trusted LAN / VPN)")
-    print("    [2] OAuth via Nous Portal (run `hermes dashboard register`)")
+    if not is_atlas_branded():
+        print("    [2] OAuth via Nous Portal (run `hermes dashboard register`)")
     print("    [3] Cancel")
     print()
 
@@ -13068,9 +13076,12 @@ def main():
 
     # =========================================================================
     # portal command — Nous Portal status + Tool Gateway routing
+    # (upstream-only: Atlas builds have no Nous Portal; the DealerBox Portal
+    # replaces it — see docs/altas/DEALERBOX_PORTAL.md)
     # =========================================================================
-    from hermes_cli.portal_cli import add_parser as _add_portal_parser
-    _add_portal_parser(subparsers)
+    if not is_atlas_branded():
+        from hermes_cli.portal_cli import add_parser as _add_portal_parser
+        _add_portal_parser(subparsers)
 
     # =========================================================================
     # kanban command — multi-profile collaboration board

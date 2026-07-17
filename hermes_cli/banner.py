@@ -296,6 +296,10 @@ def check_via_pypi() -> Optional[int]:
 
     Returns 0 if up-to-date, 1 if behind, None on failure.
     """
+    # Atlas builds don't track the upstream hermes-agent PyPI package —
+    # update signaling is DealerBox-managed.
+    if is_atlas_branded():
+        return None
     latest = _fetch_pypi_latest()
     if latest is None:
         return None
@@ -514,6 +518,11 @@ def get_latest_release_tag(repo_dir: Optional[Path] = None) -> Optional[tuple]:
         _latest_release_cache = ()
         return None
 
+    # Atlas builds never link customers to the upstream Hermes GitHub releases.
+    if is_atlas_branded():
+        _latest_release_cache = (tag, "")
+        return _latest_release_cache
+
     url = f"{_RELEASE_URL_BASE}/{tag}"
     _latest_release_cache = (tag, url)
     return _latest_release_cache
@@ -700,7 +709,8 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
             preset_name = preset_name[:25] + "..."
         agg_str = f" [dim {dim}]·[/] [dim {dim}]agg {agg_label}[/]" if agg_label else ""
         ctx_str = f" [dim {dim}]·[/] [dim {dim}]{_format_context_length(context_length)} context[/]" if context_length else ""
-        left_lines.append(f"[{accent}]MoA: {preset_name}[/]{agg_str}{ctx_str} [dim {dim}]·[/] [dim {dim}]Nous Research[/]")
+        _maker = "DealerBox" if is_atlas_branded() else "Nous Research"
+        left_lines.append(f"[{accent}]MoA: {preset_name}[/]{agg_str}{ctx_str} [dim {dim}]·[/] [dim {dim}]{_maker}[/]")
     else:
         model_short = model.split("/")[-1] if "/" in model else model
         if model_short.endswith(".gguf"):
@@ -708,7 +718,8 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
         if len(model_short) > 28:
             model_short = model_short[:25] + "..."
         ctx_str = f" [dim {dim}]·[/] [dim {dim}]{_format_context_length(context_length)} context[/]" if context_length else ""
-        left_lines.append(f"[{accent}]{model_short}[/]{ctx_str} [dim {dim}]·[/] [dim {dim}]Nous Research[/]")
+        _maker = "DealerBox" if is_atlas_branded() else "Nous Research"
+        left_lines.append(f"[{accent}]{model_short}[/]{ctx_str} [dim {dim}]·[/] [dim {dim}]{_maker}[/]")
 
     if os.getenv("HERMES_YOLO_MODE"):
         left_lines.append(f"[bold red]⚠ YOLO mode[/] [dim {dim}]— all approval prompts bypassed[/]")

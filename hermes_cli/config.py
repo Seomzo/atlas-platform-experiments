@@ -533,6 +533,12 @@ def is_uv_tool_install() -> bool:
 
 def recommended_update_command_for_method(method: str) -> str:
     """Return the update command or guidance for a given install method."""
+    from hermes_cli.brand import command_name, is_atlas_branded
+
+    # Atlas distribution updates are DealerBox-managed — never point customers
+    # at upstream hermes-agent package channels (brew/docker/PyPI).
+    if is_atlas_branded():
+        return f"{command_name()} update"
     if method == "nixos":
         return _NIX_UPDATE_MSG
     if method == "homebrew":

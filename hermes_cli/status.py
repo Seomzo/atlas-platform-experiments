@@ -13,6 +13,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 from hermes_cli.auth import AuthError, resolve_provider
 from hermes_cli.colors import Colors, color
+from hermes_cli.brand import command_name, is_atlas_branded, product_name
 from hermes_cli.config import get_env_path, get_env_value, get_hermes_home, load_config
 from hermes_cli.models import provider_label
 from hermes_cli.nous_account import (
@@ -108,7 +109,7 @@ def show_status(args):
 
     print()
     print(color("┌─────────────────────────────────────────────────────────┐", Colors.CYAN))
-    print(color("│                 ⚕ Atlas Agent Status                  │", Colors.CYAN))
+    print(color(f"│ {'⚕ ' + product_name() + ' Status':^55} │", Colors.CYAN))
     print(color("└─────────────────────────────────────────────────────────┘", Colors.CYAN))
 
     # =========================================================================
@@ -230,41 +231,47 @@ def show_status(args):
         or (nous_account_info and nous_account_info.inference_credential_present)
     )
     nous_error = nous_status.get("error")
+    # Atlas builds have no Nous Portal path — only surface the row when a
+    # Nous credential actually exists (never advertise `atlas portal`).
+    show_nous_row = not is_atlas_branded() or nous_logged_in or nous_inference_present or bool(nous_error)
     if nous_logged_in:
         nous_label = "logged in"
     elif nous_inference_present:
         nous_label = "not logged in (Nous inference key configured)"
+    elif is_atlas_branded():
+        nous_label = "not logged in"
     else:
-        nous_label = "not logged in (run: atlas portal)"
-    print(
-        f"  {'Nous Portal':<12}  {check_mark(nous_logged_in)} "
-        f"{nous_label}"
-    )
-    portal_url = nous_status.get("portal_base_url") or "(unknown)"
-    inference_url = (
-        nous_status.get("inference_base_url")
-        or (nous_account_info.inference_base_url if nous_account_info else None)
-    )
-    access_exp = _format_iso_timestamp(nous_status.get("access_expires_at"))
-    key_exp = _format_iso_timestamp(nous_status.get("agent_key_expires_at"))
-    refresh_label = "yes" if nous_status.get("has_refresh_token") else "no"
-    if nous_logged_in or portal_url != "(unknown)" or nous_error:
-        print(f"    Portal URL: {portal_url}")
-    if nous_inference_present and inference_url:
-        print(f"    Inference:  {inference_url}")
-    if nous_logged_in or nous_status.get("access_expires_at"):
-        print(f"    Access exp: {access_exp}")
-    if nous_logged_in or nous_inference_present or nous_status.get("agent_key_expires_at"):
-        print(f"    Key exp:    {key_exp}")
-    if nous_logged_in or nous_status.get("has_refresh_token"):
-        print(f"    Refresh:    {refresh_label}")
-    if nous_error:
-        print(f"    Error:      {nous_error}")
+        nous_label = f"not logged in (run: {command_name()} portal)"
+    if show_nous_row:
+        print(
+            f"  {'Nous Portal':<12}  {check_mark(nous_logged_in)} "
+            f"{nous_label}"
+        )
+        portal_url = nous_status.get("portal_base_url") or "(unknown)"
+        inference_url = (
+            nous_status.get("inference_base_url")
+            or (nous_account_info.inference_base_url if nous_account_info else None)
+        )
+        access_exp = _format_iso_timestamp(nous_status.get("access_expires_at"))
+        key_exp = _format_iso_timestamp(nous_status.get("agent_key_expires_at"))
+        refresh_label = "yes" if nous_status.get("has_refresh_token") else "no"
+        if nous_logged_in or portal_url != "(unknown)" or nous_error:
+            print(f"    Portal URL: {portal_url}")
+        if nous_inference_present and inference_url:
+            print(f"    Inference:  {inference_url}")
+        if nous_logged_in or nous_status.get("access_expires_at"):
+            print(f"    Access exp: {access_exp}")
+        if nous_logged_in or nous_inference_present or nous_status.get("agent_key_expires_at"):
+            print(f"    Key exp:    {key_exp}")
+        if nous_logged_in or nous_status.get("has_refresh_token"):
+            print(f"    Refresh:    {refresh_label}")
+        if nous_error:
+            print(f"    Error:      {nous_error}")
 
     codex_logged_in = bool(codex_status.get("logged_in"))
     print(
         f"  {'OpenAI Codex':<12}  {check_mark(codex_logged_in)} "
-        f"{'logged in' if codex_logged_in else 'not logged in (run: atlas model)'}"
+        f"{'logged in' if codex_logged_in else f'not logged in (run: {command_name()} model)'}"
     )
     codex_auth_file = codex_status.get("auth_store")
     if codex_auth_file:
@@ -293,7 +300,7 @@ def show_status(args):
     minimax_logged_in = bool(minimax_status.get("logged_in"))
     print(
         f"  {'MiniMax OAuth':<12}  {check_mark(minimax_logged_in)} "
-        f"{'logged in' if minimax_logged_in else 'not logged in (run: atlas auth add minimax-oauth)'}"
+        f"{'logged in' if minimax_logged_in else f'not logged in (run: {command_name()} auth add minimax-oauth)'}"
     )
     minimax_region = minimax_status.get("region")
     if minimax_logged_in and minimax_region:
@@ -315,7 +322,7 @@ def show_status(args):
     xai_oauth_logged_in = bool(xai_oauth_status.get("logged_in"))
     print(
         f"  {'xAI OAuth':<12}  {check_mark(xai_oauth_logged_in)} "
-        f"{'logged in' if xai_oauth_logged_in else 'not logged in (run: atlas auth add xai-oauth)'}"
+        f"{'logged in' if xai_oauth_logged_in else f'not logged in (run: {command_name()} auth add xai-oauth)'}"
     )
     xai_auth_file = xai_oauth_status.get("auth_store")
     if xai_auth_file:
@@ -382,7 +389,7 @@ def show_status(args):
             if key_val:
                 break
         configured = bool(key_val)
-        label = "configured" if configured else "not configured (run: atlas model)"
+        label = "configured" if configured else f"not configured (run: {command_name()} model)"
         print(f"  {pname:<16} {check_mark(configured)} {label}")
 
     # LM Studio reachability — only probe when it's the active provider so
@@ -615,6 +622,6 @@ def show_status(args):
 
     print()
     print(color("─" * 60, Colors.DIM))
-    print(color("  Run 'atlas doctor' for detailed diagnostics", Colors.DIM))
-    print(color("  Run 'atlas setup' to configure", Colors.DIM))
+    print(color(f"  Run '{command_name()} doctor' for detailed diagnostics", Colors.DIM))
+    print(color(f"  Run '{command_name()} setup' to configure", Colors.DIM))
     print()

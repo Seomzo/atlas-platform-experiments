@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Atlas Brand Concepts — DealerBox</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --navy-950: #060B1A; --navy-900: #0A1228; --navy-800: #101C3D;
+    --navy-500: #2E4B8F; --blue-400: #4F7BE8; --blue-300: #7FA3F5;
+    --ink: #0B0E14; --paper: #F4F2EC; --muted: #8B93A7;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--navy-950); color: #E8EBF2; line-height: 1.5;
+    -webkit-font-smoothing: antialiased; padding: 48px 32px 96px;
+  }
+  h1 { font-size: 28px; letter-spacing: -0.02em; margin-bottom: 4px; }
+  .sub { color: var(--muted); margin-bottom: 48px; font-size: 15px; }
+  .concept { margin-bottom: 72px; border: 1px solid var(--navy-800); border-radius: 16px; overflow: hidden; }
+  .concept-head { padding: 20px 28px; border-bottom: 1px solid var(--navy-800); display:flex; justify-content: space-between; align-items: baseline; background: var(--navy-900); }
+  .concept-head h2 { font-size: 18px; letter-spacing: -0.01em; }
+  .concept-head .tag { color: var(--blue-300); font-size: 13px; font-family: ui-monospace, "SF Mono", monospace; }
+  .row { display: grid; grid-template-columns: 1fr 1fr 1fr; }
+  .cell { padding: 36px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; min-height: 300px; }
+  .cell.dark  { background: var(--navy-950); }
+  .cell.paper { background: var(--paper); color: var(--ink); }
+  .cell.appice{ background: var(--navy-900); }
+  .cell-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted); }
+  .paper .cell-label { color: #9a958a; }
+  .lockup { display: flex; align-items: center; gap: 14px; }
+  .wordmark { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-weight: 800; font-size: 34px; letter-spacing: 0.14em; }
+  .byline { font-size: 11px; letter-spacing: 0.28em; text-transform: uppercase; color: var(--muted); margin-top: 2px; }
+  .paper .byline { color: #7a7466; }
+  .appicon { width: 96px; height: 96px; border-radius: 22px; display:flex; align-items:center; justify-content:center;
+             background: linear-gradient(145deg, var(--navy-800), var(--navy-950)); box-shadow: 0 8px 28px rgba(0,0,0,.5), inset 0 1px 0 rgba(127,163,245,.25); }
+  .notes { padding: 20px 28px; font-size: 14px; color: var(--muted); border-top: 1px solid var(--navy-800); background: var(--navy-900); }
+  .notes b { color: #E8EBF2; }
+  .paper .wordmark { color: var(--ink); }
+</style>
+</head>
+<body>
+<h1>Atlas — brand mark concepts</h1>
+<div class="sub">DealerBox · AI workers for dealerships · Round 1 — three stances, each shown on dark / paper / as app icon</div>
+
+<!-- ══════════ CONCEPT 1 : TITAN INK ══════════ -->
+<div class="concept">
+  <div class="concept-head"><h2>001 · Titan Ink</h2><span class="tag">mythic · woodcut · Nous-adjacent</span></div>
+  <div class="row">
+    <div class="cell dark">
+      <span class="cell-label">Primary — dark</span>
+      <svg width="150" height="150" viewBox="0 0 100 100">
+        <!-- celestial sphere held aloft -->
+        <circle cx="50" cy="32" r="22" fill="none" stroke="#E8EBF2" stroke-width="4.5"/>
+        <path d="M28 32 H72" stroke="#E8EBF2" stroke-width="2"/>
+        <ellipse cx="50" cy="32" rx="10" ry="22" fill="none" stroke="#E8EBF2" stroke-width="2"/>
+        <ellipse cx="50" cy="32" rx="22" ry="9" fill="none" stroke="#4F7BE8" stroke-width="2.5"/>
+        <!-- titan: abstracted shoulders/arms as an A -->
+        <path d="M50 46 L22 92 H34 L50 62 L66 92 H78 Z" fill="#E8EBF2"/>
+        <path d="M30 60 Q50 50 70 60" fill="none" stroke="#E8EBF2" stroke-width="4.5" stroke-linecap="round"/>
+      </svg>
+      <div class="lockup" style="flex-direction:column; gap:2px;">
+        <span class="wordmark">ATLAS</span><span class="byline">by DealerBox</span>
+      </div>
+    </div>
+    <div class="cell paper">
+      <span class="cell-label">Inverted — print</span>
+      <svg width="150" height="150" viewBox="0 0 100 100">
+        <circle cx="50" cy="32" r="22" fill="none" stroke="#0B0E14" stroke-width="4.5"/>
+        <path d="M28 32 H72" stroke="#0B0E14" stroke-width="2"/>
+        <ellipse cx="50" cy="32" rx="10" ry="22" fill="none" stroke="#0B0E14" stroke-width="2"/>
+        <ellipse cx="50" cy="32" rx="22" ry="9" fill="none" stroke="#2E4B8F" stroke-width="2.5"/>
+        <path d="M50 46 L22 92 H34 L50 62 L66 92 H78 Z" fill="#0B0E14"/>
+        <path d="M30 60 Q50 50 70 60" fill="none" stroke="#0B0E14" stroke-width="4.5" stroke-linecap="round"/>
+      </svg>
+      <div class="lockup" style="flex-direction:column; gap:2px;">
+        <span class="wordmark">ATLAS</span><span class="byline">by DealerBox</span>
+      </div>
+    </div>
+    <div class="cell appice">
+      <span class="cell-label">App icon</span>
+      <div class="appicon">
+        <svg width="60" height="60" viewBox="0 0 100 100">
+          <circle cx="50" cy="32" r="22" fill="none" stroke="#E8EBF2" stroke-width="5"/>
+          <ellipse cx="50" cy="32" rx="22" ry="9" fill="none" stroke="#7FA3F5" stroke-width="3"/>
+          <path d="M50 46 L22 92 H34 L50 62 L66 92 H78 Z" fill="#E8EBF2"/>
+        </svg>
+      </div>
+    </div>
+  </div>
+  <div class="notes"><b>Stance:</b> the myth, literally — Atlas shouldering a celestial sphere, but the titan's body <i>is</i> the letter A. Heavy ink weight nods to the Nous woodcut style without copying it. The blue orbital ring is the single accent. <b>Strong at:</b> storytelling, memorability. <b>Weak at:</b> very small sizes (sphere detail thins out).</div>
+</div>
+
+<!-- ══════════ CONCEPT 2 : GEOMETRIC CORE ══════════ -->
+<div class="concept">
+  <div class="concept-head"><h2>002 · Geometric Core</h2><span class="tag">minimal · systems · 2026-clean</span></div>
+  <div class="row">
+    <div class="cell dark">
+      <span class="cell-label">Primary — dark</span>
+      <svg width="150" height="150" viewBox="0 0 100 100">
+        <!-- A as circuit/meridian monogram -->
+        <path d="M50 10 L88 88 H72 L50 40 L28 88 H12 Z" fill="none" stroke="#E8EBF2" stroke-width="6" stroke-linejoin="round"/>
+        <path d="M32 70 H68" stroke="#4F7BE8" stroke-width="6" stroke-linecap="round"/>
+        <circle cx="50" cy="10" r="5" fill="#4F7BE8"/>
+      </svg>
+      <div class="lockup" style="flex-direction:column; gap:2px;">
+        <span class="wordmark" style="font-weight:700;">ATLAS</span><span class="byline">by DealerBox</span>
+      </div>
+    </div>
+    <div class="cell paper">
+      <span class="cell-label">Inverted — print</span>
+      <svg width="150" height="150" viewBox="0 0 100 100">
+        <path d="M50 10 L88 88 H72 L50 40 L28 88 H12 Z" fill="none" stroke="#0B0E14" stroke-width="6" stroke-linejoin="round"/>
+        <path d="M32 70 H68" stroke="#2E4B8F" stroke-width="6" stroke-linecap="round"/>
+        <circle cx="50" cy="10" r="5" fill="#2E4B8F"/>
+      </svg>
+      <div class="lockup" style="flex-direction:column; gap:2px;">
+        <span class="wordmark" style="font-weight:700;">ATLAS</span><span class="byline">by DealerBox</span>
+      </div>
+    </div>
+    <div class="cell appice">
+      <span class="cell-label">App icon</span>
+      <div class="appicon">
+        <svg width="60" height="60" viewBox="0 0 100 100">
+          <path d="M50 10 L88 88 H72 L50 40 L28 88 H12 Z" fill="none" stroke="#E8EBF2" stroke-width="7" stroke-linejoin="round"/>
+          <path d="M32 70 H68" stroke="#7FA3F5" stroke-width="7" stroke-linecap="round"/>
+        </svg>
+      </div>
+    </div>
+  </div>
+  <div class="notes"><b>Stance:</b> pure monogram — an open "A" with a floating blue crossbar (reads as a horizon line / status bar: work in motion). Zero decoration; survives at 16px favicon. <b>Strong at:</b> versatility, app icon, embroidery-on-a-polo test. <b>Weak at:</b> lower narrative punch — needs the brand story told elsewhere.</div>
+</div>
+
+<!-- ══════════ CONCEPT 3 : WORKER BADGE ══════════ -->
+<div class="concept">
+  <div class="concept-head"><h2>003 · Worker Badge</h2><span class="tag">industrial · the box · shipped-hardware</span></div>
+  <div class="row">
+    <div class="cell dark">
+      <span class="cell-label">Primary — dark</span>
+      <svg width="150" height="150" viewBox="0 0 100 100">
+        <!-- hexagon = bolt head / badge; isometric box inside = DealerBox -->
+        <path d="M50 6 L88 28 V72 L50 94 L12 72 V28 Z" fill="none" stroke="#E8EBF2" stroke-width="5" stroke-linejoin="round"/>
+        <path d="M50 30 L72 42 V64 L50 76 L28 64 V42 Z" fill="#101C3D" stroke="#4F7BE8" stroke-width="3" stroke-linejoin="round"/>
+        <path d="M28 42 L50 54 L72 42 M50 54 V76" fill="none" stroke="#4F7BE8" stroke-width="3" stroke-linejoin="round"/>
+      </svg>
+      <div class="lockup" style="flex-direction:column; gap:2px;">
+        <span class="wordmark" style="letter-spacing:0.22em;">ATLAS</span><span class="byline">DealerBox · AI Workers</span>
+      </div>
+    </div>
+    <div class="cell paper">
+      <span class="cell-label">Inverted — print</span>
+      <svg width="150" height="150" viewBox="0 0 100 100">
+        <path d="M50 6 L88 28 V72 L50 94 L12 72 V28 Z" fill="none" stroke="#0B0E14" stroke-width="5" stroke-linejoin="round"/>
+        <path d="M50 30 L72 42 V64 L50 76 L28 64 V42 Z" fill="#F4F2EC" stroke="#2E4B8F" stroke-width="3" stroke-linejoin="round"/>
+        <path d="M28 42 L50 54 L72 42 M50 54 V76" fill="none" stroke="#2E4B8F" stroke-width="3" stroke-linejoin="round"/>
+      </svg>
+      <div class="lockup" style="flex-direction:column; gap:2px;">
+        <span class="wordmark" style="letter-spacing:0.22em;">ATLAS</span><span class="byline">DealerBox · AI Workers</span>
+      </div>
+    </div>
+    <div class="cell appice">
+      <span class="cell-label">App icon</span>
+      <div class="appicon">
+        <svg width="60" height="60" viewBox="0 0 100 100">
+          <path d="M50 6 L88 28 V72 L50 94 L12 72 V28 Z" fill="none" stroke="#E8EBF2" stroke-width="6" stroke-linejoin="round"/>
+          <path d="M50 30 L72 42 V64 L50 76 L28 64 V42 Z" fill="none" stroke="#7FA3F5" stroke-width="4" stroke-linejoin="round"/>
+          <path d="M28 42 L50 54 L72 42 M50 54 V76" fill="none" stroke="#7FA3F5" stroke-width="4" stroke-linejoin="round"/>
+        </svg>
+      </div>
+    </div>
+  </div>
+  <div class="notes"><b>Stance:</b> the business model as the mark — a hex badge (industrial, bolt-head, worker) containing an isometric box (the literal DealerBox: an agent shipped in a Mac Mini). <b>Strong at:</b> product-story unity, hardware packaging, "workers not chatbots" positioning. <b>Weak at:</b> busier at tiny sizes; hexagons are common in dev-tool logos.</div>
+</div>
+
+</body>
+</html>

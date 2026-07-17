@@ -12,17 +12,12 @@ from typing import Callable
 
 def build_debug_parser(subparsers, *, cmd_debug: Callable) -> None:
     """Attach the ``debug`` subcommand to ``subparsers``."""
+    from hermes_cli.brand import is_atlas_branded
+
     # =========================================================================
     # debug command
     # =========================================================================
-    debug_parser = subparsers.add_parser(
-        "debug",
-        help="Debug tools — upload logs and system info for support",
-        description="Debug utilities for Hermes Agent. Use 'hermes debug share' to "
-        "upload a debug report (system info + recent logs) to a paste "
-        "service and get a shareable URL.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""\
+    epilog = """\
 Examples:
     hermes debug share              Upload debug report (asks for confirmation)
     hermes debug share --yes        Skip confirmation (for scripts/CI)
@@ -32,7 +27,21 @@ Examples:
     hermes debug share --no-redact  Disable upload-time secret redaction
     hermes debug share --nous       Upload to Nous-internal storage (private)
     hermes debug delete <url>       Delete a previously uploaded paste
-""",
+"""
+    if is_atlas_branded():
+        # Atlas builds do not upload diagnostics to Nous-internal storage.
+        epilog = epilog.replace(
+            "    hermes debug share --nous       Upload to Nous-internal storage (private)\n",
+            "",
+        )
+    debug_parser = subparsers.add_parser(
+        "debug",
+        help="Debug tools — upload logs and system info for support",
+        description="Debug utilities for Hermes Agent. Use 'hermes debug share' to "
+        "upload a debug report (system info + recent logs) to a paste "
+        "service and get a shareable URL.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=epilog,
     )
     debug_sub = debug_parser.add_subparsers(dest="debug_command")
     share_parser = debug_sub.add_parser(
@@ -76,17 +85,18 @@ Examples:
             "into the public paste service."
         ),
     )
-    share_parser.add_argument(
-        "--nous",
-        action="store_true",
-        help=(
-            "Upload the debug bundle to Nous-internal storage (AWS S3) instead "
-            "of a public paste service. The bundle is private — viewable only "
-            "by Nous staff (and allowlisted Discord mods) via a Google-login-"
-            "gated viewer — and auto-deletes after 14 days. Still force-redacts "
-            "secrets unless --no-redact is also passed."
-        ),
-    )
+    if not is_atlas_branded():
+        share_parser.add_argument(
+            "--nous",
+            action="store_true",
+            help=(
+                "Upload the debug bundle to Nous-internal storage (AWS S3) instead "
+                "of a public paste service. The bundle is private — viewable only "
+                "by Nous staff (and allowlisted Discord mods) via a Google-login-"
+                "gated viewer — and auto-deletes after 14 days. Still force-redacts "
+                "secrets unless --no-redact is also passed."
+            ),
+        )
     delete_parser = debug_sub.add_parser(
         "delete",
         help="Delete a paste uploaded by 'hermes debug share'",
