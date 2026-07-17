@@ -125,6 +125,23 @@ def _coerce_turn_input_text(user_input: Any) -> str:
     return "" if user_input is None else str(user_input)
 
 
+def _normalize_dynamic_tool_specs(
+    dynamic_tools: Optional[list[dict[str, Any]]],
+) -> tuple[list[dict[str, Any]], set[str]]:
+    """Return protocol-valid function specs and their advertised names."""
+    safe_specs: list[dict[str, Any]] = []
+    names: set[str] = set()
+    for spec in dynamic_tools or []:
+        if not isinstance(spec, dict) or spec.get("type") != "function":
+            continue
+        name = spec.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        safe_specs.append(spec)
+        names.add(name)
+    return safe_specs, names
+
+
 # Substrings in codex stderr / JSON-RPC error messages that signal the
 # subprocess died because its OAuth credentials are no longer valid.
 # Kept conservative: we only redirect users to `codex login` when we're
@@ -226,6 +243,7 @@ class CodexAppServerSession:
 
         self._client: Optional[CodexAppServerClient] = None
         self._thread_id: Optional[str] = None
+        self._thread_dynamic_tool_names: set[str] = set()
         self._interrupt_event = threading.Event()
         # Pending file-change items, keyed by item id. Populated on
         # item/started for fileChange items; consumed by the approval
@@ -237,11 +255,27 @@ class CodexAppServerSession:
 
     # ---------- lifecycle ----------
 
-    def ensure_started(self) -> str:
+    def ensure_started(
+        self,
+        *,
+        dynamic_tools: Optional[list[dict[str, Any]]] = None,
+    ) -> str:
         """Spawn the subprocess, do the initialize handshake, and start a
         thread. Returns the codex thread id. Idempotent — repeated calls
         return the same thread id."""
+        safe_dynamic_tools, requested_dynamic_tool_names = (
+            _normalize_dynamic_tool_specs(dynamic_tools)
+        )
         if self._thread_id is not None:
+            missing = (
+                requested_dynamic_tool_names - self._thread_dynamic_tool_names
+            )
+            if missing:
+                logger.warning(
+                    "Codex thread was started before dynamic tools were "
+                    "available; unavailable on this thread: %s",
+                    ", ".join(sorted(missing)),
+                )
             return self._thread_id
         if self._client is None:
             self._client = self._client_factory(
@@ -268,6 +302,12 @@ class CodexAppServerSession:
         # Users who want a write-capable profile configure it in their
         # ~/.codex/config.toml the same way they would for any codex usage.
         params: dict[str, Any] = {"cwd": self._cwd}
+        # Codex 0.144 declares dynamicTools on ThreadStartParams (not
+        # TurnStartParams). The schemas remain attached to the Codex thread,
+        # while the actual callback and user-authorisation context are still
+        # supplied only during each active run_turn invocation.
+        if safe_dynamic_tools:
+            params["dynamicTools"] = safe_dynamic_tools
         result = self._client.request("thread/start", params, timeout=15)
         # Cross-fill thread.id/sessionId — different codex versions have
         # serialized this under either key. Mirrors openclaw beta.8's
@@ -289,6 +329,7 @@ class CodexAppServerSession:
                 ),
             )
         self._thread_id = thread_id
+        self._thread_dynamic_tool_names = requested_dynamic_tool_names
         logger.info(
             "codex app-server thread started: id=%s profile=%s cwd=%s",
             self._thread_id[:8],
@@ -308,6 +349,7 @@ class CodexAppServerSession:
                 pass
             self._client = None
         self._thread_id = None
+        self._thread_dynamic_tool_names.clear()
 
     def __enter__(self) -> "CodexAppServerSession":
         return self
@@ -367,6 +409,11 @@ class CodexAppServerSession:
         self,
         user_input: Any,
         *,
+        dynamic_tools: Optional[list[dict[str, Any]]] = None,
+        dynamic_tool_handler: Optional[
+            Callable[[str, dict[str, Any]], Any]
+        ] = None,
+        untrusted_context: str = "",
         turn_timeout: float = 600.0,
         notification_poll_timeout: float = 0.25,
         post_tool_quiet_timeout: float = 90.0,
@@ -387,8 +434,11 @@ class CodexAppServerSession:
         # the caller can render — instead of bubbling raw codex exceptions
         # up to AIAgent.run_conversation.
         result = TurnResult()
+        safe_dynamic_tools, requested_dynamic_tool_names = (
+            _normalize_dynamic_tool_specs(dynamic_tools)
+        )
         try:
-            self.ensure_started()
+            self.ensure_started(dynamic_tools=safe_dynamic_tools)
         except (CodexAppServerError, TimeoutError) as exc:
             result.error = self._format_error_with_stderr(
                 "codex app-server startup failed", exc
@@ -405,15 +455,29 @@ class CodexAppServerSession:
 
         user_input_text = _coerce_turn_input_text(user_input)
 
-        # Send turn/start with the user input. Text-only for now (codex
-        # supports rich content but Hermes' text path is the common case).
+        # Send turn/start with the original user input. Atlas recall and plugin
+        # material use Codex's native additionalContext envelope with the
+        # protocol-level ``untrusted`` classification, so it is neither a user
+        # message nor authorization. Dynamic tool schemas live on thread/start;
+        # the callback itself remains scoped to this active turn.
+        turn_params: dict[str, Any] = {
+            "threadId": self._thread_id,
+            "input": [{"type": "text", "text": user_input_text}],
+        }
+        if isinstance(untrusted_context, str) and untrusted_context.strip():
+            turn_params["additionalContext"] = {
+                "atlas-cortex": {
+                    "kind": "untrusted",
+                    "value": untrusted_context.strip(),
+                }
+            }
+        dynamic_tool_names = (
+            requested_dynamic_tool_names & self._thread_dynamic_tool_names
+        )
         try:
             ts = self._client.request(
                 "turn/start",
-                {
-                    "threadId": self._thread_id,
-                    "input": [{"type": "text", "text": user_input_text}],
-                },
+                turn_params,
                 timeout=10,
             )
         except CodexAppServerError as exc:
@@ -523,7 +587,12 @@ class CodexAppServerSession:
                                 result.error
                                 or "codex reported turn_aborted"
                             )
-                self._handle_server_request(sreq)
+                self._handle_server_request(
+                    sreq,
+                    dynamic_tool_handler=dynamic_tool_handler,
+                    dynamic_tool_names=dynamic_tool_names,
+                    expected_turn_id=result.turn_id,
+                )
                 # Activity counts as live signal — reset the post-tool
                 # quiet timer so an approval round-trip doesn't trip it.
                 last_tool_completion_at = None
@@ -800,7 +869,16 @@ class CodexAppServerSession:
         except TimeoutError:
             logger.warning("turn/interrupt timed out")
 
-    def _handle_server_request(self, req: dict) -> None:
+    def _handle_server_request(
+        self,
+        req: dict,
+        *,
+        dynamic_tool_handler: Optional[
+            Callable[[str, dict[str, Any]], Any]
+        ] = None,
+        dynamic_tool_names: Optional[set[str]] = None,
+        expected_turn_id: Optional[str] = None,
+    ) -> None:
         """Translate a codex server request (approval) into Hermes' approval
         flow, then send the response.
 
@@ -811,6 +889,8 @@ class CodexAppServerSession:
                                                   (we decline; user controls
                                                   permission profile in
                                                   ~/.codex/config.toml).
+          item/tool/call                        — turn-scoped dynamic tools
+                                                  (Codex 0.144 protocol).
         """
         if self._client is None:
             return
@@ -830,6 +910,17 @@ class CodexAppServerSession:
             # profile in ~/.codex/config.toml and surprise escalations
             # shouldn't be silently accepted.
             self._client.respond(rid, {"decision": "decline"})
+        elif method in {"item/tool/call", "item/dynamicToolCall"}:
+            # The 0.144 protocol calls this server request ``item/tool/call``;
+            # some prerelease builds used ``item/dynamicToolCall``. The item
+            # notifications themselves use type=dynamicToolCall in both cases.
+            self._handle_dynamic_tool_call(
+                rid,
+                params,
+                dynamic_tool_handler=dynamic_tool_handler,
+                dynamic_tool_names=dynamic_tool_names or set(),
+                expected_turn_id=expected_turn_id,
+            )
         elif method == "mcpServer/elicitation/request":
             # Codex's MCP layer asks the user for structured input on
             # behalf of an MCP server (e.g. tool-call confirmation,
@@ -857,6 +948,83 @@ class CodexAppServerSession:
             self._client.respond_error(
                 rid, code=-32601, message=f"Unsupported method: {method}"
             )
+
+    def _handle_dynamic_tool_call(
+        self,
+        request_id: Any,
+        params: dict[str, Any],
+        *,
+        dynamic_tool_handler: Optional[
+            Callable[[str, dict[str, Any]], Any]
+        ],
+        dynamic_tool_names: set[str],
+        expected_turn_id: Optional[str],
+    ) -> None:
+        """Execute one advertised, turn-scoped dynamic tool callback.
+
+        Codex is a child process and its request payload is model-influenced,
+        so the callback is checked against the exact names advertised on this
+        turn as well as the active thread/turn ids. All rejection and exception
+        responses are deliberately generic: provider exceptions can contain
+        credentials or customer data and must not be reflected into the model.
+        """
+        if self._client is None:
+            return
+
+        def _fail(message: str = "Atlas Cortex tool call failed safely.") -> None:
+            self._client.respond(
+                request_id,
+                {
+                    "success": False,
+                    "contentItems": [{"type": "inputText", "text": message}],
+                },
+            )
+
+        tool_name = params.get("tool")
+        arguments = params.get("arguments")
+        if (
+            dynamic_tool_handler is None
+            or not isinstance(tool_name, str)
+            or tool_name not in dynamic_tool_names
+            or params.get("namespace") not in (None, "")
+            or params.get("threadId") != self._thread_id
+            or (
+                expected_turn_id is not None
+                and params.get("turnId") != expected_turn_id
+            )
+            or not isinstance(arguments, dict)
+        ):
+            logger.warning(
+                "Rejected unscoped codex dynamic tool request: tool=%r",
+                tool_name,
+            )
+            _fail("Atlas Cortex tool is unavailable for this turn.")
+            return
+
+        try:
+            output = dynamic_tool_handler(tool_name, arguments)
+        except Exception:
+            # Do not log the exception text: provider failures can contain
+            # credentials or customer memory just as readily as RPC errors.
+            logger.warning("Codex dynamic tool handler failed: %s", tool_name)
+            _fail()
+            return
+
+        if not isinstance(output, str):
+            try:
+                import json
+
+                output = json.dumps(output, ensure_ascii=False)
+            except Exception:
+                _fail()
+                return
+        self._client.respond(
+            request_id,
+            {
+                "success": True,
+                "contentItems": [{"type": "inputText", "text": output}],
+            },
+        )
 
     def _decide_exec_approval(self, params: dict) -> str:
         if self._routing.auto_approve_exec:

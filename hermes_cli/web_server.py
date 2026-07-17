@@ -44,7 +44,7 @@ import zipfile
 from hermes_cli._subprocess_compat import windows_detach_flags, windows_hide_flags
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, ClassVar, Dict, List, Literal, Mapping, Optional, Tuple
 
 import yaml
 
@@ -94,7 +94,7 @@ try:
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
     from fastapi.staticfiles import StaticFiles
-    from pydantic import BaseModel
+    from pydantic import BaseModel, ConfigDict, model_validator
     from starlette.concurrency import run_in_threadpool
 except ImportError:
     # First try lazy-installing the dashboard extras. Only the user actually
@@ -110,7 +110,7 @@ except ImportError:
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
         from fastapi.staticfiles import StaticFiles
-        from pydantic import BaseModel
+        from pydantic import BaseModel, ConfigDict, model_validator
         from starlette.concurrency import run_in_threadpool
     except Exception:
         raise SystemExit(
@@ -944,7 +944,9 @@ class ModelAssignment(BaseModel):
     scope="main"        → writes model.provider + model.default
     scope="auxiliary"   → writes auxiliary.<task>.provider + auxiliary.<task>.model
     scope="auxiliary" with task=""  → applied to every auxiliary.* slot
-    scope="auxiliary" with task="__reset__"  → resets every slot to provider="auto"
+    scope="auxiliary" with task="__reset__"  → resets generic helper slots to
+                                                 provider="auto"; dedicated
+                                                 Cortex routes are preserved
     """
     scope: str
     provider: str
@@ -963,6 +965,14 @@ class ModelAssignment(BaseModel):
     # custom/local providers.
     api_key: str = ""
     confirm_expensive_model: bool = False
+    profile: Optional[str] = None
+
+
+class CortexMemoryModelAssignment(BaseModel):
+    """One atomic model assignment for both Cortex consolidation passes."""
+
+    provider: str
+    model: str
     profile: Optional[str] = None
 
 
@@ -2906,6 +2916,418 @@ async def update_learning_node(body: LearningNodeEdit):
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("message", "edit failed"))
     return res
+
+
+# ---------------------------------------------------------------------------
+# Atlas Cortex endpoints — typed customer memory/knowledge graph.
+#
+# These routes deliberately live beside, but do not replace, /api/learning.
+# Every request resolves Cortex inside _profile_scope; callers may select an
+# Atlas profile but can never provide or override the underlying brain id.
+# ---------------------------------------------------------------------------
+
+
+_CORTEX_INTERNAL_RESPONSE_FIELDS = frozenset({
+    "brain_id",
+    "database_path",
+    "db_path",
+    "input",
+    "input_json",
+    "lease_expires_at",
+    "lease_owner",
+    "lease_token",
+    "metadata_json",
+    "output_json",
+    "owner_customer_id",
+})
+_CORTEX_RAW_BODY_FIELDS = frozenset({
+    "body",
+    "content",
+    "document_body",
+    "evidence_body",
+    "raw",
+    "raw_body",
+    "source_text",
+    "text",
+})
+
+
+def _validate_cortex_public_payload(
+    value: Any,
+    *,
+    allow_selected_body: bool,
+) -> None:
+    """Reject private storage fields before a Cortex response is serialized."""
+    if isinstance(value, Mapping):
+        for raw_key, child in value.items():
+            key = str(raw_key).strip().lower().replace("-", "_")
+            if key in _CORTEX_INTERNAL_RESPONSE_FIELDS:
+                raise ValueError(
+                    f"Cortex public response contains forbidden field {raw_key!r}"
+                )
+            if not allow_selected_body and key in _CORTEX_RAW_BODY_FIELDS:
+                raise ValueError(
+                    f"Cortex overview response contains raw body field {raw_key!r}"
+                )
+            _validate_cortex_public_payload(
+                child,
+                allow_selected_body=allow_selected_body,
+            )
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            _validate_cortex_public_payload(
+                child,
+                allow_selected_body=allow_selected_body,
+            )
+
+
+class _CortexContractModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class _CortexPublicResponse(_CortexContractModel):
+    _allow_selected_body: ClassVar[bool] = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_private_storage_fields(cls, value: Any) -> Any:
+        _validate_cortex_public_payload(
+            value,
+            allow_selected_body=cls._allow_selected_body,
+        )
+        return value
+
+
+CortexNodeType = Literal[
+    "community",
+    "document",
+    "entity",
+    "evidence",
+    "memory",
+    "session",
+]
+
+
+class CortexGraphNode(_CortexContractModel):
+    badges: List[str]
+    community: Optional[str]
+    created_at: Optional[str]
+    degree: int
+    domain: str
+    id: str
+    label: str
+    metadata: Dict[str, Any]
+    privacy: str
+    status: str
+    summary: str
+    type: CortexNodeType
+    updated_at: Optional[str]
+    usage: int
+
+
+class CortexGraphEdge(_CortexContractModel):
+    created_at: Optional[str]
+    direction: Literal["directed"]
+    id: str
+    metadata: Dict[str, Any]
+    source: str
+    status: str
+    target: str
+    type: str
+    updated_at: Optional[str]
+
+
+class CortexGraphCommunity(_CortexContractModel):
+    domain: str
+    generated_at: str
+    id: str
+    label: str
+    level: int
+    member_count: int
+    parent_id: Optional[str]
+    status: str
+    visible_member_count: int
+
+
+class CortexFacet(_CortexContractModel):
+    count: int
+    value: str
+
+
+class CortexGraphFacets(_CortexContractModel):
+    domains: List[CortexFacet]
+    statuses: List[CortexFacet]
+    types: List[CortexFacet]
+
+
+class CortexTimelineWindow(_CortexContractModel):
+    end: Optional[str]
+    start: Optional[str]
+
+
+class CortexGraphRedactionSummary(_CortexContractModel):
+    document_bodies_hidden: int
+    nodes_omitted_by_limit: int
+    raw_evidence_bodies_hidden: int
+
+
+class CortexGraphResponse(_CortexPublicResponse):
+    communities: List[CortexGraphCommunity]
+    edges: List[CortexGraphEdge]
+    facets: CortexGraphFacets
+    generated_at: str
+    layout_seed: str
+    next_cursor: Optional[str]
+    nodes: List[CortexGraphNode]
+    projection: str
+    redaction_summary: CortexGraphRedactionSummary
+    retrieval_run_id: Optional[str]
+    timeline_window: CortexTimelineWindow
+    version: Literal["atlas.cortex.graph.v1"]
+
+
+class CortexEvidenceDetail(_CortexContractModel):
+    content: str
+    content_truncated: bool
+    id: str
+    ingested_at: str
+    metadata: Dict[str, Any]
+    occurred_at: str
+    retention_class: str
+    sensitivity: str
+    source_locator: str
+    source_type: str
+
+
+class CortexNeighborNode(_CortexContractModel):
+    domain: str
+    id: str
+    label: str
+    metadata: Dict[str, Any]
+    privacy: str
+    status: str
+    type: CortexNodeType
+
+
+class CortexDetailRedactionSummary(_CortexContractModel):
+    evidence_limit: int
+    evidence_omitted: int
+
+
+class CortexNodeDetailResponse(_CortexPublicResponse):
+    _allow_selected_body: ClassVar[bool] = True
+
+    content: str
+    detail: Dict[str, Any]
+    edges: List[CortexGraphEdge]
+    evidence: List[CortexEvidenceDetail]
+    generated_at: str
+    neighbors: List[CortexNeighborNode]
+    node: CortexGraphNode
+    redaction_summary: CortexDetailRedactionSummary
+    version: Literal["atlas.cortex.detail.v1"]
+
+
+class CortexCapabilities(_CortexContractModel):
+    full_text_search: bool
+    graphrag: bool
+    temporal_memory: bool
+    typed_graph: bool
+
+
+class CortexHealthJobs(_CortexContractModel):
+    by_status: Dict[str, int]
+    expired_running: int
+    failed: int
+    latest_dream_job_id: Optional[str]
+    oldest_overdue_age_seconds: int
+    oldest_pending_age_seconds: int
+    pending: int
+    pending_boundaries: int
+    stale: bool
+
+
+class CortexHealthQuality(_CortexContractModel):
+    disputed_memories: int
+    observations_awaiting_maintenance: int
+
+
+class CortexGraphRagHealth(_CortexContractModel):
+    created_at: str
+    document_count: int
+    published_at: Optional[str]
+    status: str
+    version: str
+
+
+class CortexHealthResponse(_CortexPublicResponse):
+    capabilities: CortexCapabilities
+    counts: Dict[str, int]
+    generated_at: str
+    graphrag: Optional[CortexGraphRagHealth]
+    jobs: CortexHealthJobs
+    name: str
+    quality: CortexHealthQuality
+    schema_version: int
+    status: str
+    version: Literal["atlas.cortex.health.v1"]
+
+
+class CortexJob(_CortexContractModel):
+    attempt: int
+    completed_at: Optional[str]
+    created_at: str
+    error: Optional[str]
+    id: str
+    model: Optional[str]
+    output: Dict[str, bool | int | float | str | None]
+    prompt_version: Optional[str]
+    scheduled_at: str
+    started_at: Optional[str]
+    status: str
+    type: str
+    updated_at: str
+
+
+class CortexJobResponse(_CortexPublicResponse):
+    job: CortexJob
+    version: Literal["atlas.cortex.job.v1"]
+
+
+class CognitiveDreamRequest(BaseModel):
+    profile: Optional[str] = None
+
+    class Config:
+        extra = "forbid"
+
+
+def _raise_cognitive_api_error(action: str, exc: Exception) -> None:
+    if isinstance(exc, ValueError):
+        raise HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, LookupError):
+        raise HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, PermissionError):
+        raise HTTPException(status_code=403, detail="Cortex identity is not authorized")
+    if isinstance(exc, RuntimeError):
+        raise HTTPException(status_code=503, detail=str(exc))
+    _log.exception("Cortex API %s failed", action, exc_info=exc)
+    raise HTTPException(status_code=500, detail=f"Failed to {action}")
+
+
+@app.get("/api/cognitive/graph", response_model=CortexGraphResponse)
+async def get_cognitive_graph(
+    profile: Optional[str] = None,
+    projection: str = "growth",
+    limit: int = 250,
+    cursor: Optional[str] = None,
+    domain: Optional[str] = None,
+    types: Optional[str] = None,
+    status: Optional[str] = None,
+    retrieval_run_id: Optional[str] = None,
+):
+    """Return a bounded graph overview with source bodies redacted."""
+    try:
+        from altas.cortex.graph import build_graph_overview
+        from altas.cortex.runtime import open_cortex_store
+
+        node_types = (
+            [part.strip() for part in types.split(",") if part.strip()]
+            if types is not None
+            else None
+        )
+        with _profile_scope(profile):
+            store, _config = open_cortex_store(get_hermes_home())
+            return build_graph_overview(
+                store,
+                projection=projection,
+                limit=limit,
+                cursor=cursor,
+                domain=domain,
+                node_types=node_types,
+                status=status,
+                retrieval_run_id=retrieval_run_id,
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _raise_cognitive_api_error("build the cognitive graph", exc)
+
+
+@app.get("/api/cognitive/node/{node_id}", response_model=CortexNodeDetailResponse)
+async def get_cognitive_node(
+    node_id: str,
+    profile: Optional[str] = None,
+    evidence_limit: int = 20,
+):
+    """Load detail and bounded provenance for one selected graph node."""
+    try:
+        from altas.cortex.graph import build_node_detail
+        from altas.cortex.runtime import open_cortex_store
+
+        with _profile_scope(profile):
+            store, _config = open_cortex_store(get_hermes_home())
+            return build_node_detail(store, node_id, evidence_limit=evidence_limit)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _raise_cognitive_api_error("load the cognitive node", exc)
+
+
+@app.get("/api/cognitive/health", response_model=CortexHealthResponse)
+async def get_cognitive_health(profile: Optional[str] = None):
+    """Return customer-safe Cortex, job, and GraphRAG health."""
+    try:
+        from altas.cortex.graph import build_health
+        from altas.cortex.runtime import open_cortex_store
+
+        with _profile_scope(profile):
+            store, _config = open_cortex_store(get_hermes_home())
+            return build_health(store)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _raise_cognitive_api_error("read cognitive health", exc)
+
+
+@app.post("/api/cognitive/dream/run", response_model=CortexJobResponse)
+async def run_cognitive_dream(
+    body: CognitiveDreamRequest,
+    profile: Optional[str] = None,
+):
+    """Queue manual memory maintenance for the selected profile."""
+    try:
+        from altas.cortex.graph import enqueue_dream
+        from altas.cortex.runtime import open_cortex_store
+
+        if profile and body.profile and profile != body.profile:
+            raise HTTPException(
+                status_code=400,
+                detail="Cortex profile selectors do not match",
+            )
+        selected_profile = profile or body.profile
+        with _profile_scope(selected_profile):
+            store, _config = open_cortex_store(get_hermes_home())
+            return enqueue_dream(store, source="dashboard")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _raise_cognitive_api_error("queue memory maintenance", exc)
+
+
+@app.get("/api/cognitive/dream/{job_id}", response_model=CortexJobResponse)
+async def get_cognitive_dream(job_id: str, profile: Optional[str] = None):
+    """Return status for one memory-maintenance job in this profile."""
+    try:
+        from altas.cortex.graph import build_job_status
+        from altas.cortex.runtime import open_cortex_store
+
+        with _profile_scope(profile):
+            store, _config = open_cortex_store(get_hermes_home())
+            return build_job_status(store, job_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _raise_cognitive_api_error("read memory-maintenance status", exc)
 
 
 def _safe_call(mod, fn_name: str, default):
@@ -5227,7 +5649,10 @@ _AUX_TASK_SLOTS: Tuple[str, ...] = (
     "kanban_decomposer",
     "profile_describer",
     "curator",
+    "cortex_triage",
+    "cortex_reasoning",
 )
+_CORTEX_TASK_SLOTS: Tuple[str, str] = ("cortex_triage", "cortex_reasoning")
 
 
 @app.get("/api/model/options")
@@ -5277,6 +5702,34 @@ def get_model_options(
     except Exception:
         _log.exception("GET /api/model/options failed")
         raise HTTPException(status_code=500, detail="Failed to list model options")
+
+
+@app.get("/api/model/cortex-memory/options")
+def get_cortex_memory_model_options(
+    profile: Optional[str] = None,
+    refresh: bool = False,
+):
+    """Return the dedicated low-cost, structured-output Cortex catalog.
+
+    This inventory is intentionally independent from the chat model picker:
+    Cortex does not call tools, and only offers routes reviewed for bounded
+    memory extraction. ``refresh`` asks OpenRouter to revalidate advertised
+    structured-output support without changing the stable curated ordering.
+    """
+    try:
+        with _profile_scope(profile):
+            cfg = load_config()
+            payload = _build_active_cortex_memory_catalog(cfg, refresh=bool(refresh))
+            payload["current"] = _cortex_current_route_status(cfg, payload)
+            return payload
+    except HTTPException:
+        raise
+    except Exception:
+        _log.exception("GET /api/model/cortex-memory/options failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to list Cortex memory model options",
+        )
 
 
 @app.get("/api/model/recommended-default")
@@ -5400,6 +5853,588 @@ def get_auxiliary_models(profile: Optional[str] = None):
     except Exception:
         _log.exception("GET /api/model/auxiliary failed")
         raise HTTPException(status_code=500, detail="Failed to read auxiliary config")
+
+
+def _configured_main_model_pair(cfg: dict) -> tuple[str, str]:
+    model_cfg = cfg.get("model", {})
+    if isinstance(model_cfg, dict):
+        return (
+            str(model_cfg.get("provider") or "").strip(),
+            str(model_cfg.get("default") or model_cfg.get("model") or model_cfg.get("name") or "").strip(),
+        )
+    return "", str(model_cfg or "").strip()
+
+
+def _cortex_approved_model_providers(cfg: dict) -> list[str]:
+    cortex_cfg = cfg.get("cortex")
+    security = cortex_cfg.get("security") if isinstance(cortex_cfg, dict) else None
+    values = security.get("approved_model_providers") if isinstance(security, dict) else None
+    return [str(value) for value in values] if isinstance(values, list) else []
+
+
+def _build_active_cortex_memory_catalog(
+    cfg: dict,
+    *,
+    refresh: bool = False,
+) -> dict:
+    """Build the memory catalog from the already profile-scoped config.
+
+    ``load_picker_context()`` would re-read config.  Taking the loaded snapshot
+    here keeps the catalog, current-route status, and subsequent atomic write
+    on one profile-consistent view (and avoids a profile switch between reads).
+    Cortex's dedicated catalog only needs the conversational route from the
+    picker context; it deliberately does not inherit arbitrary chat models.
+    """
+    from hermes_cli.inventory import ConfigContext, build_cortex_memory_models_payload
+
+    main_provider, main_model = _configured_main_model_pair(cfg)
+    model_cfg = cfg.get("model")
+    main_base_url = (
+        str(model_cfg.get("base_url") or "").strip()
+        if isinstance(model_cfg, dict)
+        else ""
+    )
+    return build_cortex_memory_models_payload(
+        ConfigContext(
+            current_provider=main_provider,
+            current_model=main_model,
+            current_base_url=main_base_url,
+            user_providers={},
+            custom_providers=[],
+        ),
+        refresh=refresh,
+        approved_model_providers=_cortex_approved_model_providers(cfg),
+    )
+
+
+def _find_cortex_catalog_provider(catalog: dict, provider: str) -> dict | None:
+    """Find a provider row using the same aliases as Cortex runtime."""
+    from agent.auxiliary_client import _normalize_aux_provider
+    from altas.cortex.dream import cortex_provider_is_managed
+
+    requested_provider = _normalize_aux_provider(str(provider or "").strip())
+    for raw_row in catalog.get("providers", []):
+        if not isinstance(raw_row, dict):
+            continue
+        row_provider = _normalize_aux_provider(str(raw_row.get("slug") or "").strip())
+        if row_provider == requested_provider or (
+            cortex_provider_is_managed(row_provider)
+            and cortex_provider_is_managed(requested_provider)
+        ):
+            return raw_row
+    return None
+
+
+def _find_cortex_catalog_capability(
+    provider_row: dict,
+    *,
+    provider: str,
+    model: str,
+) -> tuple[str, dict | None]:
+    """Return the matching reviewed model id and capability, if present."""
+    from altas.cortex.dream import cortex_model_routes_equal
+
+    capabilities = provider_row.get("memory_capabilities")
+    if not isinstance(capabilities, dict):
+        return "", None
+    row_provider = str(provider_row.get("slug") or "")
+    for candidate, raw_capability in capabilities.items():
+        if cortex_model_routes_equal(
+            provider,
+            model,
+            row_provider,
+            str(candidate),
+        ):
+            return str(candidate), raw_capability if isinstance(raw_capability, dict) else None
+    return "", None
+
+
+def _require_cortex_catalog_selection(
+    catalog: dict,
+    *,
+    provider: str,
+    model: str,
+) -> tuple[str, str]:
+    """Require one authenticated, reviewed structured-output catalog route.
+
+    Both model-assignment APIs use this stricter contract. Hand-authored
+    self-managed routes may still be retained when they satisfy Cortex runtime
+    policy, but a UI/API mutation only persists routes we can verify up front.
+    """
+    from agent.auxiliary_client import _normalize_aux_provider
+    from altas.cortex.dream import cortex_model_routes_equal
+
+    requested_provider = _normalize_aux_provider(str(provider or "").strip())
+    requested_model = str(model or "").strip()
+    provider_row = _find_cortex_catalog_provider(catalog, requested_provider)
+
+    if provider_row is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Provider {requested_provider!r} is not available in this profile's "
+                "Cortex memory catalog"
+            ),
+        )
+    if provider_row.get("authenticated") is not True:
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                f"Provider {requested_provider!r} is not authenticated for this profile; "
+                "connect it before selecting a Cortex memory model"
+            ),
+        )
+
+    selectable_models = provider_row.get("models")
+    if not isinstance(selectable_models, list):
+        selectable_models = []
+    catalog_model = next(
+        (
+            str(candidate)
+            for candidate in selectable_models
+            if cortex_model_routes_equal(
+                requested_provider,
+                requested_model,
+                str(provider_row.get("slug") or ""),
+                str(candidate),
+            )
+        ),
+        "",
+    )
+    if not catalog_model:
+        _capability_model, unavailable_capability = _find_cortex_catalog_capability(
+            provider_row,
+            provider=requested_provider,
+            model=requested_model,
+        )
+        unavailable_reason = (
+            str(unavailable_capability.get("unavailable_reason") or "").strip()
+            if unavailable_capability is not None
+            else ""
+        )
+        detail = (
+            f"Model {requested_model!r} is not selectable for Cortex memory"
+            + (f": {unavailable_reason}" if unavailable_reason else "")
+        )
+        raise HTTPException(status_code=400, detail=detail)
+
+    _capability_model, capability = _find_cortex_catalog_capability(
+        provider_row,
+        provider=requested_provider,
+        model=catalog_model,
+    )
+    if not isinstance(capability, dict):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model {catalog_model!r} has no verified Cortex memory capability metadata",
+        )
+    if capability.get("selectable") is not True or capability.get("structured_json") is not True:
+        reason = str(capability.get("unavailable_reason") or "").strip()
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model {catalog_model!r} is not verified for structured Cortex memory output"
+                + (f": {reason}" if reason else "")
+            ),
+        )
+
+    return str(provider_row.get("slug") or requested_provider), catalog_model
+
+
+def _cortex_current_route_status(cfg: dict, catalog: dict) -> dict:
+    """Return secret-free validity for cached-install migration and setup.
+
+    Curated routes must remain authenticated and capability-valid. An explicit
+    route outside the picker is retained as an advanced route when it still
+    satisfies Cortex runtime separation/provider policy; this keeps upgrades
+    from overwriting supported self-managed YAML configurations.
+    """
+    auxiliary = cfg.get("auxiliary")
+    if not isinstance(auxiliary, dict):
+        auxiliary = {}
+    slots: dict[str, dict] = {}
+    for task, public_name in (
+        ("cortex_triage", "triage"),
+        ("cortex_reasoning", "reasoning"),
+    ):
+        raw_slot = auxiliary.get(task)
+        slot = raw_slot if isinstance(raw_slot, dict) else {}
+        provider = str(slot.get("provider") or "").strip()
+        model = str(slot.get("model") or "").strip()
+        configured = provider.lower() not in {"", "auto", "main"} and bool(
+            model and model.lower() != "auto"
+        )
+        valid = False
+        runtime_valid = False
+        catalog_selectable = False
+        advanced_route = False
+        reason = ""
+        if not configured:
+            reason = "a dedicated explicit provider and model are required"
+        else:
+            try:
+                normalized_provider, normalized_model = _validate_cortex_assignment_for_save(
+                    cfg,
+                    task=task,
+                    provider=provider,
+                    model=model,
+                )
+                runtime_valid = True
+                provider_row = _find_cortex_catalog_provider(
+                    catalog,
+                    normalized_provider,
+                )
+                if provider_row is None:
+                    # Not a dedicated-picker route, but still an intentional
+                    # self-managed route allowed by runtime/provider policy.
+                    valid = True
+                    advanced_route = True
+                elif provider_row.get("authenticated") is not True:
+                    reason = (
+                        f"Provider {normalized_provider!r} is not authenticated for this "
+                        "profile; connect it before using Cortex memory"
+                    )
+                else:
+                    capability_model, capability = _find_cortex_catalog_capability(
+                        provider_row,
+                        provider=normalized_provider,
+                        model=normalized_model,
+                    )
+                    if not capability_model:
+                        # The provider is connected, but this explicit model is
+                        # outside the reviewed default shortlist. Preserve it;
+                        # subsequent UI/API mutations stay catalog-only.
+                        valid = True
+                        advanced_route = True
+                    elif (
+                        capability is not None
+                        and capability.get("selectable") is True
+                        and capability.get("structured_json") is True
+                        and capability_model in (provider_row.get("models") or [])
+                    ):
+                        valid = True
+                        catalog_selectable = True
+                    else:
+                        capability_reason = (
+                            str(capability.get("unavailable_reason") or "").strip()
+                            if capability is not None
+                            else ""
+                        )
+                        reason = (
+                            f"Model {normalized_model!r} is not verified for structured "
+                            "Cortex memory output"
+                            + (f": {capability_reason}" if capability_reason else "")
+                        )
+            except HTTPException as exc:
+                reason = str(exc.detail or "Cortex memory route is unavailable")
+        slots[public_name] = {
+            "provider": provider,
+            "model": model,
+            "configured": configured,
+            "valid": valid,
+            "runtime_valid": runtime_valid,
+            "catalog_selectable": catalog_selectable,
+            "advanced_route": advanced_route,
+            "unavailable_reason": reason,
+        }
+
+    return {
+        "configured": all(slot["configured"] for slot in slots.values()),
+        "valid": all(slot["valid"] for slot in slots.values()),
+        **slots,
+    }
+
+
+def _cortex_boundary_config_slice(cfg: dict) -> dict:
+    """Return the config fields that can make an active Cortex route unsafe.
+
+    Generic ``PUT /api/config`` writes are intentionally broader than the
+    dedicated model endpoints.  Comparing this small effective slice lets
+    unrelated settings continue to save when an older profile still needs
+    migration, while any write that changes Cortex activation, either route,
+    provider policy, or the conversational model must cross the same boundary
+    validation as the dedicated picker.
+    """
+    cortex_cfg = cfg.get("cortex") if isinstance(cfg.get("cortex"), dict) else {}
+    security = (
+        cortex_cfg.get("security")
+        if isinstance(cortex_cfg.get("security"), dict)
+        else {}
+    )
+    memory_cfg = cfg.get("memory") if isinstance(cfg.get("memory"), dict) else {}
+    auxiliary = (
+        cfg.get("auxiliary") if isinstance(cfg.get("auxiliary"), dict) else {}
+    )
+    route_fields = (
+        "provider",
+        "model",
+        "base_url",
+        "api_key",
+        "api_mode",
+        "fallback_chain",
+    )
+    routes: dict[str, dict] = {}
+    for task in _CORTEX_TASK_SLOTS:
+        raw = auxiliary.get(task)
+        slot = raw if isinstance(raw, dict) else {}
+        routes[task] = {field: slot.get(field) for field in route_fields}
+
+    main_provider, main_model = _configured_main_model_pair(cfg)
+    return {
+        "enabled": _coerce_bool(cortex_cfg.get("enabled"), default=False),
+        "memory_provider": str(memory_cfg.get("provider") or "").strip().lower(),
+        "main": {"provider": main_provider, "model": main_model},
+        "approved_model_providers": security.get("approved_model_providers"),
+        "routes": routes,
+    }
+
+
+def _assert_valid_cortex_boundary_config_update(
+    effective_existing: dict,
+    effective_candidate: dict,
+) -> None:
+    """Fail closed when a generic config write would break active Cortex.
+
+    Raw YAML remains an expert escape hatch, but the supported Desktop/Web
+    forms must not reset the memory routes to ``auto`` or move the chat model
+    onto the same provider/model pair.  A profile that is already invalid is
+    still allowed to save unrelated fields so setup/migration is not blocked.
+    """
+    before = _cortex_boundary_config_slice(effective_existing)
+    after = _cortex_boundary_config_slice(effective_candidate)
+    if before == after:
+        return
+
+    protected_route_fields = ("base_url", "api_key", "api_mode", "fallback_chain")
+    protected_changed = any(
+        before["routes"][task].get(field) != after["routes"][task].get(field)
+        for task in _CORTEX_TASK_SLOTS
+        for field in protected_route_fields
+    )
+    if protected_changed:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Generic settings cannot change a Cortex endpoint, credential, "
+                "API mode, or fallback chain. Use the dedicated memory-model "
+                "picker, or edit raw YAML for an expert self-managed route."
+            ),
+        )
+
+    if not (after["enabled"] or after["memory_provider"] == "cortex"):
+        # Disabling Cortex is an explicit operator choice, not a broken route.
+        return
+
+    catalog = _build_active_cortex_memory_catalog(effective_candidate)
+    status = _cortex_current_route_status(effective_candidate, catalog)
+    if status.get("valid") is True:
+        return
+
+    reasons = []
+    for public_name in ("triage", "reasoning"):
+        slot = status.get(public_name)
+        if not isinstance(slot, dict) or slot.get("valid") is True:
+            continue
+        reason = str(slot.get("unavailable_reason") or "invalid route").strip()
+        reasons.append(f"{public_name}: {reason}")
+    detail = "; ".join(reasons) or "both dedicated Cortex routes are required"
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            "This config change would leave active Cortex memory without a valid "
+            f"dedicated model route ({detail}). Choose a memory model first."
+        ),
+    )
+
+
+def _validate_cortex_assignment_for_save(
+    cfg: dict,
+    *,
+    task: str,
+    provider: str,
+    model: str,
+) -> tuple[str, str]:
+    """Run the same explicit/separate/provider-policy gates as Cortex runtime."""
+    from altas.cortex.dream import (
+        CortexRouteConflictError,
+        CortexRouteError,
+        cortex_provider_is_managed,
+        validate_cortex_model_selection,
+    )
+
+    main_provider, main_model = _configured_main_model_pair(cfg)
+    try:
+        from hermes_cli.config import get_env_value
+
+        managed_flag = str(get_env_value("ATLAS_MANAGED_MODE") or "").strip().lower()
+    except Exception:
+        managed_flag = ""
+    from hermes_cli.inventory import managed_cortex_binding_present
+
+    bound_managed = managed_cortex_binding_present()
+    managed = (
+        bound_managed
+        or managed_flag in {"1", "true", "yes", "on"}
+        or cortex_provider_is_managed(main_provider)
+        or cortex_provider_is_managed(provider)
+    )
+    if managed and not cortex_provider_is_managed(provider):
+        raise HTTPException(
+            status_code=400,
+            detail="managed Cortex memory may only use the Atlas-approved model gateway",
+        )
+    if cortex_provider_is_managed(provider):
+        if not bound_managed:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "The Atlas managed Cortex route is unavailable without a "
+                    "bound control-plane identity"
+                ),
+            )
+    try:
+        return validate_cortex_model_selection(
+            task,
+            provider=provider,
+            model=model,
+            main_provider=main_provider,
+            main_model=main_model,
+            approved_providers=(
+                [] if managed else _cortex_approved_model_providers(cfg)
+            ),
+        )
+    except CortexRouteConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except CortexRouteError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _assert_main_route_is_separate_from_cortex(
+    cfg: dict,
+    *,
+    provider: str,
+    model: str,
+) -> None:
+    """Prevent a chat-model change from invalidating existing Cortex routes."""
+    from altas.cortex.dream import cortex_model_routes_equal
+
+    auxiliary = cfg.get("auxiliary")
+    if not isinstance(auxiliary, dict):
+        return
+    for task in _CORTEX_TASK_SLOTS:
+        slot = auxiliary.get(task)
+        if not isinstance(slot, dict):
+            continue
+        cortex_provider = str(slot.get("provider") or "").strip()
+        cortex_model = str(slot.get("model") or "").strip()
+        if cortex_provider.lower() in {"", "auto", "main"} or not cortex_model:
+            continue
+        if cortex_model_routes_equal(
+            provider,
+            model,
+            cortex_provider,
+            cortex_model,
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"The conversational model matches auxiliary.{task}; "
+                    "choose a different chat model or change the Cortex memory model first"
+                ),
+            )
+
+
+def _write_cortex_slot_route(
+    auxiliary: dict,
+    *,
+    task: str,
+    provider: str,
+    model: str,
+) -> None:
+    slot_cfg = auxiliary.get(task)
+    if not isinstance(slot_cfg, dict):
+        slot_cfg = {}
+    previous_provider = str(slot_cfg.get("provider") or "").strip().lower()
+    new_provider = provider.strip().lower()
+    slot_cfg["provider"] = provider
+    slot_cfg["model"] = model
+    slot_cfg["fallback_chain"] = []
+    # Curated hosted routes never inherit an invisible task-scoped endpoint or
+    # credential, even when the provider slug did not change. The atomic picker
+    # does not display those fields, so retaining them could redirect personal
+    # evidence somewhere other than the selected provider.
+    if new_provider != "custom":
+        slot_cfg.pop("base_url", None)
+        clear_model_endpoint_credentials(slot_cfg)
+    elif new_provider != previous_provider:
+        slot_cfg.pop("base_url", None)
+        clear_model_endpoint_credentials(slot_cfg)
+    auxiliary[task] = slot_cfg
+
+
+def _apply_cortex_memory_assignment_sync(provider: str, model: str) -> dict:
+    """Validate once and atomically assign both Cortex consolidation passes."""
+    cfg = load_config()
+    normalized_provider, normalized_model = _validate_cortex_assignment_for_save(
+        cfg,
+        task="cortex_memory",
+        provider=provider,
+        model=model,
+    )
+    catalog = _build_active_cortex_memory_catalog(cfg)
+    normalized_provider, normalized_model = _require_cortex_catalog_selection(
+        catalog,
+        provider=normalized_provider,
+        model=normalized_model,
+    )
+    auxiliary = cfg.get("auxiliary")
+    if not isinstance(auxiliary, dict):
+        auxiliary = {}
+    for task in _CORTEX_TASK_SLOTS:
+        _write_cortex_slot_route(
+            auxiliary,
+            task=task,
+            provider=normalized_provider,
+            model=normalized_model,
+        )
+    cfg["auxiliary"] = auxiliary
+    save_config(cfg)
+
+    triage = {"provider": normalized_provider, "model": normalized_model}
+    reasoning = {"provider": normalized_provider, "model": normalized_model}
+    return {
+        "ok": True,
+        "provider": normalized_provider,
+        "model": normalized_model,
+        "triage": triage,
+        "reasoning": reasoning,
+        "gateway_tools": [],
+    }
+
+
+@app.put("/api/model/cortex-memory")
+async def set_cortex_memory_model_assignment(
+    body: CortexMemoryModelAssignment,
+    profile: Optional[str] = None,
+):
+    """Atomically assign one dedicated model to both Cortex model passes."""
+    provider = str(body.provider or "").strip()
+    model = str(body.model or "").strip()
+
+    try:
+        def _apply_assignment():
+            with _profile_scope(body.profile or profile):
+                return _apply_cortex_memory_assignment_sync(provider, model)
+
+        return await asyncio.to_thread(_apply_assignment)
+    except HTTPException:
+        raise
+    except Exception:
+        _log.exception("PUT /api/model/cortex-memory failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to save Cortex memory model assignment",
+        )
 
 
 @app.get("/api/model/moa")
@@ -5538,6 +6573,11 @@ def _apply_model_assignment_sync(
         if not provider or not model:
             raise HTTPException(status_code=400, detail="provider and model required for main")
         provider, model = _normalize_main_model_assignment(provider, model)
+        _assert_main_route_is_separate_from_cortex(
+            cfg,
+            provider=provider,
+            model=model,
+        )
         model_cfg = _apply_main_model_assignment(
             cfg.get("model", {}), provider, model, base_url, api_key
         )
@@ -5609,6 +6649,8 @@ def _apply_model_assignment_sync(
         aux_cfg = cfg.get("auxiliary", {})
         if isinstance(aux_cfg, dict):
             for slot in _AUX_TASK_SLOTS:
+                if slot in _CORTEX_TASK_SLOTS:
+                    continue
                 slot_cfg = aux_cfg.get(slot)
                 if not isinstance(slot_cfg, dict):
                     continue
@@ -5640,8 +6682,12 @@ def _apply_model_assignment_sync(
         aux = {}
 
     if task == "__reset__":
-        # Reset every slot to provider="auto", model="" — keeps other fields intact.
+        # Generic helpers may follow the main route; Cortex must remain on its
+        # dedicated explicit model or session-end consolidation would fail.
+        reset_tasks: list[str] = []
         for slot in _AUX_TASK_SLOTS:
+            if slot in _CORTEX_TASK_SLOTS:
+                continue
             slot_cfg = aux.get(slot)
             if not isinstance(slot_cfg, dict):
                 slot_cfg = {}
@@ -5650,17 +6696,57 @@ def _apply_model_assignment_sync(
             slot_cfg.pop("base_url", None)
             clear_model_endpoint_credentials(slot_cfg)
             aux[slot] = slot_cfg
+            reset_tasks.append(slot)
         cfg["auxiliary"] = aux
         save_config(cfg)
-        return {"ok": True, "scope": "auxiliary", "reset": True}
+        return {
+            "ok": True,
+            "scope": "auxiliary",
+            "reset": True,
+            "tasks": reset_tasks,
+            "preserved_tasks": list(_CORTEX_TASK_SLOTS),
+        }
 
     if not provider:
         raise HTTPException(status_code=400, detail="provider required for auxiliary")
 
     targets = [task] if task else list(_AUX_TASK_SLOTS)
+    cortex_values: dict[str, tuple[str, str]] = {}
+    cortex_catalog = (
+        _build_active_cortex_memory_catalog(cfg)
+        if any(slot in _CORTEX_TASK_SLOTS for slot in targets)
+        else None
+    )
     for slot in targets:
         if slot not in _AUX_TASK_SLOTS:
             raise HTTPException(status_code=400, detail=f"unknown auxiliary task: {slot}")
+        if slot in _CORTEX_TASK_SLOTS:
+            cortex_provider, cortex_model = _validate_cortex_assignment_for_save(
+                cfg,
+                task=slot,
+                provider=provider,
+                model=model,
+            )
+            # Prevalidate every Cortex target against the same immutable
+            # catalog snapshot before mutating any slot. This closes the
+            # generic /api/model/set bypass used by the advanced Settings rows
+            # while retaining all-or-nothing behavior for bulk assignments.
+            cortex_values[slot] = _require_cortex_catalog_selection(
+                cortex_catalog or {},
+                provider=cortex_provider,
+                model=cortex_model,
+            )
+
+    for slot in targets:
+        if slot in _CORTEX_TASK_SLOTS:
+            cortex_provider, cortex_model = cortex_values[slot]
+            _write_cortex_slot_route(
+                aux,
+                task=slot,
+                provider=cortex_provider,
+                model=cortex_model,
+            )
+            continue
         slot_cfg = aux.get(slot)
         if not isinstance(slot_cfg, dict):
             slot_cfg = {}
@@ -5675,12 +6761,16 @@ def _apply_model_assignment_sync(
 
     cfg["auxiliary"] = aux
     save_config(cfg)
+    response_provider = provider
+    response_model = model
+    if len(targets) == 1 and targets[0] in cortex_values:
+        response_provider, response_model = cortex_values[targets[0]]
     return {
         "ok": True,
         "scope": "auxiliary",
         "tasks": targets,
-        "provider": provider,
-        "model": model,
+        "provider": response_provider,
+        "model": response_model,
     }
 
 
@@ -5823,8 +6913,14 @@ async def update_config(body: ConfigUpdate, profile: Optional[str] = None):
             # is not sent in the PUT body. A full-replace save would silently
             # drop those keys. Deep-merge incoming over what's on disk so the
             # frontend can only overwrite what it explicitly sends.
-            existing = read_raw_config()
             incoming = _denormalize_config_from_web(body.config)
+            effective_existing = load_config()
+            effective_candidate = _deep_merge(effective_existing, incoming)
+            _assert_valid_cortex_boundary_config_update(
+                effective_existing,
+                effective_candidate,
+            )
+            existing = read_raw_config()
             save_config(_deep_merge(existing, incoming))
         return {"ok": True}
     except HTTPException:
@@ -9479,11 +10575,14 @@ async def bulk_delete_sessions_endpoint(body: BulkDeleteSessions):
       deliberate — UI selection state can race against another tab's
       delete, and we'd rather succeed-on-the-rest than fail-the-whole-
       batch.
-    * Children of every deleted parent are orphaned, not cascade-
-      deleted.
-    * Active and archived sessions ARE deleted when explicitly
-      selected — unlike ``DELETE /api/sessions/empty``, the user
-      hand-picked the rows so we trust the selection.
+    * A selected compression segment expands to its complete logical
+      SessionDB lineage. Delegate descendants are included because the
+      underlying explicit-delete contract already cascades them; branch
+      lineages remain independent and are merely orphaned when not selected.
+    * Cortex admission revocation and evidence tombstoning complete before
+      any transcript row is removed. A running semantic lease fails closed.
+    * Archived sessions may be explicitly deleted. A session with a live
+      cross-process owner fails closed instead of racing that owner.
     * Like the other session-delete endpoints, this does NOT pass a
       ``sessions_dir`` through; on-disk transcript / request-dump
       cleanup runs at the CLI/agent layer on the next prune pass.
@@ -9506,7 +10605,34 @@ async def bulk_delete_sessions_endpoint(body: BulkDeleteSessions):
         )
     db = _open_session_db_for_profile(body.profile)
     try:
-        deleted = db.delete_sessions(body.ids)
+        delete_ids = db.get_session_delete_closure(body.ids)
+        try:
+            from hermes_cli.active_sessions import ActiveSessionConflict
+            from hermes_cli.session_deletion import delete_sessions_with_cortex
+            from hermes_state import ActiveSessionDeleteConflict
+
+            _deleted_ids, deleted = await asyncio.to_thread(
+                delete_sessions_with_cortex,
+                db,
+                _session_profile_home(body.profile),
+                delete_ids,
+                reconciler=_reconcile_explicit_session_deletion,
+            )
+        except (ActiveSessionConflict, ActiveSessionDeleteConflict) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            _log.warning(
+                "Cortex bulk session deletion reconciliation failed; "
+                "state.db was not changed",
+                exc_info=True,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Atlas Cortex could not reconcile the session deletion; "
+                    "the transcripts were left unchanged"
+                ),
+            ) from exc
         return {"ok": True, "deleted": deleted}
     finally:
         db.close()
@@ -9549,7 +10675,34 @@ async def delete_empty_sessions_endpoint(profile: Optional[str] = None):
     """
     db = _open_session_db_for_profile(profile)
     try:
-        deleted = db.delete_empty_sessions()
+        try:
+            from hermes_cli.active_sessions import ActiveSessionConflict
+            from hermes_cli.session_deletion import (
+                delete_empty_sessions_with_cortex,
+            )
+            from hermes_state import ActiveSessionDeleteConflict
+
+            _deleted_ids, deleted = await asyncio.to_thread(
+                delete_empty_sessions_with_cortex,
+                db,
+                _session_profile_home(profile),
+                reconciler=_reconcile_explicit_session_deletion,
+            )
+        except (ActiveSessionConflict, ActiveSessionDeleteConflict) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            _log.warning(
+                "Cortex empty-session deletion reconciliation failed; "
+                "state.db was not changed",
+                exc_info=True,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Atlas Cortex could not reconcile empty-session deletion; "
+                    "the transcripts were left unchanged"
+                ),
+            ) from exc
         return {"ok": True, "deleted": deleted}
     finally:
         db.close()
@@ -9599,6 +10752,23 @@ def _open_session_db_for_profile(profile: Optional[str]):
         return SessionDB()
     _name, home = _cron_profile_home(profile)
     return SessionDB(db_path=Path(home) / "state.db")
+
+
+def _session_profile_home(profile: Optional[str]) -> Path:
+    """Canonical profile home paired with ``_open_session_db_for_profile``."""
+
+    if not profile:
+        return Path(get_hermes_home()).expanduser().resolve()
+    return Path(_cron_profile_home(profile)[1]).expanduser().resolve()
+
+
+def _reconcile_explicit_session_deletion(
+    profile_home: Path,
+    session_ids: List[str],
+) -> tuple[str, ...]:
+    from altas.cortex.lifecycle import reconcile_detached_session_deletions
+
+    return reconcile_detached_session_deletions(profile_home, session_ids)
 
 
 @app.get("/api/sessions/{session_id}")
@@ -9684,7 +10854,35 @@ async def delete_session_endpoint(session_id: str, profile: Optional[str] = None
         sid = db.resolve_session_id(session_id)
         if not sid:
             return {"ok": True, "already_absent": True}
-        db.delete_session(sid)
+        delete_ids = db.get_session_delete_closure([sid])
+        try:
+            from hermes_cli.active_sessions import ActiveSessionConflict
+            from hermes_cli.session_deletion import delete_sessions_with_cortex
+            from hermes_state import ActiveSessionDeleteConflict
+
+            _deleted_ids, _deleted = await asyncio.to_thread(
+                delete_sessions_with_cortex,
+                db,
+                _session_profile_home(profile),
+                delete_ids,
+                reconciler=_reconcile_explicit_session_deletion,
+            )
+        except (ActiveSessionConflict, ActiveSessionDeleteConflict) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            _log.warning(
+                "Cortex session %s deletion reconciliation failed; "
+                "state.db was not changed",
+                sid,
+                exc_info=True,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Atlas Cortex could not reconcile the session deletion; "
+                    "the transcript was left unchanged"
+                ),
+            ) from exc
         return {"ok": True}
     finally:
         db.close()
@@ -9829,7 +11027,16 @@ async def prune_sessions_endpoint(body: SessionPrune):
             archived=None if body.include_archived else False,
         )
         if body.dry_run:
-            rows = db.list_prune_candidates(**filters)
+            from altas.cortex.privacy import (
+                list_prune_candidates_with_cortex,
+            )
+
+            rows = await asyncio.to_thread(
+                list_prune_candidates_with_cortex,
+                profile_home,
+                db,
+                **filters,
+            )
             return {
                 "ok": True,
                 "removed": 0,
@@ -9850,10 +11057,28 @@ async def prune_sessions_endpoint(body: SessionPrune):
                 ],
             }
         sessions_dir = profile_home / "sessions"
-        removed = db.prune_sessions(
-            sessions_dir=sessions_dir if sessions_dir.exists() else None,
-            **filters,
-        )
+        from altas.cortex.privacy import prune_sessions_with_cortex
+
+        try:
+            removed = await asyncio.to_thread(
+                prune_sessions_with_cortex,
+                profile_home,
+                db,
+                sessions_dir=sessions_dir if sessions_dir.exists() else None,
+                **filters,
+            )
+        except Exception as exc:
+            _log.warning(
+                "Cortex retention reconciliation failed; state.db was not changed",
+                exc_info=True,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Atlas Cortex could not reconcile retention pruning; "
+                    "the transcripts were left unchanged"
+                ),
+            ) from exc
         return {"ok": True, "removed": removed}
     finally:
         db.close()

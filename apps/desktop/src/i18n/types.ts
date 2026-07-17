@@ -573,7 +573,9 @@ export interface Translations {
       defaultsFailed: string
       auxiliaryTitle: string
       resetAllToMain: string
+      resetHelpersToMain: string
       auxiliaryDesc: string
+      cortexDedicatedNote: string
       setToMain: string
       change: string
       autoUseMain: string
@@ -1592,6 +1594,29 @@ export interface Translations {
     change: string
     startChatting: string
     docs: (provider: string) => string
+    memoryModel: {
+      title: string
+      loading: string
+      dedicatedModel: string
+      chatModel: string
+      routeLabel: string
+      description: string
+      recommended: string
+      pickerTitle: string
+      pickerDescription: string
+      search: string
+      noModels: string
+      notConnected: string
+      unavailable: string
+      finishSetup: string
+      errorTitle: string
+      connectProvider: (provider: string) => string
+      connectDescription: (provider: string) => string
+      chatModelUnchanged: string
+      apiKeyPlaceholder: (keyEnv: string) => string
+      connectAndContinue: string
+      connectingProvider: string
+    }
   }
 
   modelPicker: {

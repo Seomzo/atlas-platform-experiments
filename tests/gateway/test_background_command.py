@@ -230,8 +230,8 @@ class TestRunBackgroundTask:
         assert "failed" in call_args[1].get("content", call_args[0][1] if len(call_args[0]) > 1 else "").lower()
 
     @pytest.mark.asyncio
-    async def test_successful_task_sends_result(self):
-        """When the agent completes successfully, the result is sent."""
+    async def test_successful_task_is_memory_isolated_and_sends_result(self):
+        """The helper never attaches primary memory and still sends its result."""
         runner = _make_runner()
         mock_adapter = AsyncMock()
         mock_adapter.send = AsyncMock()
@@ -264,6 +264,7 @@ class TestRunBackgroundTask:
         content = call_args[1].get("content", call_args[0][1] if len(call_args[0]) > 1 else "")
         assert "Background task complete" in content
         assert "Hello from background!" in content
+        assert MockAgent.call_args.kwargs["skip_memory"] is True
         mock_agent_instance.shutdown_memory_provider.assert_called_once()
         mock_agent_instance.close.assert_called_once()
 

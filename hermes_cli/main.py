@@ -318,6 +318,7 @@ from hermes_cli.subcommands.gui import build_gui_parser
 from hermes_cli.subcommands.logs import build_logs_parser
 from hermes_cli.subcommands.prompt_size import build_prompt_size_parser
 from hermes_cli.subcommands.memory import build_memory_parser
+from hermes_cli.subcommands.cortex import build_cortex_parser
 from hermes_cli.subcommands.acp import build_acp_parser
 from hermes_cli.subcommands.tools import build_tools_parser
 from hermes_cli.subcommands.insights import build_insights_parser
@@ -3245,7 +3246,18 @@ _AUX_TASKS: list[tuple[str, str, str]] = [
     ("kanban_decomposer", "Kanban decomposer", "task decomposition"),
     ("profile_describer", "Profile describer", "auto profile descriptions"),
     ("curator", "Curator", "skill-usage review pass"),
+    ("cortex_triage", "Cortex triage", "private memory consolidation"),
+    ("cortex_reasoning", "Cortex reasoning", "ambiguous memory review"),
 ]
+
+# Cortex is not a generic helper route. Both passes process personal evidence
+# and must stay pinned to one explicit, reviewed model that is separate from
+# the conversational model. Keep this boundary centralized so generic reset
+# and picker paths cannot silently downgrade either task to ``auto``.
+_CORTEX_AUX_TASKS: tuple[str, str] = (
+    "cortex_triage",
+    "cortex_reasoning",
+)
 
 
 def _all_aux_tasks() -> list[tuple[str, str, str]]:
@@ -3286,6 +3298,327 @@ def _format_aux_current(task_cfg: dict) -> str:
     return provider
 
 
+def _configured_main_route_for_cortex(cfg: dict) -> tuple[str, str, str]:
+    """Return the conversational provider/model/base URL from one config view."""
+    model_cfg = cfg.get("model")
+    if not isinstance(model_cfg, dict):
+        return "", str(model_cfg or "").strip(), ""
+    return (
+        str(model_cfg.get("provider") or "").strip(),
+        str(
+            model_cfg.get("default")
+            or model_cfg.get("model")
+            or model_cfg.get("name")
+            or ""
+        ).strip(),
+        str(model_cfg.get("base_url") or "").strip(),
+    )
+
+
+def _approved_cortex_model_providers(cfg: dict) -> list[str]:
+    """Read the optional Cortex provider allow-list from the active profile."""
+    cortex_cfg = cfg.get("cortex")
+    security_cfg = (
+        cortex_cfg.get("security") if isinstance(cortex_cfg, dict) else None
+    )
+    values = (
+        security_cfg.get("approved_model_providers")
+        if isinstance(security_cfg, dict)
+        else None
+    )
+    return [str(value) for value in values] if isinstance(values, list) else []
+
+
+def _build_cortex_memory_catalog(cfg: dict) -> dict:
+    """Build the dedicated memory-model catalog from one profile snapshot."""
+    from hermes_cli.inventory import ConfigContext, build_cortex_memory_models_payload
+
+    main_provider, main_model, main_base_url = _configured_main_route_for_cortex(cfg)
+    return build_cortex_memory_models_payload(
+        ConfigContext(
+            current_provider=main_provider,
+            current_model=main_model,
+            current_base_url=main_base_url,
+            # Cortex deliberately does not inherit arbitrary chat-provider
+            # entries. Its catalog is the reviewed memory-specific inventory.
+            user_providers={},
+            custom_providers=[],
+        ),
+        approved_model_providers=_approved_cortex_model_providers(cfg),
+    )
+
+
+def _cortex_memory_catalog_choices(catalog: dict) -> list[tuple[str, str, str]]:
+    """Return only authenticated, selectable structured-output routes."""
+    choices: list[tuple[str, str, str]] = []
+    providers = catalog.get("providers")
+    if not isinstance(providers, list):
+        return choices
+
+    for raw_provider in providers:
+        if not isinstance(raw_provider, dict):
+            continue
+        if raw_provider.get("authenticated") is not True:
+            continue
+        provider = str(raw_provider.get("slug") or "").strip()
+        provider_name = str(raw_provider.get("name") or provider).strip()
+        models = raw_provider.get("models")
+        capabilities = raw_provider.get("memory_capabilities")
+        if not provider or not isinstance(models, list) or not isinstance(
+            capabilities, dict
+        ):
+            continue
+        for raw_model in models:
+            model = str(raw_model or "").strip()
+            capability = capabilities.get(model)
+            if (
+                not model
+                or not isinstance(capability, dict)
+                or capability.get("selectable") is not True
+                or capability.get("structured_json") is not True
+            ):
+                continue
+            choices.append((provider, model, f"{provider_name} · {model}"))
+    return choices
+
+
+def _require_cortex_memory_catalog_selection(
+    cfg: dict,
+    catalog: dict,
+    *,
+    provider: str,
+    model: str,
+) -> tuple[str, str]:
+    """Validate a Cortex route against runtime policy and the strict catalog."""
+    from altas.cortex.dream import (
+        CortexRouteConflictError,
+        CortexRouteError,
+        cortex_model_routes_equal,
+        cortex_provider_is_managed,
+        validate_cortex_model_selection,
+    )
+    from hermes_cli.config import get_env_value
+    from hermes_cli.inventory import managed_cortex_binding_present
+
+    requested_provider = str(provider or "").strip().lower()
+    requested_model = str(model or "").strip()
+    if requested_provider in {"", "auto", "main"} or not requested_model:
+        raise ValueError(
+            "Cortex memory requires a dedicated explicit provider and model"
+        )
+
+    main_provider, main_model, _main_base_url = _configured_main_route_for_cortex(
+        cfg
+    )
+    bound_managed = managed_cortex_binding_present()
+    managed_flag = str(get_env_value("ATLAS_MANAGED_MODE") or "").strip().lower()
+    managed = (
+        bound_managed
+        or managed_flag in {"1", "true", "yes", "on"}
+        or cortex_provider_is_managed(main_provider)
+        or cortex_provider_is_managed(requested_provider)
+    )
+    if managed and not cortex_provider_is_managed(requested_provider):
+        raise ValueError(
+            "managed Cortex memory may only use the Atlas-approved model gateway"
+        )
+    if cortex_provider_is_managed(requested_provider) and not bound_managed:
+        raise ValueError(
+            "the Atlas managed Cortex route requires a bound control-plane identity"
+        )
+
+    try:
+        normalized_provider, normalized_model = validate_cortex_model_selection(
+            "cortex_triage",
+            provider=requested_provider,
+            model=requested_model,
+            main_provider=main_provider,
+            main_model=main_model,
+            approved_providers=(
+                [] if managed else _approved_cortex_model_providers(cfg)
+            ),
+        )
+    except (CortexRouteConflictError, CortexRouteError) as exc:
+        raise ValueError(str(exc)) from exc
+
+    providers = catalog.get("providers")
+    provider_row = None
+    if isinstance(providers, list):
+        for raw_row in providers:
+            if not isinstance(raw_row, dict):
+                continue
+            row_provider = str(raw_row.get("slug") or "").strip()
+            if row_provider.lower() == normalized_provider.lower() or (
+                cortex_provider_is_managed(row_provider)
+                and cortex_provider_is_managed(normalized_provider)
+            ):
+                provider_row = raw_row
+                break
+    if provider_row is None:
+        raise ValueError(
+            f"provider {normalized_provider!r} is not available in this profile's "
+            "Cortex memory catalog"
+        )
+    if provider_row.get("authenticated") is not True:
+        raise ValueError(
+            f"provider {normalized_provider!r} is not authenticated for this profile"
+        )
+
+    row_provider = str(provider_row.get("slug") or normalized_provider).strip()
+    selectable_models = provider_row.get("models")
+    if not isinstance(selectable_models, list):
+        selectable_models = []
+    catalog_model = next(
+        (
+            str(candidate)
+            for candidate in selectable_models
+            if cortex_model_routes_equal(
+                normalized_provider,
+                normalized_model,
+                row_provider,
+                str(candidate),
+            )
+        ),
+        "",
+    )
+    if not catalog_model:
+        raise ValueError(
+            f"model {normalized_model!r} is not selectable for Cortex memory"
+        )
+
+    capabilities = provider_row.get("memory_capabilities")
+    capability = (
+        capabilities.get(catalog_model) if isinstance(capabilities, dict) else None
+    )
+    if (
+        not isinstance(capability, dict)
+        or capability.get("selectable") is not True
+        or capability.get("structured_json") is not True
+    ):
+        raise ValueError(
+            f"model {catalog_model!r} is not verified for structured Cortex memory output"
+        )
+    return row_provider, catalog_model
+
+
+def _save_cortex_memory_choice(*, provider: str, model: str) -> tuple[str, str]:
+    """Validate fresh state, then atomically assign both Cortex model passes."""
+    from hermes_cli.config import (
+        clear_model_endpoint_credentials,
+        load_config,
+        save_config,
+    )
+
+    # Re-read both the profile config and dedicated inventory immediately
+    # before the write. A picker opened before a credential, policy, or main
+    # model change must not persist a now-invalid personal-evidence route.
+    cfg = load_config()
+    catalog = _build_cortex_memory_catalog(cfg)
+    normalized_provider, normalized_model = _require_cortex_memory_catalog_selection(
+        cfg,
+        catalog,
+        provider=provider,
+        model=model,
+    )
+
+    auxiliary = cfg.get("auxiliary")
+    if not isinstance(auxiliary, dict):
+        auxiliary = {}
+    for task in _CORTEX_AUX_TASKS:
+        entry = auxiliary.get(task)
+        if not isinstance(entry, dict):
+            entry = {}
+        entry["provider"] = normalized_provider
+        entry["model"] = normalized_model
+        entry["fallback_chain"] = []
+        # The dedicated picker never exposes task-local endpoints. Retaining
+        # hidden values here could redirect personal evidence somewhere other
+        # than the authenticated catalog route the user selected.
+        clear_model_endpoint_credentials(entry, clear_base_url=True)
+        auxiliary[task] = entry
+    cfg["auxiliary"] = auxiliary
+    save_config(cfg)
+    return normalized_provider, normalized_model
+
+
+def _cortex_memory_model_flow() -> None:
+    """Pick one reviewed utility model and assign both Cortex passes."""
+    from altas.cortex.dream import cortex_model_routes_equal
+    from hermes_cli.config import load_config
+
+    cfg = load_config()
+    try:
+        catalog = _build_cortex_memory_catalog(cfg)
+    except Exception as exc:
+        print(f"Could not load the Cortex memory-model catalog: {exc}")
+        return
+    choices = _cortex_memory_catalog_choices(catalog)
+
+    print()
+    print("  Cortex memory model — triage + reasoning")
+    print()
+    print("  Cortex uses one dedicated, authenticated structured-output model")
+    print("  for both session-end memory passes. It cannot follow the chat model")
+    print("  automatically or use an arbitrary endpoint.")
+    print()
+
+    if not choices:
+        print("No authenticated, reviewed Cortex memory model is available.")
+        print(
+            f"Connect an approved provider with `{command_name()} model` or finish "
+            "Atlas managed setup, then return here."
+        )
+        return
+
+    auxiliary = cfg.get("auxiliary")
+    if not isinstance(auxiliary, dict):
+        auxiliary = {}
+    current_pairs: list[tuple[str, str]] = []
+    for task in _CORTEX_AUX_TASKS:
+        entry = auxiliary.get(task)
+        if isinstance(entry, dict):
+            current_pairs.append(
+                (
+                    str(entry.get("provider") or "").strip(),
+                    str(entry.get("model") or "").strip(),
+                )
+            )
+
+    labels: list[str] = []
+    default = 0
+    for index, (provider, model, label) in enumerate(choices):
+        is_current = len(current_pairs) == len(_CORTEX_AUX_TASKS) and all(
+            cortex_model_routes_equal(
+                provider,
+                model,
+                current_provider,
+                current_model,
+            )
+            for current_provider, current_model in current_pairs
+        )
+        labels.append(f"{label}  ← current" if is_current else label)
+        if is_current:
+            default = index
+    labels.append("Back")
+
+    idx = _prompt_provider_choice(labels, default=default)
+    if idx is None or idx == len(choices):
+        return
+    provider, model, _label = choices[idx]
+    try:
+        saved_provider, saved_model = _save_cortex_memory_choice(
+            provider=provider,
+            model=model,
+        )
+    except ValueError as exc:
+        print(f"Cortex memory model was not changed: {exc}")
+        return
+    print(
+        "Cortex triage and reasoning now use "
+        f"{saved_provider} · {saved_model}."
+    )
+
+
 def _save_aux_choice(
     task: str,
     *,
@@ -3300,6 +3633,14 @@ def _save_aux_choice(
     other task-specific settings are preserved untouched. The main model
     config (``model.default``/``model.provider``) is never modified.
     """
+    if task in _CORTEX_AUX_TASKS:
+        if base_url or api_key:
+            raise ValueError(
+                "Cortex memory cannot use an arbitrary task-local endpoint"
+            )
+        _save_cortex_memory_choice(provider=provider, model=model)
+        return
+
     from hermes_cli.config import load_config, save_config
 
     cfg = load_config()
@@ -3319,10 +3660,12 @@ def _save_aux_choice(
 
 
 def _reset_aux_to_auto() -> int:
-    """Reset every known aux task back to auto/empty. Returns number reset.
+    """Reset generic aux tasks to auto/empty. Returns number reset.
 
     Includes plugin-registered tasks (via ``_all_aux_tasks``) so a plugin
-    that contributed an auxiliary task gets reset alongside built-ins.
+    that contributed an auxiliary task gets reset alongside built-ins. Cortex
+    routes are intentionally preserved because they may never follow the main
+    model implicitly.
     """
     from hermes_cli.config import load_config, save_config
 
@@ -3333,6 +3676,8 @@ def _reset_aux_to_auto() -> int:
         cfg["auxiliary"] = aux
     count = 0
     for task, _name, _desc in _all_aux_tasks():
+        if task in _CORTEX_AUX_TASKS:
+            continue
         entry = aux.setdefault(task, {})
         if not isinstance(entry, dict):
             entry = {}
@@ -3388,7 +3733,7 @@ def _aux_config_menu() -> None:
                 f"{name.ljust(name_col)}{('(' + desc + ')').ljust(desc_col)}{current}"
             )
             entries.append((task_key, label))
-        entries.append(("__reset__", "Reset all to auto"))
+        entries.append(("__reset__", "Reset generic tasks to auto (preserves Cortex)"))
         entries.append(("__back__", "Back"))
 
         idx = _prompt_provider_choice(
@@ -3420,6 +3765,10 @@ def _aux_select_for_task(task: str) -> None:
     inside the aux picker — users set up new providers through the normal
     ``atlas model`` flow, then route aux tasks to them here.
     """
+    if task in _CORTEX_AUX_TASKS:
+        _cortex_memory_model_flow()
+        return
+
     from hermes_cli.config import load_config
     from hermes_cli.model_switch import list_authenticated_providers
 
@@ -11888,7 +12237,7 @@ def _maybe_setup_dashboard_auth_interactively(args) -> None:
         print("\n  Cancelled.")
         sys.exit(1)
 
-    if choice == "2":
+    if choice == "2" and not is_atlas_branded():
         print()
         print(
             "  Run this on the host where the dashboard lives, then start "
@@ -12299,7 +12648,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
     {
         "acp", "auth", "backup", "bundles", "checkpoints", "claw", "completion",
         "computer-use",
-        "config", "console", "cron", "curator", "dashboard", "serve", "debug", "doctor",
+        "config", "console", "cron", "cortex", "curator", "dashboard", "serve", "debug", "doctor",
         "dump", "fallback", "gateway", "hooks", "import", "insights",
         "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
         "journey", "memory-graph", "learning",
@@ -12704,6 +13053,13 @@ def cmd_memory(args):
         from hermes_cli.memory_setup import memory_command
 
         memory_command(args)
+
+
+def cmd_cortex(args):
+    """Inspect or administer the native Atlas Cortex subsystem."""
+    from altas.cortex.cli import cortex_command
+
+    return cortex_command(args)
 
 
 def cmd_acp(args):
@@ -13305,6 +13661,10 @@ def main():
     # =========================================================================
     build_memory_parser(subparsers, cmd_memory=cmd_memory)
 
+    # Atlas Cortex is lifecycle-driven by default; this command is only for
+    # health, manual maintenance, and versioned GraphRAG administration.
+    build_cortex_parser(subparsers, cmd_cortex=cmd_cortex)
+
     # =========================================================================
     # tools command  (parser built in hermes_cli/subcommands/tools.py)
     # =========================================================================
@@ -13701,7 +14061,10 @@ def main():
     sessions_export.add_argument(
         "--delete-after-verified",
         action="store_true",
-        help="md/qmd only: after verified single-session export, delete that session (needs --yes)",
+        help=(
+            "md/qmd only: after verified exports cover the session's full "
+            "compression/delegate scope, delete that scope (needs --yes)"
+        ),
     )
     sessions_export.add_argument(
         "--force",
@@ -13856,6 +14219,25 @@ def main():
         # Hide third-party tool sessions by default, but honour explicit --source
         _source = getattr(args, "source", None)
         _exclude = None if _source else ["tool"]
+
+        def _delete_explicit_session_scope(selected_ids, *, expected_ids=None):
+            """Reconcile Cortex before atomically deleting the same DB rows."""
+            delete_ids = db.get_session_delete_closure(selected_ids)
+            if not delete_ids:
+                return (), 0
+            if expected_ids is not None and tuple(delete_ids) != tuple(expected_ids):
+                raise RuntimeError(
+                    "session deletion scope changed after verified export"
+                )
+            from hermes_cli.session_deletion import delete_sessions_with_cortex
+
+            reconciled_ids, deleted = delete_sessions_with_cortex(
+                db,
+                get_hermes_home(),
+                delete_ids,
+                sessions_dir=get_hermes_home() / "sessions",
+            )
+            return reconciled_ids, deleted
 
         if action == "list":
             sessions = db.list_sessions_rich(
@@ -14203,10 +14585,11 @@ def main():
                 return
             output_dir = Path(args.output).expanduser() if args.output else get_hermes_home() / "session-exports"
 
-            def _export_one(session_id: str):
+            def _export_one(session_id: str, *, force_logical: bool = False):
                 data = (
                     db.export_session_lineage(session_id)
-                    if getattr(args, "lineage", "single") == "logical"
+                    if force_logical
+                    or getattr(args, "lineage", "single") == "logical"
                     else db.export_session(session_id)
                 )
                 if not data:
@@ -14236,6 +14619,126 @@ def main():
                     print(f"Session '{args.session_id}' not found.")
                     db.close()
                     return
+
+                if args.delete_after_verified:
+                    delete_ids = db.get_session_delete_closure(
+                        [resolved_session_id]
+                    )
+                    if not delete_ids:
+                        print(f"Session '{args.session_id}' not found.")
+                        db.close()
+                        return
+
+                    # Explicit deletion includes the complete compression
+                    # lineage plus delegate descendants. Export each distinct
+                    # logical lineage exactly once so verification covers
+                    # every transcript row that will be removed.
+                    delete_id_set = set(delete_ids)
+                    export_groups = []
+                    grouped_ids = set()
+                    for delete_id in delete_ids:
+                        if delete_id in grouped_ids:
+                            continue
+                        lineage = tuple(
+                            lineage_id
+                            for lineage_id in db.get_compression_lineage(delete_id)
+                            if lineage_id in delete_id_set
+                        )
+                        if not lineage:
+                            lineage = (delete_id,)
+                        export_groups.append(lineage)
+                        grouped_ids.update(lineage)
+
+                    exports = []
+                    try:
+                        for group in export_groups:
+                            data, exported_path = _export_one(
+                                group[-1], force_logical=True
+                            )
+                            if not data or not exported_path:
+                                print(
+                                    "Export did not cover the complete deletion "
+                                    "scope; not deleting."
+                                )
+                                db.close()
+                                return
+                            exported_ids = set(
+                                data.get("lineage_session_ids")
+                                or ([data.get("id")] if data.get("id") else [])
+                            )
+                            if exported_ids != set(group):
+                                print(
+                                    "Export scope changed while preparing the "
+                                    "archive; not deleting."
+                                )
+                                db.close()
+                                return
+                            exports.append((data, exported_path))
+                    except FileExistsError as e:
+                        print(
+                            f"Export already exists: {e}. Pass --force to overwrite."
+                        )
+                        db.close()
+                        return
+
+                    covered_ids = {
+                        session_id
+                        for data, _path in exports
+                        for session_id in (
+                            data.get("lineage_session_ids")
+                            or ([data.get("id")] if data.get("id") else [])
+                        )
+                    }
+                    if covered_ids != delete_id_set:
+                        print(
+                            "Verified exports do not cover the complete deletion "
+                            "scope; not deleting."
+                        )
+                        db.close()
+                        return
+                    for data, exported_path in exports:
+                        ok, reason = verify_export_file(exported_path, data)
+                        if not ok:
+                            print(
+                                "Export verification failed; not deleting: "
+                                f"{reason}"
+                            )
+                            db.close()
+                            return
+
+                    total_messages = sum(
+                        len(data.get("messages") or []) for data, _path in exports
+                    )
+                    archive_suffix = "" if len(exports) == 1 else "s"
+                    message_suffix = "" if total_messages == 1 else "s"
+                    print(
+                        f"Exported and verified {len(exports)} logical session "
+                        f"archive{archive_suffix} ({total_messages} "
+                        f"message{message_suffix}) to {output_dir}"
+                    )
+
+                    try:
+                        reconciled_ids, deleted = _delete_explicit_session_scope(
+                            [resolved_session_id], expected_ids=delete_ids
+                        )
+                    except Exception as e:
+                        print(
+                            "Exports verified, but deletion was aborted before "
+                            f"transcript removal: {e}"
+                        )
+                        db.close()
+                        return
+                    if deleted == len(reconciled_ids):
+                        print(f"Deleted exported session '{resolved_session_id}'.")
+                    else:
+                        print(
+                            "Exports verified, but the session store changed "
+                            f"during deletion ({deleted}/{len(reconciled_ids)} "
+                            "rows removed)."
+                        )
+                    db.close()
+                    return
+
                 try:
                     data, exported_path = _export_one(resolved_session_id)
                 except FileExistsError as e:
@@ -14249,17 +14752,6 @@ def main():
                 message_count = len(data.get("messages") or [])
                 suffix = "" if message_count == 1 else "s"
                 print(f"Exported 1 session ({message_count} message{suffix}) to {exported_path}")
-                if args.delete_after_verified:
-                    ok, reason = verify_export_file(exported_path, data)
-                    if not ok:
-                        print(f"Export verification failed; not deleting: {reason}")
-                        db.close()
-                        return
-                    sessions_dir = get_hermes_home() / "sessions"
-                    if db.delete_session(resolved_session_id, sessions_dir=sessions_dir):
-                        print(f"Deleted exported session '{resolved_session_id}'.")
-                    else:
-                        print(f"Exported, but session '{resolved_session_id}' was not deleted because it was not found.")
                 db.close()
                 return
 
@@ -14304,11 +14796,26 @@ def main():
                 ):
                     print("Cancelled.")
                     return
-            sessions_dir = get_hermes_home() / "sessions"
-            if db.delete_session(resolved_session_id, sessions_dir=sessions_dir):
+            try:
+                delete_ids, deleted = _delete_explicit_session_scope(
+                    [resolved_session_id]
+                )
+            except Exception as e:
+                print(
+                    "Delete aborted before transcript removal: "
+                    f"{e}"
+                )
+                db.close()
+                return
+            if deleted == len(delete_ids) and deleted:
                 print(f"Deleted session '{resolved_session_id}'.")
-            else:
+            elif not delete_ids:
                 print(f"Session '{args.session_id}' not found.")
+            else:
+                print(
+                    "Session store changed during deletion "
+                    f"({deleted}/{len(delete_ids)} rows removed)."
+                )
 
         elif action in ("prune", "archive"):
             from hermes_cli.session_filters import (
@@ -14367,7 +14874,16 @@ def main():
             else:
                 filters["archived"] = False
 
-            candidates = db.list_prune_candidates(**filters)
+            if action == "prune":
+                from altas.cortex.privacy import (
+                    list_prune_candidates_with_cortex,
+                )
+
+                candidates = list_prune_candidates_with_cortex(
+                    get_hermes_home(), db, **filters
+                )
+            else:
+                candidates = db.list_prune_candidates(**filters)
             verb = "Delete" if action == "prune" else "Archive"
             if not candidates:
                 print(f"No sessions match ({describe_filters(filters)}).")
@@ -14410,7 +14926,21 @@ def main():
 
             if action == "prune":
                 sessions_dir = get_hermes_home() / "sessions"
-                count = db.prune_sessions(sessions_dir=sessions_dir, **filters)
+                from altas.cortex.privacy import prune_sessions_with_cortex
+
+                try:
+                    count = prune_sessions_with_cortex(
+                        get_hermes_home(),
+                        db,
+                        sessions_dir=sessions_dir,
+                        **filters,
+                    )
+                except Exception as e:
+                    print(
+                        "Prune aborted before transcript removal: "
+                        f"Cortex privacy reconciliation failed: {e}"
+                    )
+                    return
                 print(f"Pruned {count} session(s).")
             else:
                 count = db.archive_sessions(**filters)

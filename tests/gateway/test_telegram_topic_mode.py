@@ -6,7 +6,7 @@ Telegram topics act as independent Hermes session lanes.
 
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
@@ -104,7 +104,7 @@ def _make_runner(session_db=None):
     # Default switch_session impl: returns a SessionEntry carrying the target
     # session_id. Mirrors SessionStore.switch_session semantics for tests that
     # exercise Telegram topic binding rebinds without a real store.
-    def _switch_session(session_key, target_session_id):
+    def _switch_session(session_key, target_session_id, **_kwargs):
         return SessionEntry(
             session_key=session_key,
             session_id=target_session_id,
@@ -123,6 +123,7 @@ def _make_runner(session_db=None):
     runner._busy_ack_ts = {}
     runner._session_model_overrides = {}
     runner._pending_model_notes = {}
+    runner._commit_memory_boundary_before_session_switch = AsyncMock(return_value=True)
     # Gateway holds the async facade; the slash handlers await it.
     if session_db is not None:
         from hermes_state import AsyncSessionDB
@@ -351,7 +352,12 @@ async def test_group_new_keeps_existing_reset_semantics_when_dm_topic_mode_enabl
 
     assert "Started a new Hermes session in this topic" not in result
     assert "parallel work" not in result
-    runner.session_store.reset_session.assert_called_once_with(group_key)
+    runner.session_store.reset_session.assert_called_once_with(
+        group_key,
+        expected_session_id=ANY,
+        defer_memory_finalize_reason="new_session",
+        end_reason="session_reset",
+    )
 
 
 @pytest.mark.asyncio
@@ -393,7 +399,12 @@ async def test_new_inside_telegram_topic_resets_current_topic_with_parallel_tip(
     assert "Started a new Hermes session in this topic" in result
     assert "parallel work" in result
     assert "All Messages" in result
-    runner.session_store.reset_session.assert_called_once_with(topic_key)
+    runner.session_store.reset_session.assert_called_once_with(
+        topic_key,
+        expected_session_id="old-topic-session",
+        defer_memory_finalize_reason="new_session",
+        end_reason="session_reset",
+    )
 
 
 @pytest.mark.asyncio
@@ -502,7 +513,7 @@ async def test_topic_binding_follows_compression_tip_on_read(tmp_path, monkeypat
     # requested; capture the requested id for assertion.
     switched_to: dict = {}
 
-    def fake_switch(_key, new_session_id):
+    def fake_switch(_key, new_session_id, **_kwargs):
         switched_to["id"] = new_session_id
         return SessionEntry(
             session_key=topic_key,
@@ -539,6 +550,54 @@ async def test_topic_binding_follows_compression_tip_on_read(tmp_path, monkeypat
     )
     assert refreshed is not None
     assert refreshed["session_id"] == "child-session"
+
+
+@pytest.mark.asyncio
+async def test_topic_binding_cas_loss_refuses_inbound_turn(tmp_path, monkeypatch):
+    """A topology-only rebind cannot use a route after ownership changed."""
+    import gateway.run as gateway_run
+
+    session_db = SessionDB(db_path=tmp_path / "state.db")
+    session_db.enable_telegram_topic_mode(
+        chat_id="208214988", user_id="208214988"
+    )
+    session_db.create_session(
+        session_id="bound-session",
+        source="telegram",
+        user_id="208214988",
+    )
+    topic_source = _make_source(thread_id="17585")
+    topic_key = build_session_key(topic_source)
+    session_db.bind_telegram_topic(
+        chat_id="208214988",
+        thread_id="17585",
+        user_id="208214988",
+        session_key=topic_key,
+        session_id="bound-session",
+    )
+
+    runner = _make_runner(session_db=session_db)
+    runner.session_store.switch_session = MagicMock(return_value=None)
+    runner._run_agent = AsyncMock(
+        side_effect=AssertionError("CAS-losing topic turn reached the agent")
+    )
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+
+    result = await runner._handle_message(
+        _make_event("do not reroute me", thread_id="17585")
+    )
+
+    assert "route changed" in result
+    runner._commit_memory_boundary_before_session_switch.assert_not_awaited()
+    runner.session_store.switch_session.assert_called_once_with(
+        topic_key,
+        "bound-session",
+        expected_session_id="sess-topic",
+        end_current=False,
+    )
+    runner._run_agent.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -843,7 +902,12 @@ async def test_handoff_to_telegram_dm_topic_uses_dm_lane_not_generic_thread(tmp_
 
     expected_source = _make_source(thread_id="17585")
     expected_key = build_session_key(expected_source)
-    runner.session_store.switch_session.assert_called_once_with(expected_key, "cli-session")
+    runner.session_store.switch_session.assert_called_once_with(
+        expected_key,
+        "cli-session",
+        expected_session_id="sess-topic",
+        end_current=False,
+    )
     assert captured["source"].chat_type == "dm"
     assert captured["source"].user_id == "208214988"
     assert captured["source"].thread_id == "17585"

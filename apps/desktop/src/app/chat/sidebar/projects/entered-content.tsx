@@ -17,6 +17,7 @@ import type { SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { $dismissedWorktreeIds, dismissWorktree } from '@/store/layout'
 import { notifyError } from '@/store/notifications'
+import type { WorkspaceSessionTarget } from '@/store/projects'
 import { removeWorktreePath } from '@/store/projects'
 
 import { SidebarRowStack } from '../chrome'
@@ -46,7 +47,7 @@ export function EnteredProjectContent({
 }: {
   project: SidebarProjectTree
   renderRows: (sessions: SessionInfo[]) => React.ReactNode
-  onNewSession?: (path: null | string) => void
+  onNewSession?: (target: WorkspaceSessionTarget, branch?: string) => boolean | Promise<boolean> | void
   repoWorktrees?: Record<string, HermesGitWorktree[]>
   liveSessions?: SessionInfo[]
   removedSessionIds?: ReadonlySet<string>
@@ -87,7 +88,7 @@ function RepoFlatSection({
   repo: SidebarWorkspaceTree
   showHeader: boolean
   renderRows: (sessions: SessionInfo[]) => React.ReactNode
-  onNewSession?: (path: null | string) => void
+  onNewSession?: (target: WorkspaceSessionTarget, branch?: string) => boolean | Promise<boolean> | void
   discoveredWorktrees?: HermesGitWorktree[]
   liveSessions?: SessionInfo[]
   removedSessionIds?: ReadonlySet<string>

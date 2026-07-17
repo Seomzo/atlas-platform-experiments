@@ -2,10 +2,12 @@ import { atom } from 'nanostores'
 
 import {
   cancelOAuthSession,
+  getCortexMemoryModelOptions,
   getGlobalModelOptions,
   getRecommendedDefaultModel,
   listOAuthProviders,
   pollOAuthSession,
+  setCortexMemoryModelAssignment,
   setEnvVar,
   setModelAssignment,
   startOAuthLogin,
@@ -14,10 +16,19 @@ import {
 } from '@/hermes'
 import { evaluateRuntimeReadiness, type RuntimeReadinessResult } from '@/lib/runtime-readiness'
 import { notify, notifyError } from '@/store/notifications'
+import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import type { ModelOptionProvider, OAuthProvider, OAuthStartResponse } from '@/types/hermes'
 
 type PkceStart = Extract<OAuthStartResponse, { flow: 'pkce' }>
 type DeviceStart = Extract<OAuthStartResponse, { flow: 'device_code' }>
+type CortexMemoryModelOptions = Awaited<ReturnType<typeof getCortexMemoryModelOptions>>
+
+export interface ConnectableMemoryProvider {
+  authType: 'api_key'
+  keyEnv: string
+  name: string
+  slug: string
+}
 
 export type OnboardingMode = 'apikey' | 'oauth'
 
@@ -39,9 +50,42 @@ export type OnboardingFlow =
       // /api/model/options — no need to cache the list here.
       currentModel: string
       label: string
+      message: null | string
       providerSlug: string
       saving: boolean
       status: 'confirming_model'
+    }
+  | {
+      label: string
+      mainModel: string
+      mainProvider: string
+      profile: string
+      status: 'loading_memory_model'
+    }
+  | {
+      currentModel: string
+      currentProvider: string
+      label: string
+      mainModel: string
+      mainProvider: string
+      message: null | string
+      providers: ModelOptionProvider[]
+      profile: string
+      recommendedModel: string
+      recommendedProvider: string
+      saving: boolean
+      status: 'confirming_memory_model'
+    }
+  | {
+      label: string
+      mainModel: string
+      mainProvider: string
+      message: string
+      connectableProvider: ConnectableMemoryProvider | null
+      connecting: boolean
+      credentialMessage: null | string
+      profile: string
+      status: 'memory_model_error'
     }
   | { message: string; provider?: OAuthProvider; start?: OAuthStartResponse; status: 'error' }
 
@@ -88,32 +132,65 @@ const COPY_FLASH_MS = 1500
 export const DEFAULT_ONBOARDING_REASON = 'No inference provider is configured.'
 export const DEFAULT_MANUAL_ONBOARDING_REASON = 'Add or switch inference provider.'
 
-function readCachedConfigured(): boolean | null {
+function configuredCacheKey(profile: string): string {
+  return `${CONFIGURED_CACHE_KEY}:${encodeURIComponent(normalizeProfileKey(profile))}`
+}
+
+function readCachedConfigured(profile = 'default'): boolean | null {
   if (typeof window === 'undefined') {
     return null
   }
 
   try {
-    return window.localStorage.getItem(CONFIGURED_CACHE_KEY) === '1' ||
-      window.localStorage.getItem(LEGACY_CONFIGURED_CACHE_KEY) === '1'
-      ? true
-      : null
+    const normalized = normalizeProfileKey(profile)
+
+    if (window.localStorage.getItem(configuredCacheKey(normalized)) === '1') {
+      return true
+    }
+
+    // The old unscoped bit can only describe the historical/default profile.
+    // Never let it authorize a newly selected remote/customer profile.
+    if (
+      normalized === 'default' &&
+      (window.localStorage.getItem(CONFIGURED_CACHE_KEY) === '1' ||
+        window.localStorage.getItem(LEGACY_CONFIGURED_CACHE_KEY) === '1')
+    ) {
+      window.localStorage.setItem(configuredCacheKey(normalized), '1')
+
+      return true
+    }
+
+    return null
   } catch {
     return null
   }
 }
 
-function writeCachedConfigured(value: boolean) {
+function writeCachedConfigured(value: boolean, profile = 'default') {
   if (typeof window === 'undefined') {
     return
   }
 
   try {
+    const normalized = normalizeProfileKey(profile)
+    const key = configuredCacheKey(normalized)
+
     if (value) {
-      window.localStorage.setItem(CONFIGURED_CACHE_KEY, '1')
+      window.localStorage.setItem(key, '1')
     } else {
-      window.localStorage.removeItem(CONFIGURED_CACHE_KEY)
+      window.localStorage.removeItem(key)
     }
+
+    // Keep the legacy Atlas key in sync only for default so older builds can
+    // still boot after a downgrade. Non-default profiles are scoped-only.
+    if (normalized === 'default') {
+      if (value) {
+        window.localStorage.setItem(CONFIGURED_CACHE_KEY, '1')
+      } else {
+        window.localStorage.removeItem(CONFIGURED_CACHE_KEY)
+      }
+    }
+
     window.localStorage.removeItem(LEGACY_CONFIGURED_CACHE_KEY)
   } catch {
     // localStorage unavailable — degrade silently.
@@ -145,6 +222,7 @@ function writeCachedSkipped(value: boolean) {
     } else {
       window.localStorage.removeItem(SKIP_CACHE_KEY)
     }
+
     window.localStorage.removeItem(LEGACY_SKIP_CACHE_KEY)
   } catch {
     // localStorage unavailable — degrade silently.
@@ -166,7 +244,9 @@ const INITIAL: DesktopOnboardingState = {
 export const $desktopOnboarding = atom<DesktopOnboardingState>(INITIAL)
 
 let pollTimer: number | null = null
-let providersRefreshPromise: null | Promise<void> = null
+const providersRefreshPromises = new Map<string, Promise<OAuthProvider[]>>()
+let memoryOptionsRequestId = 0
+let onboardingRefreshGeneration = 0
 
 const errMessage = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
@@ -192,11 +272,15 @@ async function checkRuntime(ctx: OnboardingContext, requestedProvider?: string):
   })
 }
 
-function shouldPreserveConfiguredOnFallback(runtime: RuntimeReadinessResult, state: DesktopOnboardingState): boolean {
+function shouldPreserveConfiguredOnFallback(
+  runtime: RuntimeReadinessResult,
+  profile: string,
+  requested: boolean
+): boolean {
   // A fallback result means both runtime probes were non-authoritative
   // (transport timeout/disconnect). Keep a previously verified configured
   // state instead of forcing the blocking onboarding overlay.
-  return runtime.source === 'fallback' && state.configured === true && !state.requested
+  return runtime.source === 'fallback' && readCachedConfigured(profile) === true && !requested
 }
 
 function notifyReady(provider: string) {
@@ -233,15 +317,430 @@ function notifyGatewayTools(tools: string[] | undefined) {
   })
 }
 
+function requireModelAssignment(response: { ok: boolean }) {
+  if (response.ok === true) {
+    return
+  }
+
+  const detail = response as { confirm_required?: boolean; message?: string }
+
+  if (detail.confirm_required) {
+    throw new Error('This model requires an additional cost confirmation. Choose another model to continue setup.')
+  }
+
+  throw new Error(detail.message?.trim() || 'Atlas rejected the model assignment.')
+}
+
+function sameModelPair(first: { model: string; provider: string }, second: { model: string; provider: string }) {
+  return (
+    first.provider.trim().toLowerCase() === second.provider.trim().toLowerCase() &&
+    first.model.trim() === second.model.trim()
+  )
+}
+
+function eligibleMemoryModel(
+  providers: ModelOptionProvider[],
+  providerSlug: string,
+  model: string,
+  main: { model: string; provider: string }
+) {
+  const provider = providers.find(row => row.slug.trim().toLowerCase() === providerSlug.trim().toLowerCase())
+
+  if (!provider || provider.authenticated !== true) {
+    return false
+  }
+
+  const candidate = model.trim()
+  const unavailable = new Set((provider.unavailable_models ?? []).map(String))
+  const capability = provider.memory_capabilities?.[candidate]
+
+  return (
+    candidate.length > 0 &&
+    (provider.models ?? []).map(String).includes(candidate) &&
+    !unavailable.has(candidate) &&
+    capability?.selectable === true &&
+    capability.structured_json === true &&
+    !sameModelPair({ provider: provider.slug, model: candidate }, main)
+  )
+}
+
+function firstEligibleMemoryModel(
+  providers: ModelOptionProvider[],
+  main: { model: string; provider: string }
+): null | { model: string; provider: string } {
+  for (const provider of providers) {
+    if (provider.authenticated !== true) {
+      continue
+    }
+
+    const unavailable = new Set((provider.unavailable_models ?? []).map(String))
+
+    for (const rawModel of provider.models ?? []) {
+      const model = String(rawModel).trim()
+      const candidate = { provider: String(provider.slug), model }
+      const capability = provider.memory_capabilities?.[model]
+      const selectable = capability?.selectable === true && capability.structured_json === true
+
+      if (model && selectable && !unavailable.has(model) && !sameModelPair(candidate, main)) {
+        return candidate
+      }
+    }
+  }
+
+  return null
+}
+
+function connectableMemoryProvider(
+  providers: ModelOptionProvider[],
+  main: { model: string; provider: string }
+): ConnectableMemoryProvider | null {
+  for (const provider of providers) {
+    if (
+      provider.authenticated !== false ||
+      provider.auth_type !== 'api_key' ||
+      !String(provider.key_env ?? '').trim()
+    ) {
+      continue
+    }
+
+    const unavailable = new Set((provider.unavailable_models ?? []).map(String))
+
+    const hasEligibleModel = (provider.models ?? []).some(rawModel => {
+      const model = String(rawModel).trim()
+      const capability = provider.memory_capabilities?.[model]
+
+      return (
+        model.length > 0 &&
+        !unavailable.has(model) &&
+        capability?.selectable === true &&
+        capability.structured_json === true &&
+        !sameModelPair({ provider: provider.slug, model }, main)
+      )
+    })
+
+    if (hasEligibleModel) {
+      return {
+        authType: 'api_key',
+        keyEnv: String(provider.key_env).trim(),
+        name: provider.name,
+        slug: provider.slug
+      }
+    }
+  }
+
+  return null
+}
+
+function memoryLoadFailure(
+  main: { model: string; provider: string },
+  label: string,
+  message: string,
+  requestId: number,
+  profile: string,
+  providers: ModelOptionProvider[] = []
+) {
+  if (requestId !== memoryOptionsRequestId) {
+    return
+  }
+
+  setFlow({
+    status: 'memory_model_error',
+    label,
+    mainProvider: main.provider,
+    mainModel: main.model,
+    message,
+    profile,
+    connectableProvider: connectableMemoryProvider(providers, main),
+    connecting: false,
+    credentialMessage: null
+  })
+}
+
+/** Load a bounded Cortex catalog snapshot and select a distinct default. */
+export async function prepareOnboardingMemoryModel(
+  mainProvider: string,
+  mainModel: string,
+  label: string,
+  optionsSnapshot?: CortexMemoryModelOptions,
+  requestedProfile?: string
+) {
+  const main = { provider: mainProvider.trim(), model: mainModel.trim() }
+  const profile = normalizeProfileKey(requestedProfile ?? $activeGatewayProfile.get())
+  const requestId = ++memoryOptionsRequestId
+
+  setFlow({
+    status: 'loading_memory_model',
+    label,
+    mainProvider: main.provider,
+    mainModel: main.model,
+    profile
+  })
+
+  try {
+    const options = optionsSnapshot ?? (await getCortexMemoryModelOptions({ profile }))
+
+    if (requestId !== memoryOptionsRequestId || normalizeProfileKey($activeGatewayProfile.get()) !== profile) {
+      return false
+    }
+
+    const providers = Array.isArray(options.providers) ? options.providers : []
+
+    const recommended = {
+      provider: String(options.recommended?.provider ?? '').trim(),
+      model: String(options.recommended?.model ?? '').trim()
+    }
+
+    const recommendedUsable = eligibleMemoryModel(providers, recommended.provider, recommended.model, main)
+    const selected = recommendedUsable ? recommended : firstEligibleMemoryModel(providers, main)
+
+    if (!selected) {
+      memoryLoadFailure(
+        main,
+        label,
+        'Atlas could not find a connected memory model that is different from your chat model. Connect another model provider, then retry.',
+        requestId,
+        profile,
+        providers
+      )
+
+      return false
+    }
+
+    setFlow({
+      status: 'confirming_memory_model',
+      label,
+      mainProvider: main.provider,
+      mainModel: main.model,
+      currentProvider: selected.provider,
+      currentModel: selected.model,
+      recommendedProvider: recommendedUsable ? recommended.provider : '',
+      recommendedModel: recommendedUsable ? recommended.model : '',
+      providers,
+      profile,
+      saving: false,
+      message: null
+    })
+
+    return true
+  } catch (error) {
+    memoryLoadFailure(main, label, `Could not load memory models: ${errMessage(error)}`, requestId, profile)
+
+    return false
+  }
+}
+
+async function prepareMemoryForConfiguredMain(optionsSnapshot?: CortexMemoryModelOptions, requestedProfile?: string) {
+  const profile = normalizeProfileKey(requestedProfile ?? $activeGatewayProfile.get())
+  const requestId = ++memoryOptionsRequestId
+  const emptyMain = { provider: '', model: '' }
+
+  setFlow({ status: 'loading_memory_model', label: 'Atlas', mainProvider: '', mainModel: '', profile })
+
+  try {
+    const options = await getGlobalModelOptions({ includeUnconfigured: true, explicitOnly: false, profile })
+
+    if (requestId !== memoryOptionsRequestId || normalizeProfileKey($activeGatewayProfile.get()) !== profile) {
+      return false
+    }
+
+    const provider = String(options.provider ?? '').trim()
+    const model = String(options.model ?? '').trim()
+
+    if (!provider || !model) {
+      memoryLoadFailure(
+        emptyMain,
+        'Atlas',
+        'Atlas is running, but its current chat model could not be identified. Retry after confirming the chat model in Settings.',
+        requestId,
+        profile
+      )
+
+      return false
+    }
+
+    const label =
+      options.providers?.find(row => row.slug.trim().toLowerCase() === provider.toLowerCase())?.name ?? provider
+
+    return prepareOnboardingMemoryModel(provider, model, label, optionsSnapshot, profile)
+  } catch (error) {
+    memoryLoadFailure(
+      emptyMain,
+      'Atlas',
+      `Could not identify the current chat model: ${errMessage(error)}`,
+      requestId,
+      profile
+    )
+
+    return false
+  }
+}
+
+export async function retryOnboardingMemoryModel() {
+  const { flow } = $desktopOnboarding.get()
+
+  if (flow.status !== 'memory_model_error') {
+    return false
+  }
+
+  if (!flow.mainProvider || !flow.mainModel) {
+    return prepareMemoryForConfiguredMain(undefined, flow.profile)
+  }
+
+  return prepareOnboardingMemoryModel(flow.mainProvider, flow.mainModel, flow.label, undefined, flow.profile)
+}
+
+export async function connectOnboardingMemoryProvider(apiKey: string) {
+  const state = $desktopOnboarding.get()
+  const { flow } = state
+
+  if (flow.status !== 'memory_model_error' || !flow.connectableProvider || flow.connecting) {
+    return false
+  }
+
+  const value = apiKey.trim()
+
+  if (!value) {
+    setFlow({ ...flow, credentialMessage: 'Enter an API key to continue.' })
+
+    return false
+  }
+
+  const { connectableProvider, profile } = flow
+  const operationId = ++memoryOptionsRequestId
+  setFlow({ ...flow, connecting: true, credentialMessage: null })
+
+  const stillConnecting = () => {
+    const current = $desktopOnboarding.get().flow
+
+    return (
+      operationId === memoryOptionsRequestId &&
+      normalizeProfileKey($activeGatewayProfile.get()) === profile &&
+      current.status === 'memory_model_error' &&
+      current.profile === profile &&
+      current.connecting &&
+      current.connectableProvider?.slug === connectableProvider.slug
+    )
+  }
+
+  try {
+    let verificationWarning = ''
+
+    try {
+      const probe = await validateProviderCredential(connectableProvider.keyEnv, value, undefined, { profile })
+
+      if (!stillConnecting()) {
+        return false
+      }
+
+      if (probe.reachable && !probe.ok) {
+        const current = $desktopOnboarding.get().flow
+
+        if (current.status === 'memory_model_error') {
+          setFlow({
+            ...current,
+            connecting: false,
+            credentialMessage: probe.message || `${connectableProvider.name} rejected that API key.`
+          })
+        }
+
+        return false
+      }
+
+      if (!probe.reachable) {
+        verificationWarning =
+          probe.message || `${connectableProvider.name} could not be reached for live key verification.`
+      }
+    } catch (error) {
+      if (!stillConnecting()) {
+        return false
+      }
+
+      verificationWarning = `Live key verification was unavailable: ${errMessage(error)}`
+    }
+
+    const saved = await setEnvVar(connectableProvider.keyEnv, value, { profile })
+
+    if (!stillConnecting()) {
+      return false
+    }
+
+    if (saved.ok !== true) {
+      throw new Error(`Atlas did not confirm ${connectableProvider.keyEnv} was saved.`)
+    }
+
+    const options = await getCortexMemoryModelOptions({ refresh: true, profile })
+
+    if (!stillConnecting()) {
+      return false
+    }
+
+    const main = { provider: flow.mainProvider, model: flow.mainModel }
+
+    const exactProvider = (options.providers ?? []).find(
+      provider => provider.slug.trim().toLowerCase() === connectableProvider.slug.trim().toLowerCase()
+    )
+
+    const exactSelection = exactProvider ? firstEligibleMemoryModel([exactProvider], main) : null
+
+    if (!exactProvider || exactProvider.authenticated !== true || !exactSelection) {
+      const current = $desktopOnboarding.get().flow
+
+      if (current.status === 'memory_model_error') {
+        setFlow({
+          ...current,
+          connecting: false,
+          credentialMessage: `${connectableProvider.name} was saved, but no verified structured memory model became available. Check the key and retry.`
+        })
+      }
+
+      return false
+    }
+
+    if (verificationWarning) {
+      notify({
+        kind: 'info',
+        title: 'Memory provider saved without live verification',
+        message: verificationWarning
+      })
+    }
+
+    const orderedProviders = [
+      exactProvider,
+      ...(options.providers ?? []).filter(provider => provider !== exactProvider)
+    ]
+
+    return prepareOnboardingMemoryModel(
+      flow.mainProvider,
+      flow.mainModel,
+      flow.label,
+      {
+        ...options,
+        providers: orderedProviders,
+        recommended: exactSelection
+      },
+      profile
+    )
+  } catch (error) {
+    const current = $desktopOnboarding.get().flow
+
+    if (current.status === 'memory_model_error' && current.profile === profile) {
+      setFlow({
+        ...current,
+        connecting: false,
+        credentialMessage: `Could not connect ${connectableProvider.name}: ${errMessage(error)}`
+      })
+    }
+
+    return false
+  }
+}
+
 // After credentials are persisted, ask the backend which provider+models
 // are now authenticated. Pick the first curated model for the matching
 // provider as a sensible default, persist it via /api/model/set, and
-// transition to the model-confirmation step. If anything goes wrong
-// fetching options (no providers returned, network error), the caller
-// falls through to completing onboarding without showing the confirm
-// card — the user gets the undefined-model auto-selection behaviour
-// we had before, which works but is surprising. The confirm step is
-// opportunistic polish, not a hard requirement for onboarding.
+// transition to the model-confirmation step. A concrete main pair is now a
+// prerequisite for the required Cortex route, so failure to resolve one must
+// remain visible instead of silently completing onboarding.
 async function fetchProviderDefaultModel(
   preferredSlugs: string[]
 ): Promise<null | { providerSlug: string; defaultModel: string }> {
@@ -320,6 +819,7 @@ async function completeWithModelConfirm(
   await ctx.requestGateway('reload.env').catch(() => undefined)
 
   const defaults = await fetchProviderDefaultModel(preferredSlugs)
+  let persistenceError: null | string = null
 
   if (defaults) {
     // Persist the chosen provider/model before the runtime gate so a stale
@@ -332,10 +832,12 @@ async function completeWithModelConfirm(
         model: defaults.defaultModel
       })
 
+      requireModelAssignment(res)
       notifyGatewayTools(res.gateway_tools)
-    } catch {
-      // Persistence failed — still run the scoped runtime check below and
-      // show the confirm card so the user can pick something explicitly.
+    } catch (error) {
+      // The confirm action retries this write before Cortex setup, but surface
+      // the first failure now so the user understands why setup is not done.
+      persistenceError = `Could not save the chat model: ${errMessage(error)}`
     }
   }
 
@@ -348,10 +850,7 @@ async function completeWithModelConfirm(
   }
 
   if (!defaults) {
-    // Couldn't get a sensible default — proceed without confirm step.
-    notifyReady(providerLabel)
-    completeDesktopOnboarding()
-    ctx.onCompleted?.()
+    onFail('Atlas could not load a usable chat model. Retry provider setup before continuing.')
 
     return
   }
@@ -361,7 +860,8 @@ async function completeWithModelConfirm(
     providerSlug: defaults.providerSlug,
     currentModel: defaults.defaultModel,
     label: providerLabel,
-    saving: false
+    saving: false,
+    message: persistenceError
   })
 }
 
@@ -373,25 +873,34 @@ function providerResolutionFailure(reason: null | string) {
     : 'Connected, but Atlas still cannot resolve a usable provider.'
 }
 
-async function refreshProviders() {
-  if (providersRefreshPromise) {
-    await providersRefreshPromise
+async function refreshProviders(options?: { profile?: string; shouldCommit?: () => boolean }) {
+  const profile = normalizeProfileKey(options?.profile ?? $activeGatewayProfile.get())
 
-    return
+  const shouldCommit = () =>
+    normalizeProfileKey($activeGatewayProfile.get()) === profile && (options?.shouldCommit?.() ?? true)
+
+  let request = providersRefreshPromises.get(profile)
+
+  if (!request) {
+    request = listOAuthProviders({ profile }).then(result => result.providers)
+    providersRefreshPromises.set(profile, request)
   }
 
-  providersRefreshPromise = (async () => {
-    try {
-      const { providers } = await listOAuthProviders()
-      patch({ mode: providers.length > 0 ? 'oauth' : 'apikey', providers })
-    } catch {
-      patch({ mode: 'apikey', providers: [] })
-    } finally {
-      providersRefreshPromise = null
-    }
-  })()
+  try {
+    const providers = await request
 
-  await providersRefreshPromise
+    if (shouldCommit()) {
+      patch({ mode: providers.length > 0 ? 'oauth' : 'apikey', providers })
+    }
+  } catch {
+    if (shouldCommit()) {
+      patch({ mode: 'apikey', providers: [] })
+    }
+  } finally {
+    if (providersRefreshPromises.get(profile) === request) {
+      providersRefreshPromises.delete(profile)
+    }
+  }
 }
 
 export function requestDesktopOnboarding(reason = DEFAULT_ONBOARDING_REASON) {
@@ -404,6 +913,8 @@ export function requestDesktopOnboarding(reason = DEFAULT_ONBOARDING_REASON) {
 // duplicating provider UI. Sets manual=true so the overlay shows the picker
 // even though configured===true, and refreshes the provider list.
 export function startManualOnboarding(reason: null | string = DEFAULT_MANUAL_ONBOARDING_REASON) {
+  onboardingRefreshGeneration += 1
+  memoryOptionsRequestId += 1
   patch({
     manual: true,
     requested: true,
@@ -424,6 +935,8 @@ export function startManualOnboarding(reason: null | string = DEFAULT_MANUAL_ONB
 // re-show the picker — the original "booted back to the first screen" loop).
 export function startManualLocalEndpoint(reason: null | string = null) {
   pendingProviderOAuthId = null
+  onboardingRefreshGeneration += 1
+  memoryOptionsRequestId += 1
   patch({
     manual: true,
     requested: true,
@@ -468,9 +981,24 @@ export function closeManualOnboarding() {
   patch({ manual: false, requested: false, localEndpoint: false, flow: { status: 'idle' } })
 }
 
-export function completeDesktopOnboarding() {
+export function completeDesktopOnboarding(requestedProfile?: string) {
+  const currentFlow = $desktopOnboarding.get().flow
+
+  const profile = normalizeProfileKey(
+    requestedProfile ?? ('profile' in currentFlow ? currentFlow.profile : $activeGatewayProfile.get())
+  )
+
+  // A delayed UI transition must not complete profile A after the customer
+  // has already switched to profile B. Callers that pin a profile are asking
+  // for compare-and-complete semantics, not merely a scoped cache write.
+  if (requestedProfile !== undefined && normalizeProfileKey($activeGatewayProfile.get()) !== profile) {
+    return false
+  }
+
   clearPoll()
-  writeCachedConfigured(true)
+  onboardingRefreshGeneration += 1
+  memoryOptionsRequestId += 1
+  writeCachedConfigured(true, profile)
   // A real provider is now connected, so any earlier "choose later" skip is
   // moot — clear it so the flag never lingers in a configured install.
   writeCachedSkipped(false)
@@ -485,6 +1013,8 @@ export function completeDesktopOnboarding() {
     manual: false,
     localEndpoint: false
   })
+
+  return true
 }
 
 // "I'll choose a provider later" on the first-run picker. Persists the skip so
@@ -495,6 +1025,8 @@ export function completeDesktopOnboarding() {
 // which marks the app actually configured.
 export function dismissFirstRunOnboarding() {
   clearPoll()
+  onboardingRefreshGeneration += 1
+  memoryOptionsRequestId += 1
   writeCachedSkipped(true)
   patch({ firstRunSkipped: true, requested: false, manual: false, localEndpoint: false, flow: { status: 'idle' } })
 }
@@ -504,28 +1036,88 @@ export function setOnboardingMode(mode: OnboardingMode) {
 }
 
 export async function refreshOnboarding(ctx: OnboardingContext) {
+  const generation = ++onboardingRefreshGeneration
+  const profile = normalizeProfileKey($activeGatewayProfile.get())
+  memoryOptionsRequestId += 1
+
+  const isCurrent = () =>
+    generation === onboardingRefreshGeneration && normalizeProfileKey($activeGatewayProfile.get()) === profile
+
   // Manual mode (user opened the selector from a working app): never
   // auto-dismiss on runtime-ready — the whole point is to let them add /
   // switch a provider while already configured. Just ensure the provider
   // list is loaded and show the picker.
   if ($desktopOnboarding.get().manual) {
-    await refreshProviders()
+    await refreshProviders({ profile, shouldCommit: isCurrent })
 
     return false
   }
 
   const runtime = await checkRuntime(ctx)
 
-  if (runtime.ready) {
-    completeDesktopOnboarding()
-    ctx.onCompleted?.()
+  if (!isCurrent()) {
+    return false
+  }
 
-    return true
+  if (runtime.ready) {
+    // The profile-scoped browser cache is intentionally only a paint
+    // optimization. Always ask the captured backend profile for route truth
+    // so an old bit cannot override a newly valid or invalid backend route.
+    let cortexOptions: CortexMemoryModelOptions
+
+    try {
+      cortexOptions = await getCortexMemoryModelOptions({ profile })
+    } catch {
+      if (!isCurrent()) {
+        return false
+      }
+
+      // A previously verified profile keeps running through a transient status
+      // outage. A not-yet-configured profile remains in explicit setup/error.
+      if (readCachedConfigured(profile) === true) {
+        notify({
+          id: 'cortex-route-validation-unavailable',
+          kind: 'error',
+          title: 'Memory route not verified',
+          message:
+            'Atlas could not verify the dedicated memory route. Your existing setup will continue and Atlas will check again on a later launch.'
+        })
+        completeDesktopOnboarding(profile)
+        ctx.onCompleted?.()
+
+        return true
+      }
+
+      writeCachedConfigured(false, profile)
+      writeCachedSkipped(false)
+      patch({ configured: false, firstRunSkipped: false })
+      await prepareMemoryForConfiguredMain(undefined, profile)
+
+      return false
+    }
+
+    if (!isCurrent()) {
+      return false
+    }
+
+    if (cortexOptions.current?.valid === true) {
+      completeDesktopOnboarding(profile)
+      ctx.onCompleted?.()
+
+      return true
+    }
+
+    writeCachedConfigured(false, profile)
+    writeCachedSkipped(false)
+    patch({ configured: false, firstRunSkipped: false })
+    await prepareMemoryForConfiguredMain(cortexOptions, profile)
+
+    return false
   }
 
   const state = $desktopOnboarding.get()
 
-  if (shouldPreserveConfiguredOnFallback(runtime, state)) {
+  if (shouldPreserveConfiguredOnFallback(runtime, profile, state.requested)) {
     // Gateway probes timed out but the user was already configured — don't
     // downgrade to the blocking onboarding overlay. Surface a non-blocking
     // notification with a stable id so repeated calls during an outage dedup
@@ -543,14 +1135,14 @@ export async function refreshOnboarding(ctx: OnboardingContext) {
 
   const reason = runtime.reason || state.reason || DEFAULT_ONBOARDING_REASON
 
-  writeCachedConfigured(false)
+  writeCachedConfigured(false, profile)
   patch({ configured: false, reason })
 
   if (state.providers !== null && !state.requested) {
     return false
   }
 
-  await refreshProviders()
+  await refreshProviders({ profile, shouldCommit: isCurrent })
 
   return false
 }
@@ -669,6 +1261,8 @@ export async function submitOnboardingCode(ctx: OnboardingContext) {
 
 export function cancelOnboardingFlow() {
   clearPoll()
+  onboardingRefreshGeneration += 1
+  memoryOptionsRequestId += 1
   const sessionId = sessionIdFor($desktopOnboarding.get().flow)
 
   if (sessionId) {
@@ -781,7 +1375,13 @@ export async function saveOnboardingApiKey(
     // provider returned by /api/model/options if none match.
     const slugCandidates = [envKey.replace(/_API_KEY$/, '').toLowerCase(), label.toLowerCase()]
     // ignoreRuntimeGate=true: never block onboarding on the runtime check.
-    await completeWithModelConfirm(ctx, label, slugCandidates, () => undefined, true)
+    await completeWithModelConfirm(
+      ctx,
+      label,
+      slugCandidates,
+      reason => setFlow({ status: 'error', message: providerResolutionFailure(reason) }),
+      true
+    )
 
     return { ok: true }
   } catch (error) {
@@ -805,8 +1405,8 @@ export async function saveOnboardingApiKey(
 //
 // We deliberately don't route through completeWithModelConfirm: that path
 // re-assigns the model from /api/model/options WITHOUT a base_url, which would
-// wipe the base_url we just wrote. We have a concrete model already, so we
-// verify the runtime directly and finish.
+// wipe the base_url we just wrote. We have a concrete model already, so after
+// runtime verification a first run advances directly to Cortex model setup.
 export async function saveOnboardingLocalEndpoint(baseUrl: string, apiKey: string, ctx: OnboardingContext) {
   const url = baseUrl.trim()
   const key = apiKey.trim()
@@ -844,7 +1444,15 @@ export async function saveOnboardingLocalEndpoint(baseUrl: string, apiKey: strin
   }
 
   try {
-    await setModelAssignment({ scope: 'main', provider: 'custom', model, base_url: url, api_key: key })
+    const assignment = await setModelAssignment({
+      scope: 'main',
+      provider: 'custom',
+      model,
+      base_url: url,
+      api_key: key
+    })
+
+    requireModelAssignment(assignment)
     await ctx.requestGateway('reload.env').catch(() => undefined)
 
     const runtime = await checkRuntime(ctx)
@@ -855,9 +1463,20 @@ export async function saveOnboardingLocalEndpoint(baseUrl: string, apiKey: strin
       return { ok: false, message: detail || `Saved, but Atlas still cannot reach ${url}.` }
     }
 
-    notifyReady('Local / custom endpoint')
-    completeDesktopOnboarding()
-    ctx.onCompleted?.()
+    const currentState = $desktopOnboarding.get()
+
+    // Manual means “opened from Settings,” not necessarily “already set up.”
+    // A customer who deferred first run can enter through that same surface;
+    // they still need the required Cortex route before Atlas is marked ready.
+    if (currentState.manual && currentState.configured === true) {
+      notifyReady('Local / custom endpoint')
+      completeDesktopOnboarding()
+      ctx.onCompleted?.()
+
+      return { ok: true }
+    }
+
+    await prepareOnboardingMemoryModel('custom', model, 'Local / custom endpoint')
 
     return { ok: true }
   } catch (error) {
@@ -867,54 +1486,182 @@ export async function saveOnboardingLocalEndpoint(baseUrl: string, apiKey: strin
   }
 }
 
-// User picked a different model from the dropdown on the confirm card.
-// Persists immediately so the displayed value is always what's on disk.
-export async function setOnboardingModel(model: string) {
+// User picked a different main model from the dropdown on the confirm card.
+// Persist both fields: the global picker can cross provider boundaries.
+export async function setOnboardingModel(provider: string, model: string) {
   const { flow } = $desktopOnboarding.get()
 
   if (flow.status !== 'confirming_model') {
-    return
+    return false
   }
 
   // Optimistic update so the dropdown feels instant; revert on failure.
-  const previous = flow.currentModel
-  setFlow({ ...flow, currentModel: model, saving: true })
+  const previous = { provider: flow.providerSlug, model: flow.currentModel }
+  setFlow({ ...flow, providerSlug: provider, currentModel: model, saving: true, message: null })
 
   try {
-    await setModelAssignment({
+    const response = await setModelAssignment({
       scope: 'main',
-      provider: flow.providerSlug,
+      provider,
       model
     })
+
+    requireModelAssignment(response)
     const current = $desktopOnboarding.get().flow
 
     if (current.status === 'confirming_model') {
-      setFlow({ ...current, currentModel: model, saving: false })
+      setFlow({ ...current, providerSlug: provider, currentModel: model, saving: false, message: null })
     }
+
+    return true
   } catch (error) {
     notifyError(error, 'Could not change model')
     const current = $desktopOnboarding.get().flow
 
     if (current.status === 'confirming_model') {
-      setFlow({ ...current, currentModel: previous, saving: false })
+      setFlow({
+        ...current,
+        providerSlug: previous.provider,
+        currentModel: previous.model,
+        saving: false,
+        message: `Could not save the chat model: ${errMessage(error)}`
+      })
     }
+
+    return false
   }
 }
 
-// User clicked "Start chatting" on the confirm card. Finalizes onboarding
-// — the model was already persisted by completeWithModelConfirm (or by
-// setOnboardingModel if they changed it), so all that's left is to mark
-// onboarding done and unblock the rest of the app.
-export function confirmOnboardingModel(ctx: OnboardingContext) {
+export function setOnboardingMemoryModel(provider: string, model: string) {
   const { flow } = $desktopOnboarding.get()
 
-  if (flow.status !== 'confirming_model') {
-    return
+  if (flow.status !== 'confirming_memory_model' || flow.saving) {
+    return false
   }
 
-  // No success toast here: the confirm-model screen already showed "<provider>
-  // connected." notifyReady is reserved for completion paths that SKIP this
-  // screen (no-default fallthrough, local endpoint) so feedback isn't lost.
-  completeDesktopOnboarding()
-  ctx.onCompleted?.()
+  const main = { provider: flow.mainProvider, model: flow.mainModel }
+
+  if (sameModelPair({ provider, model }, main)) {
+    setFlow({ ...flow, message: 'Choose a memory model that is different from your chat model.' })
+
+    return false
+  }
+
+  if (!eligibleMemoryModel(flow.providers, provider, model, main)) {
+    setFlow({ ...flow, message: 'That memory model is not available with a connected provider.' })
+
+    return false
+  }
+
+  setFlow({ ...flow, currentProvider: provider, currentModel: model, message: null })
+
+  return true
+}
+
+/** Persist both Cortex slots through the backend's single atomic write. */
+export async function confirmOnboardingMemoryModel() {
+  const { flow } = $desktopOnboarding.get()
+
+  if (flow.status !== 'confirming_memory_model' || flow.saving) {
+    return false
+  }
+
+  const selected = { provider: flow.currentProvider, model: flow.currentModel }
+  const main = { provider: flow.mainProvider, model: flow.mainModel }
+
+  if (!eligibleMemoryModel(flow.providers, selected.provider, selected.model, main)) {
+    setFlow({ ...flow, message: 'Choose an available memory model that is different from your chat model.' })
+
+    return false
+  }
+
+  setFlow({ ...flow, saving: true, message: null })
+
+  try {
+    const response = await setCortexMemoryModelAssignment(selected, { profile: flow.profile })
+    const currentFlow = $desktopOnboarding.get().flow
+
+    if (
+      normalizeProfileKey($activeGatewayProfile.get()) !== flow.profile ||
+      currentFlow.status !== 'confirming_memory_model' ||
+      currentFlow.profile !== flow.profile ||
+      !currentFlow.saving ||
+      !sameModelPair({ provider: currentFlow.currentProvider, model: currentFlow.currentModel }, selected)
+    ) {
+      return false
+    }
+
+    const triage = response.triage
+    const reasoning = response.reasoning
+
+    if (
+      response.ok !== true ||
+      !triage ||
+      !reasoning ||
+      !sameModelPair(triage, selected) ||
+      !sameModelPair(reasoning, selected)
+    ) {
+      throw new Error('Atlas did not confirm both Cortex memory routes. No onboarding state was changed.')
+    }
+
+    notifyGatewayTools(response.gateway_tools)
+
+    return true
+  } catch (error) {
+    const current = $desktopOnboarding.get().flow
+
+    if (
+      current.status === 'confirming_memory_model' &&
+      current.profile === flow.profile &&
+      normalizeProfileKey($activeGatewayProfile.get()) === flow.profile
+    ) {
+      setFlow({ ...current, saving: false, message: `Could not save the memory model: ${errMessage(error)}` })
+    }
+
+    return false
+  }
+}
+
+// Re-persist the selected main pair before advancing. This turns the prior
+// best-effort default write into a hard first-run invariant: Cortex setup never
+// begins against a chat model that failed to reach disk.
+export async function confirmOnboardingModel(_ctx: OnboardingContext): Promise<'complete' | 'memory' | false> {
+  const state = $desktopOnboarding.get()
+  const { flow } = state
+
+  if (flow.status !== 'confirming_model' || flow.saving) {
+    return false
+  }
+
+  setFlow({ ...flow, saving: true, message: null })
+
+  try {
+    const response = await setModelAssignment({
+      scope: 'main',
+      provider: flow.providerSlug,
+      model: flow.currentModel
+    })
+
+    requireModelAssignment(response)
+    notifyGatewayTools(response.gateway_tools)
+  } catch (error) {
+    const current = $desktopOnboarding.get().flow
+
+    if (current.status === 'confirming_model') {
+      setFlow({ ...current, saving: false, message: `Could not save the chat model: ${errMessage(error)}` })
+    }
+
+    return false
+  }
+
+  // Existing configured installs may add/switch providers without replaying
+  // first run. A deferred first-run customer can also arrive through the
+  // manual Settings surface, but must not bypass Cortex setup.
+  if (state.manual && state.configured === true) {
+    return 'complete'
+  }
+
+  await prepareOnboardingMemoryModel(flow.providerSlug, flow.currentModel, flow.label)
+
+  return 'memory'
 }

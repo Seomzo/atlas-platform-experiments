@@ -3,19 +3,23 @@ import type { MutableRefObject } from 'react'
 import { useEffect } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { getSessionMessages, type SessionInfo } from '@/hermes'
+import { deleteSession, getSessionMessages, type SessionInfo } from '@/hermes'
 import { createClientSessionState } from '@/lib/chat-runtime'
+import { $notifications, clearNotifications } from '@/store/notifications'
 import { $activeGatewayProfile, $newChatProfile } from '@/store/profile'
 import {
   $activeSessionId,
   $currentCwd,
   $messages,
   $resumeFailedSessionId,
+  $selectedStoredSessionId,
   setActiveSessionId,
   setMessages,
   setResumeFailedSessionId,
+  setSelectedStoredSessionId,
   setSessions
 } from '@/store/session'
+import { $workspaceMutationActive } from '@/store/workspace-handoff'
 
 import type { ClientSessionState } from '../../types'
 
@@ -114,6 +118,7 @@ describe('createBackendSessionForSend profile routing', () => {
     $newChatProfile.set(null)
     $activeGatewayProfile.set('default')
     $currentCwd.set('')
+    $workspaceMutationActive.set(false)
     vi.restoreAllMocks()
   })
 
@@ -160,6 +165,473 @@ describe('createBackendSessionForSend profile routing', () => {
     })
 
     expect(params).toMatchObject({ cwd: '/remote/worktree' })
+  })
+
+  it('does not create a session in the old cwd while workspace preparation is active', async () => {
+    const requestGateway = vi.fn(async () => ({ session_id: RUNTIME_SESSION_ID, stored_session_id: null }) as never)
+    let create: ((preview?: string | null) => Promise<string | null>) | null = null
+
+    $currentCwd.set('/old/worktree')
+    $workspaceMutationActive.set(true)
+    render(<Harness onReady={callback => (create = callback)} requestGateway={requestGateway} />)
+    await waitFor(() => expect(create).not.toBeNull())
+
+    await expect(create!()).rejects.toThrow('Workspace change is still finishing')
+    expect(requestGateway).not.toHaveBeenCalled()
+  })
+})
+
+interface FreshSessionRefs {
+  activeSessionIdRef: MutableRefObject<string | null>
+  busyRef: MutableRefObject<boolean>
+  creatingSessionRef: MutableRefObject<boolean>
+  runtimeIdByStoredSessionIdRef: MutableRefObject<Map<string, string>>
+  selectedStoredSessionIdRef: MutableRefObject<string | null>
+  sessionStateByRuntimeIdRef: MutableRefObject<Map<string, ClientSessionState>>
+}
+
+interface FreshSessionActions {
+  reset: (replaceRoute?: boolean) => void
+  start: (replaceRoute?: boolean, beforeReset?: () => void) => Promise<boolean>
+}
+
+function freshSessionRefs({
+  activeSessionId = 'runtime-selected',
+  busy = false,
+  creating = false,
+  selectedStoredSessionId = 'stored-1',
+  stateBusy = false
+}: {
+  activeSessionId?: string | null
+  busy?: boolean
+  creating?: boolean
+  selectedStoredSessionId?: string | null
+  stateBusy?: boolean
+} = {}): FreshSessionRefs {
+  const runtimeMap = new Map<string, string>()
+  const stateMap = new Map<string, ClientSessionState>()
+
+  if (activeSessionId && selectedStoredSessionId) {
+    runtimeMap.set(selectedStoredSessionId, activeSessionId)
+  }
+
+  if (activeSessionId) {
+    stateMap.set(activeSessionId, {
+      ...createClientSessionState(selectedStoredSessionId),
+      busy: stateBusy
+    })
+  }
+
+  return {
+    activeSessionIdRef: { current: activeSessionId },
+    busyRef: { current: busy },
+    creatingSessionRef: { current: creating },
+    runtimeIdByStoredSessionIdRef: { current: runtimeMap },
+    selectedStoredSessionIdRef: { current: selectedStoredSessionId },
+    sessionStateByRuntimeIdRef: { current: stateMap }
+  }
+}
+
+function FreshSessionHarness({
+  navigate,
+  onReady,
+  refs,
+  requestGateway
+}: {
+  navigate: ReturnType<typeof vi.fn>
+  onReady: (actions: FreshSessionActions) => void
+  refs: FreshSessionRefs
+  requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
+}) {
+  const actions = useSessionActions({
+    activeSessionId: refs.activeSessionIdRef.current,
+    activeSessionIdRef: refs.activeSessionIdRef,
+    busyRef: refs.busyRef,
+    creatingSessionRef: refs.creatingSessionRef,
+    ensureSessionState: () => createClientSessionState(),
+    getRouteToken: () => 'token',
+    navigate: navigate as never,
+    requestGateway,
+    runtimeIdByStoredSessionIdRef: refs.runtimeIdByStoredSessionIdRef,
+    selectedStoredSessionId: refs.selectedStoredSessionIdRef.current,
+    selectedStoredSessionIdRef: refs.selectedStoredSessionIdRef,
+    sessionStateByRuntimeIdRef: refs.sessionStateByRuntimeIdRef,
+    syncSessionStateToView: vi.fn(),
+    updateSessionState: (_sessionId, updater) => updater(createClientSessionState())
+  })
+
+  useEffect(() => {
+    onReady({ reset: actions.resetFreshSessionDraft, start: actions.startFreshSessionDraft })
+  }, [actions.resetFreshSessionDraft, actions.startFreshSessionDraft, onReady])
+
+  return null
+}
+
+async function mountFreshSession(
+  refs: FreshSessionRefs,
+  requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
+): Promise<{ actions: FreshSessionActions; navigate: ReturnType<typeof vi.fn> }> {
+  const navigate = vi.fn()
+  let actions: FreshSessionActions | null = null
+
+  render(
+    <FreshSessionHarness
+      navigate={navigate}
+      onReady={ready => (actions = ready)}
+      refs={refs}
+      requestGateway={requestGateway}
+    />
+  )
+  await waitFor(() => expect(actions).not.toBeNull())
+
+  return { actions: actions!, navigate }
+}
+
+describe('New Chat semantic finalization', () => {
+  afterEach(() => {
+    cleanup()
+    clearNotifications()
+    setActiveSessionId(null)
+    setSelectedStoredSessionId(null)
+    setMessages([])
+    setSessions([])
+    vi.restoreAllMocks()
+  })
+
+  function seedVisibleSession(refs: FreshSessionRefs) {
+    setActiveSessionId(refs.activeSessionIdRef.current)
+    setSelectedStoredSessionId(refs.selectedStoredSessionIdRef.current)
+    setMessages([{ id: 'visible-message', parts: [{ text: 'keep me', type: 'text' }], role: 'user' }] as never)
+  }
+
+  it('finalizes the live runtime before clearing the transcript', async () => {
+    const refs = freshSessionRefs()
+    const requestGateway = vi.fn(async () => ({ closed: true }) as never)
+    seedVisibleSession(refs)
+    const { actions, navigate } = await mountFreshSession(refs, requestGateway)
+
+    await expect(actions.start()).resolves.toBe(true)
+
+    expect(requestGateway).toHaveBeenCalledTimes(1)
+    expect(requestGateway).toHaveBeenCalledWith('session.close', {
+      session_id: 'runtime-selected',
+      require_idle: true
+    })
+    expect($activeSessionId.get()).toBeNull()
+    expect($selectedStoredSessionId.get()).toBeNull()
+    expect($messages.get()).toEqual([])
+    expect(navigate).toHaveBeenCalledTimes(1)
+    expect(refs.runtimeIdByStoredSessionIdRef.current.size).toBe(0)
+    expect(refs.sessionStateByRuntimeIdRef.current.size).toBe(0)
+  })
+
+  it.each([
+    ['a rejected close', async () => Promise.reject(new Error('memory finalizer unavailable'))],
+    ['an unconfirmed close', async () => ({ closed: false })]
+  ])('fails closed for %s and keeps the current chat visible', async (_label, response) => {
+    const refs = freshSessionRefs()
+    const requestGateway = vi.fn(response as never)
+    seedVisibleSession(refs)
+    const { actions, navigate } = await mountFreshSession(refs, requestGateway)
+
+    await expect(actions.start()).resolves.toBe(false)
+
+    expect($activeSessionId.get()).toBe('runtime-selected')
+    expect($selectedStoredSessionId.get()).toBe('stored-1')
+    expect($messages.get()).toHaveLength(1)
+    expect(refs.activeSessionIdRef.current).toBe('runtime-selected')
+    expect(refs.selectedStoredSessionIdRef.current).toBe('stored-1')
+    expect(navigate).not.toHaveBeenCalled()
+    expect($notifications.get()[0]).toMatchObject({ kind: 'error', title: 'Stop failed' })
+  })
+
+  it('commits a pending composer handoff only after semantic close succeeds', async () => {
+    const refs = freshSessionRefs()
+    const beforeReset = vi.fn()
+    const requestGateway = vi.fn(async () => ({ closed: true }) as never)
+    seedVisibleSession(refs)
+    const { actions, navigate } = await mountFreshSession(refs, requestGateway)
+
+    await expect(actions.start(false, beforeReset)).resolves.toBe(true)
+
+    expect(beforeReset).toHaveBeenCalledTimes(1)
+    expect(navigate).toHaveBeenCalledTimes(1)
+  })
+
+  it('still reflects a durable close when a local composer handoff throws', async () => {
+    const refs = freshSessionRefs()
+    const requestGateway = vi.fn(async () => ({ closed: true }) as never)
+    seedVisibleSession(refs)
+    const { actions, navigate } = await mountFreshSession(refs, requestGateway)
+
+    await expect(
+      actions.start(false, () => {
+        throw new Error('editor unavailable')
+      })
+    ).resolves.toBe(true)
+
+    expect(navigate).toHaveBeenCalledTimes(1)
+    expect($notifications.get()[0]).toMatchObject({ kind: 'error', title: 'Workspace handoff incomplete' })
+  })
+
+  it.each([
+    ['a rejected close', async () => Promise.reject(new Error('memory finalizer unavailable'))],
+    ['an unconfirmed close', async () => ({ closed: false })]
+  ])('does not commit a pending composer handoff for %s', async (_label, response) => {
+    const refs = freshSessionRefs()
+    const beforeReset = vi.fn()
+    const requestGateway = vi.fn(response as never)
+    seedVisibleSession(refs)
+    const { actions, navigate } = await mountFreshSession(refs, requestGateway)
+
+    await expect(actions.start(false, beforeReset)).resolves.toBe(false)
+
+    expect(beforeReset).not.toHaveBeenCalled()
+    expect(navigate).not.toHaveBeenCalled()
+  })
+
+  it('refuses New Chat while the current turn is busy', async () => {
+    const refs = freshSessionRefs({ stateBusy: true })
+    const requestGateway = vi.fn(async () => ({ closed: true }) as never)
+    seedVisibleSession(refs)
+    const { actions, navigate } = await mountFreshSession(refs, requestGateway)
+
+    await expect(actions.start()).resolves.toBe(false)
+
+    expect(requestGateway).not.toHaveBeenCalled()
+    expect(navigate).not.toHaveBeenCalled()
+    expect($messages.get()).toHaveLength(1)
+    expect($notifications.get()[0]).toMatchObject({ kind: 'error', title: 'Session busy' })
+  })
+
+  it('clears an untouched draft without making a close request', async () => {
+    const refs = freshSessionRefs({ activeSessionId: null, selectedStoredSessionId: null })
+    const requestGateway = vi.fn(async () => ({}) as never)
+    const { actions, navigate } = await mountFreshSession(refs, requestGateway)
+
+    await expect(actions.start()).resolves.toBe(true)
+
+    expect(requestGateway).not.toHaveBeenCalled()
+    expect(navigate).toHaveBeenCalledTimes(1)
+  })
+
+  it('re-resumes and finalizes an unended stored transcript with no live runtime', async () => {
+    const refs = freshSessionRefs({ activeSessionId: null })
+
+    setSessions([storedSession({ message_count: 1 })])
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.resume') {
+        return { session_id: 'runtime-recovered' } as never
+      }
+
+      return { closed: true } as never
+    })
+
+    seedVisibleSession(refs)
+    const { actions, navigate } = await mountFreshSession(refs, requestGateway)
+
+    await expect(actions.start()).resolves.toBe(true)
+
+    expect(requestGateway).toHaveBeenNthCalledWith(1, 'session.resume', {
+      session_id: 'stored-1',
+      cols: 96,
+      source: 'desktop',
+      eager_build: true,
+      require_unended: true
+    })
+    expect(requestGateway).toHaveBeenNthCalledWith(2, 'session.close', {
+      session_id: 'runtime-recovered',
+      require_idle: true
+    })
+    expect(navigate).toHaveBeenCalledTimes(1)
+    expect($messages.get()).toEqual([])
+  })
+
+  it('keeps an unended stored transcript visible when recovery resume fails', async () => {
+    const refs = freshSessionRefs({ activeSessionId: null })
+    setSessions([storedSession({ message_count: 1 })])
+    const requestGateway = vi.fn(async () => Promise.reject(new Error('backend unavailable')) as never)
+    seedVisibleSession(refs)
+    const { actions, navigate } = await mountFreshSession(refs, requestGateway)
+
+    await expect(actions.start()).resolves.toBe(false)
+
+    expect(requestGateway).toHaveBeenCalledTimes(1)
+    expect(navigate).not.toHaveBeenCalled()
+    expect($messages.get()).toHaveLength(1)
+    expect($notifications.get()[0]).toMatchObject({ kind: 'error', title: 'Stop failed' })
+  })
+
+  it('recovers a stale renderer runtime id before finalizing New Chat', async () => {
+    const refs = freshSessionRefs()
+
+    setSessions([storedSession({ message_count: 1 })])
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'session.resume') {
+        return { session_id: 'runtime-recovered' } as never
+      }
+
+      if (params?.session_id === 'runtime-selected') {
+        return { closed: false } as never
+      }
+
+      return { closed: true } as never
+    })
+
+    seedVisibleSession(refs)
+    const { actions, navigate } = await mountFreshSession(refs, requestGateway)
+
+    await expect(actions.start()).resolves.toBe(true)
+
+    expect(requestGateway).toHaveBeenNthCalledWith(1, 'session.close', {
+      session_id: 'runtime-selected',
+      require_idle: true
+    })
+    expect(requestGateway).toHaveBeenNthCalledWith(2, 'session.resume', {
+      session_id: 'stored-1',
+      cols: 96,
+      source: 'desktop',
+      eager_build: true,
+      require_unended: true
+    })
+    expect(requestGateway).toHaveBeenNthCalledWith(3, 'session.close', {
+      session_id: 'runtime-recovered',
+      require_idle: true
+    })
+    expect(navigate).toHaveBeenCalledTimes(1)
+    expect($messages.get()).toEqual([])
+    expect(refs.runtimeIdByStoredSessionIdRef.current.size).toBe(0)
+    expect(refs.sessionStateByRuntimeIdRef.current.size).toBe(0)
+  })
+
+  it('does not reopen a stored session another window already finalized', async () => {
+    const refs = freshSessionRefs()
+
+    setSessions([storedSession({ message_count: 1 })])
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.resume') {
+        throw new Error('session already ended')
+      }
+
+      return { closed: false } as never
+    })
+
+    seedVisibleSession(refs)
+    const { actions, navigate } = await mountFreshSession(refs, requestGateway)
+
+    await expect(actions.start()).resolves.toBe(true)
+
+    expect(requestGateway).toHaveBeenCalledTimes(2)
+    expect(navigate).toHaveBeenCalledTimes(1)
+    expect($messages.get()).toEqual([])
+  })
+
+  it('locally resets an ended stored transcript with no live runtime', async () => {
+    const refs = freshSessionRefs({ activeSessionId: null })
+    setSessions([storedSession({ ended_at: 42, message_count: 1 })])
+    const requestGateway = vi.fn(async () => ({}) as never)
+    seedVisibleSession(refs)
+    const { actions, navigate } = await mountFreshSession(refs, requestGateway)
+
+    await expect(actions.start()).resolves.toBe(true)
+
+    expect(requestGateway).not.toHaveBeenCalled()
+    expect(navigate).toHaveBeenCalledTimes(1)
+    expect($messages.get()).toEqual([])
+  })
+
+  it('coalesces repeated New Chat requests for the same runtime', async () => {
+    const refs = freshSessionRefs()
+    let resolveClose: ((result: { closed: boolean }) => void) | null = null
+
+    const requestGateway = vi.fn(
+      () =>
+        new Promise(resolve => {
+          resolveClose = resolve
+        }) as never
+    )
+
+    seedVisibleSession(refs)
+    const { actions } = await mountFreshSession(refs, requestGateway)
+
+    const first = actions.start()
+    const second = actions.start()
+    await waitFor(() => expect(requestGateway).toHaveBeenCalledTimes(1))
+    resolveClose!({ closed: true })
+
+    await expect(Promise.all([first, second])).resolves.toEqual([true, true])
+    expect(requestGateway).toHaveBeenCalledTimes(1)
+  })
+
+  it('commits handoffs added while the same semantic close is pending', async () => {
+    const refs = freshSessionRefs()
+    const beforeReset = vi.fn()
+    let resolveClose: ((result: { closed: boolean }) => void) | null = null
+
+    const requestGateway = vi.fn(
+      () =>
+        new Promise(resolve => {
+          resolveClose = resolve
+        }) as never
+    )
+
+    seedVisibleSession(refs)
+    const { actions } = await mountFreshSession(refs, requestGateway)
+
+    const first = actions.start()
+    const second = actions.start(false, beforeReset)
+    await waitFor(() => expect(requestGateway).toHaveBeenCalledTimes(1))
+    resolveClose!({ closed: true })
+
+    await expect(Promise.all([first, second])).resolves.toEqual([true, true])
+    expect(beforeReset).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not clear a newer view when finalization resolves after navigation', async () => {
+    const refs = freshSessionRefs()
+    let resolveClose: ((result: { closed: boolean }) => void) | null = null
+
+    const requestGateway = vi.fn(
+      () =>
+        new Promise(resolve => {
+          resolveClose = resolve
+        }) as never
+    )
+
+    seedVisibleSession(refs)
+    const { actions, navigate } = await mountFreshSession(refs, requestGateway)
+
+    const closing = actions.start()
+    await waitFor(() => expect(requestGateway).toHaveBeenCalledTimes(1))
+    refs.activeSessionIdRef.current = 'runtime-newer'
+    refs.selectedStoredSessionIdRef.current = 'stored-newer'
+    setActiveSessionId('runtime-newer')
+    setSelectedStoredSessionId('stored-newer')
+    setMessages([{ id: 'newer-message', parts: [{ text: 'new chat', type: 'text' }], role: 'user' }] as never)
+    resolveClose!({ closed: true })
+
+    await expect(closing).resolves.toBe(false)
+    expect($activeSessionId.get()).toBe('runtime-newer')
+    expect($selectedStoredSessionId.get()).toBe('stored-newer')
+    expect($messages.get()).toHaveLength(1)
+    expect(navigate).not.toHaveBeenCalled()
+    expect(refs.sessionStateByRuntimeIdRef.current.has('runtime-selected')).toBe(false)
+  })
+
+  it('keeps internal draft resets nonsemantic', async () => {
+    const refs = freshSessionRefs()
+    const requestGateway = vi.fn(async () => ({ closed: true }) as never)
+    seedVisibleSession(refs)
+    const { actions, navigate } = await mountFreshSession(refs, requestGateway)
+
+    actions.reset(true)
+
+    expect(requestGateway).not.toHaveBeenCalled()
+    expect(navigate).toHaveBeenCalledTimes(1)
+    expect($messages.get()).toEqual([])
   })
 })
 
@@ -488,6 +960,70 @@ describe('branchStoredSession desktop source tagging', () => {
       parent_session_id: 'stored-parent',
       source: 'desktop'
     })
+  })
+})
+
+function RemoveHarness({
+  onReady,
+  requestGateway
+}: {
+  onReady: (removeSession: (storedSessionId: string) => Promise<void>) => void
+  requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
+}) {
+  const ref = <T,>(value: T): MutableRefObject<T> => ({ current: value })
+  const activeSessionIdRef = ref<string | null>('runtime-selected')
+  const selectedStoredSessionIdRef = ref<string | null>('stored-1')
+
+  const actions = useSessionActions({
+    activeSessionId: 'runtime-selected',
+    activeSessionIdRef,
+    busyRef: ref(false),
+    creatingSessionRef: ref(false),
+    ensureSessionState: () => ({}) as ClientSessionState,
+    getRouteToken: () => 'token',
+    navigate: vi.fn() as never,
+    requestGateway,
+    runtimeIdByStoredSessionIdRef: ref(new Map([['stored-1', 'runtime-selected']])),
+    selectedStoredSessionId: 'stored-1',
+    selectedStoredSessionIdRef,
+    sessionStateByRuntimeIdRef: ref(new Map<string, ClientSessionState>()),
+    syncSessionStateToView: vi.fn(),
+    updateSessionState: () => ({}) as ClientSessionState
+  })
+
+  useEffect(() => {
+    onReady(actions.removeSession)
+  }, [actions.removeSession, onReady])
+
+  return null
+}
+
+describe('removeSession privacy boundary', () => {
+  afterEach(() => {
+    cleanup()
+    setActiveSessionId(null)
+    setMessages([])
+    setSessions([])
+    vi.restoreAllMocks()
+  })
+
+  it('deletes the selected live session through one nonsemantic gateway RPC', async () => {
+    setActiveSessionId('runtime-selected')
+    setSessions([storedSession()])
+    const requestGateway = vi.fn(async () => ({ deleted: 'stored-1' }) as never)
+    let removeSession: ((storedSessionId: string) => Promise<void>) | null = null
+
+    render(<RemoveHarness onReady={remove => (removeSession = remove)} requestGateway={requestGateway} />)
+    await waitFor(() => expect(removeSession).not.toBeNull())
+    await removeSession!('stored-1')
+
+    expect(requestGateway).toHaveBeenCalledTimes(1)
+    expect(requestGateway).toHaveBeenCalledWith('session.delete', {
+      runtime_session_id: 'runtime-selected',
+      session_id: 'stored-1'
+    })
+    expect(requestGateway).not.toHaveBeenCalledWith('session.close', expect.anything())
+    expect(deleteSession).not.toHaveBeenCalled()
   })
 })
 

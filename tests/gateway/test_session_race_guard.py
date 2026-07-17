@@ -489,6 +489,61 @@ async def test_stop_hard_kills_running_agent():
     assert "stopped" in result.lower()
 
 
+@pytest.mark.asyncio
+async def test_new_waits_for_interrupted_turn_durability_before_reset():
+    """A true session boundary cannot overtake the old turn's final capture."""
+    runner = _make_runner()
+    event = _make_event(text="/new")
+    session_key = build_session_key(event.source)
+    fake_agent = MagicMock()
+    runner._running_agents[session_key] = fake_agent
+    runner._session_run_generation[session_key] = 7
+    durability_barrier = asyncio.Event()
+    runner._session_turn_durability_barriers = {
+        session_key: (7, durability_barrier)
+    }
+    runner._handle_reset_command = AsyncMock(return_value="reset-complete")
+
+    task = asyncio.create_task(runner._handle_message(event))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    fake_agent.interrupt.assert_called_once()
+    runner._handle_reset_command.assert_not_awaited()
+    assert not task.done()
+
+    durability_barrier.set()
+    assert await task == "reset-complete"
+    runner._handle_reset_command.assert_awaited_once_with(event)
+
+
+@pytest.mark.asyncio
+async def test_required_turn_durability_timeout_keeps_owner_state():
+    """A timed-out boundary declines reset without evicting the live owner."""
+    runner = _make_runner()
+    event = _make_event(text="/new")
+    session_key = build_session_key(event.source)
+    fake_agent = MagicMock()
+    runner._running_agents[session_key] = fake_agent
+    runner._session_run_generation[session_key] = 3
+    runner._session_turn_durability_barriers = {
+        session_key: (3, asyncio.Event())
+    }
+
+    drained = await runner._interrupt_and_clear_session(
+        session_key,
+        event.source,
+        interrupt_reason="reset",
+        invalidation_reason="new_command",
+        release_running_state=False,
+        await_turn_durability=True,
+        durability_timeout=0.01,
+    )
+
+    assert drained is False
+    assert runner._running_agents[session_key] is fake_agent
+
+
 # ------------------------------------------------------------------
 # Test 6c: /stop clears pending messages to prevent stale replays
 # ------------------------------------------------------------------

@@ -43,6 +43,7 @@ import {
 } from '@/store/session'
 import { broadcastSessionsChanged } from '@/store/session-sync'
 import { isWatchWindow } from '@/store/windows'
+import { $workspaceMutationActive } from '@/store/workspace-handoff'
 import type { SessionCreateResponse, SessionResumeResponse, UsageStats } from '@/types/hermes'
 
 import { NEW_CHAT_ROUTE, sessionRoute, SETTINGS_ROUTE } from '../../../routes'
@@ -104,7 +105,17 @@ export function useSessionActions({
   const copy = t.desktop
   const resumeRequestRef = useRef(0)
 
-  const startFreshSessionDraft = useCallback(
+  const sessionCloseOperationRef = useRef<{
+    beforeResetCallbacks: Set<() => void>
+    identity: string
+    promise: Promise<boolean>
+    resetStarted: boolean
+  } | null>(null)
+
+  // Renderer-only reset. This intentionally does not touch the gateway: route
+  // recovery, profile switches, archive, and privacy deletion are not logical
+  // conversation endings and must never trigger semantic memory admission.
+  const resetFreshSessionDraft = useCallback(
     (replaceRoute = false) => {
       busyRef.current = false
       setBusy(false)
@@ -144,8 +155,329 @@ export function useSessionActions({
     [activeSessionIdRef, busyRef, navigate, selectedStoredSessionIdRef]
   )
 
+  // User-owned New Chat boundary. Keep the current transcript mounted until
+  // the backend confirms semantic finalization; otherwise a failed close would
+  // silently strand the session without running its end-of-session memory work.
+  const startFreshSessionDraft = useCallback(
+    (replaceRoute = false, beforeReset?: () => void): Promise<boolean> => {
+      const runtimeSessionId = activeSessionIdRef.current
+      const storedSessionId = selectedStoredSessionIdRef.current
+
+      const notifyHandoffError = () =>
+        notify({
+          kind: 'error',
+          title: 'Workspace handoff incomplete',
+          message: 'Atlas could not move the pending composer payload. Check the previous chat draft before continuing.'
+        })
+
+      const sessionIdentity = runtimeSessionId
+        ? `runtime:${runtimeSessionId}`
+        : storedSessionId
+          ? `stored:${storedSessionId}`
+          : 'new-draft'
+
+      const pending = sessionCloseOperationRef.current
+
+      if (pending) {
+        if (pending.identity === sessionIdentity) {
+          if (beforeReset && !pending.resetStarted) {
+            pending.beforeResetCallbacks.add(beforeReset)
+          }
+
+          return pending.promise
+        }
+
+        notifyError(
+          new Error('Another chat is still being finalized. Wait for it to finish, then retry New Chat.'),
+          copy.stopFailed
+        )
+
+        return Promise.resolve(false)
+      }
+
+      if (creatingSessionRef.current) {
+        notifyError(new Error('Wait for the current chat to finish opening, then retry New Chat.'), copy.sessionBusy)
+
+        return Promise.resolve(false)
+      }
+
+      const runtimeState = runtimeSessionId ? sessionStateByRuntimeIdRef.current.get(runtimeSessionId) : undefined
+
+      if (busyRef.current || runtimeState?.busy || runtimeState?.awaitingResponse) {
+        notifyError(
+          new Error('Stop the current turn before starting a new chat. The current chat is still open.'),
+          copy.sessionBusy
+        )
+
+        return Promise.resolve(false)
+      }
+
+      if (!runtimeSessionId) {
+        if (!storedSessionId && $messages.get().length > 0) {
+          notifyError(
+            new Error(
+              'This transcript has no stored or live session identity to finalize. Reopen the chat before starting a new one.'
+            ),
+            copy.stopFailed
+          )
+
+          return Promise.resolve(false)
+        }
+
+        if (!storedSessionId) {
+          try {
+            beforeReset?.()
+          } catch {
+            notifyHandoffError()
+
+            return Promise.resolve(false)
+          }
+
+          resetFreshSessionDraft(replaceRoute)
+
+          return Promise.resolve(true)
+        }
+
+        const localStored = $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId))
+
+        // The durable boundary already completed. A missing runtime is normal
+        // for an ended row, and replaying resume+close would needlessly reopen
+        // it before ending it a second time.
+        if (localStored?.ended_at != null) {
+          try {
+            beforeReset?.()
+          } catch {
+            notifyHandoffError()
+
+            return Promise.resolve(false)
+          }
+
+          resetFreshSessionDraft(replaceRoute)
+
+          return Promise.resolve(true)
+        }
+      }
+
+      const operation = {
+        beforeResetCallbacks: new Set(beforeReset ? [beforeReset] : []),
+        identity: sessionIdentity,
+        promise: Promise.resolve(false),
+        resetStarted: false
+      }
+
+      // Start on the next microtask so the operation is installed before any
+      // synchronously-throwing request implementation can enter `finally`.
+      operation.promise = Promise.resolve().then(async () => {
+        try {
+          const capturedSessionIsCurrent = () =>
+            activeSessionIdRef.current === runtimeSessionId && selectedStoredSessionIdRef.current === storedSessionId
+
+          const prepareFreshReset = () => {
+            operation.resetStarted = true
+            let handoffError = false
+
+            for (const callback of operation.beforeResetCallbacks) {
+              try {
+                callback()
+              } catch {
+                // The backend boundary is already durable at this point. A UI
+                // handoff failure must not make the renderer claim that the
+                // finalized chat is still open or skip its local reset.
+                handoffError = true
+              }
+            }
+
+            operation.beforeResetCallbacks.clear()
+
+            return handoffError
+          }
+
+          const runtimeIdsToForget = new Set<string>()
+
+          if (runtimeSessionId) {
+            runtimeIdsToForget.add(runtimeSessionId)
+          }
+
+          const forgetClosedRuntimes = () => {
+            for (const runtimeId of runtimeIdsToForget) {
+              sessionStateByRuntimeIdRef.current.delete(runtimeId)
+
+              for (const [candidateStoredId, candidateRuntimeId] of runtimeIdByStoredSessionIdRef.current) {
+                if (candidateRuntimeId === runtimeId) {
+                  runtimeIdByStoredSessionIdRef.current.delete(candidateStoredId)
+                }
+              }
+            }
+          }
+
+          const finishAlreadyEndedSession = (): boolean => {
+            forgetClosedRuntimes()
+
+            if (!capturedSessionIsCurrent()) {
+              return false
+            }
+
+            const handoffError = prepareFreshReset()
+            resetFreshSessionDraft(replaceRoute)
+
+            if (handoffError) {
+              notifyHandoffError()
+            }
+
+            return true
+          }
+
+          const resumeStoredRuntime = async (): Promise<string | null> => {
+            if (!storedSessionId) {
+              throw new Error('the current chat has no stored session identity')
+            }
+
+            const stored =
+              $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId)) ??
+              (await resolveStoredSession(storedSessionId))
+
+            if (stored?.ended_at != null) {
+              return null
+            }
+
+            const profile = stored?.profile
+            await ensureGatewayProfile(profile)
+
+            try {
+              // Eager build is essential: semantic close needs the session's
+              // memory manager, not merely a deferred transcript record.
+              const resumed = await requestGateway<SessionResumeResponse>('session.resume', {
+                session_id: storedSessionId,
+                cols: 96,
+                source: 'desktop',
+                eager_build: true,
+                require_unended: true,
+                ...(profile ? { profile } : {})
+              })
+
+              if (!resumed.session_id) {
+                throw new Error('the backend did not return a live session to finalize')
+              }
+
+              runtimeIdsToForget.add(resumed.session_id)
+
+              return resumed.session_id
+            } catch (err) {
+              // Another window may have completed the semantic boundary after
+              // this renderer's session list was cached. The guarded resume
+              // refuses to reopen that row, making local reset idempotent.
+              const detail = err instanceof Error ? err.message : String(err)
+
+              if (/session already ended/i.test(detail)) {
+                return null
+              }
+
+              throw err
+            }
+          }
+
+          let closeRuntimeSessionId = runtimeSessionId
+
+          if (!closeRuntimeSessionId) {
+            // This path repairs the rare readable-transcript/no-runtime state
+            // left by a backend restart, resource reap, or failed warm resume.
+            closeRuntimeSessionId = await resumeStoredRuntime()
+
+            if (!closeRuntimeSessionId) {
+              return finishAlreadyEndedSession()
+            }
+          }
+
+          let result = await requestGateway<{ closed?: boolean }>('session.close', {
+            session_id: closeRuntimeSessionId,
+            require_idle: true
+          })
+
+          // A backend restart can leave the renderer holding a dead runtime id
+          // while the selected durable transcript is still open. Recover once
+          // by eagerly resuming that same stored session, then close the fresh
+          // runtime through the identical idle-required boundary.
+          if (result.closed !== true && runtimeSessionId && storedSessionId) {
+            const recoveredRuntimeSessionId = await resumeStoredRuntime()
+
+            if (!recoveredRuntimeSessionId) {
+              return finishAlreadyEndedSession()
+            }
+
+            closeRuntimeSessionId = recoveredRuntimeSessionId
+            result = await requestGateway<{ closed?: boolean }>('session.close', {
+              session_id: closeRuntimeSessionId,
+              require_idle: true
+            })
+          }
+
+          if (result.closed !== true) {
+            throw new Error('the backend did not confirm that the session was finalized')
+          }
+
+          // Closed and stale runtime ids must never be reused by warm resume.
+          forgetClosedRuntimes()
+
+          // Navigation/profile actions may have moved the window while close
+          // was pending. Finalize the captured session, but never erase a newer
+          // view or apply a workspace action to it.
+          if (!capturedSessionIsCurrent()) {
+            return false
+          }
+
+          const handoffError = prepareFreshReset()
+          resetFreshSessionDraft(replaceRoute)
+
+          if (handoffError) {
+            notifyHandoffError()
+          }
+
+          return true
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err)
+
+          notifyError(
+            new Error(
+              `Could not finish the current session${detail ? `: ${detail}` : ''}. The chat is still open; retry New Chat.`
+            ),
+            copy.stopFailed
+          )
+
+          return false
+        } finally {
+          if (sessionCloseOperationRef.current === operation) {
+            sessionCloseOperationRef.current = null
+          }
+        }
+      })
+      sessionCloseOperationRef.current = operation
+
+      return operation.promise
+    },
+    [
+      activeSessionIdRef,
+      busyRef,
+      copy.sessionBusy,
+      copy.stopFailed,
+      creatingSessionRef,
+      requestGateway,
+      resetFreshSessionDraft,
+      runtimeIdByStoredSessionIdRef,
+      selectedStoredSessionIdRef,
+      sessionStateByRuntimeIdRef
+    ]
+  )
+
   const createBackendSessionForSend = useCallback(
     async (preview: string | null = null): Promise<string | null> => {
+      // Semantic close intentionally clears the visible chat before its Git
+      // destination is ready. A submit during that narrow interval must not
+      // mint a backend runtime using the old $currentCwd; the serialized
+      // workspace operation publishes the new cwd when it completes.
+      if ($workspaceMutationActive.get()) {
+        throw new Error('Workspace change is still finishing. Wait for it to complete, then send again.')
+      }
+
       const startingActiveSessionId = activeSessionIdRef.current
       const startingStoredSessionId = selectedStoredSessionIdRef.current
       const startingRouteToken = getRouteToken()
@@ -251,7 +583,7 @@ export function useSessionActions({
   const selectSidebarItem = useCallback(
     (item: SidebarNavItem) => {
       if (item.action === 'new-session') {
-        startFreshSessionDraft()
+        void startFreshSessionDraft()
 
         return
       }
@@ -594,7 +926,7 @@ export function useSessionActions({
         // permanently-dead id. (Booting straight into a no-longer-existent
         // last-session id is the common trigger.)
         if ($messages.get().length === 0 && isSessionGoneError(fallbackError)) {
-          startFreshSessionDraft(true)
+          resetFreshSessionDraft(true)
 
           return
         }
@@ -628,7 +960,7 @@ export function useSessionActions({
       runtimeIdByStoredSessionIdRef,
       selectedStoredSessionIdRef,
       sessionStateByRuntimeIdRef,
-      startFreshSessionDraft,
+      resetFreshSessionDraft,
       syncSessionStateToView,
       updateSessionState
     ]
@@ -813,15 +1145,25 @@ export function useSessionActions({
       // Tear down before awaiting so the route effect can't resume the
       // doomed session via the stale /<sid> URL.
       if (wasSelected) {
-        startFreshSessionDraft(true)
+        resetFreshSessionDraft(true)
       }
 
       try {
         if (closingRuntimeId) {
-          await requestGateway('session.close', { session_id: closingRuntimeId }).catch(() => undefined)
+          // Privacy deletion is not a logical conversation end. Let the
+          // owning gateway reconcile Cortex evidence first, delete SessionDB,
+          // then release the live runtime with finalize=false. Calling
+          // session.close here would admit model-backed session distillation
+          // immediately before erasing the transcript.
+          await requestGateway('session.delete', {
+            session_id: storedSessionId,
+            runtime_session_id: closingRuntimeId,
+            ...(removed?.profile ? { profile: removed.profile } : {})
+          })
+        } else {
+          await deleteSession(storedSessionId, removed?.profile)
         }
 
-        await deleteSession(storedSessionId, removed?.profile)
         clearQueuedPrompts(storedSessionId)
 
         if (closingRuntimeId) {
@@ -871,7 +1213,7 @@ export function useSessionActions({
       requestGateway,
       selectedStoredSessionId,
       selectedStoredSessionIdRef,
-      startFreshSessionDraft
+      resetFreshSessionDraft
     ]
   )
 
@@ -896,7 +1238,7 @@ export function useSessionActions({
       $pinnedSessionIds.set(previousPinned.filter(id => id !== storedSessionId && id !== archivedPinId))
 
       if (wasSelected) {
-        startFreshSessionDraft(true)
+        resetFreshSessionDraft(true)
       }
 
       try {
@@ -919,7 +1261,7 @@ export function useSessionActions({
         notifyError(err, copy.archiveFailed)
       }
     },
-    [copy, selectedStoredSessionId, startFreshSessionDraft]
+    [copy, resetFreshSessionDraft, selectedStoredSessionId]
   )
 
   return {
@@ -930,6 +1272,7 @@ export function useSessionActions({
     createBackendSessionForSend,
     openSettings,
     removeSession,
+    resetFreshSessionDraft,
     resumeSession,
     selectSidebarItem,
     startFreshSessionDraft

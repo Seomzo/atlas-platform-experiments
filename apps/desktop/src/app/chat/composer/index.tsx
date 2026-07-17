@@ -63,6 +63,7 @@ export function ChatBar({
   busy,
   cwd,
   disabled,
+  submissionsDisabled = false,
   focusKey,
   gateway,
   maxRecordingSeconds = 120,
@@ -130,6 +131,7 @@ export function ChatBar({
   const gatewayState = useStore($gatewayState)
   const reconnecting = gatewayState === 'closed' || gatewayState === 'error'
   const inputDisabled = disabled && !reconnecting
+  const submitDisabled = disabled || submissionsDisabled
 
   // The draft engine — detached source of truth (DOM + draftRef + edge
   // selectors); typing never re-renders the chrome. ChatBar owns `queueEditRef`
@@ -149,7 +151,8 @@ export function ChatBar({
     requestMainFocus,
     sessionIdRef,
     setComposerText,
-    stashAt
+    stashAt,
+    syncDraftFromEditor
   } = useComposerDraft({ activeQueueSessionKey, focusKey, inputDisabled, queueEditRef, sessionId })
 
   // "Add URL" dialog — open/value state, autofocus, and submit (host onAddUrl or
@@ -208,13 +211,12 @@ export function ChatBar({
     busy,
     canSteer,
     clearDraft,
-    disabled,
+    disabled: submitDisabled,
     draftRef,
     drainNextQueued,
     editorRef,
     exitQueuedEdit,
     focusInput,
-    inputDisabled,
     loadIntoComposer,
     onCancel,
     onSteer,
@@ -567,7 +569,7 @@ export function ChatBar({
       const editorText = editorRef.current ? composerPlainText(editorRef.current) : draftRef.current
       const hasLivePayload = editorText.trim().length > 0 || attachments.length > 0
 
-      if (disabled) {
+      if (submitDisabled) {
         return
       }
 
@@ -640,7 +642,7 @@ export function ChatBar({
   // Branch / worktree hand-offs (CodingStatusRow). Owns the worktree open +
   // branch-off/convert/list/switch actions; draft travels into the new session.
   const { handleBranchOff, handleConvertBranch, handleListBranches, handleSwitchBranch, openInWorktree } =
-    useComposerBranch({ clearDraft, cwd, draftRef })
+    useComposerBranch({ activeQueueSessionKey, clearDraft, cwd, syncDraftFromEditor })
 
   // Global Esc-to-cancel when the chat (not the composer input) has focus.
   useComposerEscCancel({ awaitingInput, busy, onCancel })
@@ -657,7 +659,7 @@ export function ChatBar({
   } = useComposerVoice({
     busy,
     clearDraft,
-    disabled,
+    disabled: submitDisabled,
     focusInput,
     insertText,
     maxRecordingSeconds,
@@ -696,7 +698,7 @@ export function ChatBar({
         onToggleMute: conversation.toggleMute,
         status: conversation.status
       }}
-      disabled={disabled}
+      disabled={submitDisabled}
       hasComposerPayload={hasComposerPayload}
       onDictate={dictate}
       onSteer={steerDraft}

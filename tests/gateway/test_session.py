@@ -700,6 +700,40 @@ class TestSessionStoreSwitchSession:
         assert resumed["end_reason"] is None
         db.close()
 
+    def test_routing_only_switch_keeps_source_session_active(self, tmp_path):
+        from hermes_state import SessionDB
+
+        config = GatewayConfig()
+        with patch("gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(sessions_dir=tmp_path / "sessions", config=config)
+        db = SessionDB(db_path=tmp_path / "state.db")
+        store._db = db
+        store._loaded = True
+
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="chat-1",
+            chat_type="dm",
+            user_id="user-1",
+        )
+        current = store.get_or_create_session(source)
+        target_id = "existing-target"
+        db.create_session(target_id, source="telegram", user_id="user-1")
+
+        switched = store.switch_session(
+            current.session_key,
+            target_id,
+            expected_session_id=current.session_id,
+            end_current=False,
+        )
+
+        assert switched is not None
+        assert switched.session_id == target_id
+        original = db.get_session(current.session_id)
+        assert original["ended_at"] is None
+        assert original["end_reason"] is None
+        db.close()
+
 
 class TestSessionStoreLookupBySessionId:
     @pytest.fixture()
@@ -1647,6 +1681,29 @@ class TestGatewaySessionDbRecovery:
         fresh = reset_store.get_or_create_session(source)
         assert fresh.session_id != entry.session_id
 
+    def test_legacy_expiry_finalized_agent_close_row_is_not_recovered(self, tmp_path):
+        config = GatewayConfig()
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="chat-expired",
+            chat_type="dm",
+            user_id="user-expired",
+        )
+        store = SessionStore(sessions_dir=tmp_path, config=config)
+        entry = store.get_or_create_session(source)
+        store.append_to_transcript(
+            entry.session_id,
+            {"role": "user", "content": "already finalized"},
+        )
+        store._db.end_session(entry.session_id, "agent_close")
+        store.set_expiry_finalized(entry)
+        (tmp_path / "sessions.json").unlink()
+
+        recovered_store = SessionStore(sessions_dir=tmp_path, config=config)
+        fresh = recovered_store.get_or_create_session(source)
+
+        assert fresh.session_id != entry.session_id
+
     def test_resume_pending_still_honors_idle_reset_policy(self, tmp_path):
         from datetime import datetime, timedelta
         from gateway.config import SessionResetPolicy
@@ -1763,10 +1820,11 @@ class TestGatewayRoutingTable:
         restarted._db.close()
 
     def test_prune_removes_routing_rows_for_ended_sessions(self, tmp_path):
-        """Startup prune drops ended sessions from the DB routing table too."""
+        """Startup prune drops boundary-acknowledged ended routing rows."""
         config = GatewayConfig()
         store = SessionStore(sessions_dir=tmp_path, config=config)
         entry = store.get_or_create_session(self._source())
+        store.set_expiry_finalized(entry)
         store._db.end_session(entry.session_id, "session_reset")
         store._db._conn.execute(
             "UPDATE sessions SET ended_at = 1.0, end_reason = 'session_reset' WHERE id = ?",

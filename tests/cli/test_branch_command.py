@@ -2,7 +2,7 @@
 
 Verifies that:
 - Branching creates a new session with copied conversation history
-- The original session is preserved (ended with "branched" reason)
+- The original session remains active and resumable
 - Auto-generated titles use lineage numbering
 - Custom branch names are used when provided
 - parent_session_id links are set correctly
@@ -22,6 +22,7 @@ def session_db(tmp_path):
     os.environ["HERMES_HOME"] = str(tmp_path / ".hermes")
     os.makedirs(tmp_path / ".hermes", exist_ok=True)
     from hermes_state import SessionDB
+
     db = SessionDB(db_path=tmp_path / ".hermes" / "test_sessions.db")
     yield db
     db.close()
@@ -88,6 +89,7 @@ class TestBranchCommandCLI:
     def test_branch_preserves_parent_link(self, cli_instance, session_db):
         """The new session should reference the original as parent."""
         from cli import HermesCLI
+
         original_id = cli_instance.session_id
 
         HermesCLI._handle_branch_command(cli_instance, "/branch")
@@ -95,15 +97,17 @@ class TestBranchCommandCLI:
         new_session = session_db.get_session(cli_instance.session_id)
         assert new_session["parent_session_id"] == original_id
 
-    def test_branch_ends_original_session(self, cli_instance, session_db):
-        """The original session should be marked as ended with 'branched' reason."""
+    def test_branch_keeps_original_session_active(self, cli_instance, session_db):
+        """A fork is topology, not proof that the original session ended."""
         from cli import HermesCLI
+
         original_id = cli_instance.session_id
 
         HermesCLI._handle_branch_command(cli_instance, "/branch")
 
         original = session_db.get_session(original_id)
-        assert original["end_reason"] == "branched"
+        assert original["end_reason"] is None
+        assert original["ended_at"] is None
 
     def test_branch_with_custom_name(self, cli_instance, session_db):
         """Custom branch name should be used as the title."""
@@ -126,6 +130,7 @@ class TestBranchCommandCLI:
     def test_branch_empty_conversation(self, cli_instance, session_db):
         """Branching with no history should show an error."""
         from cli import HermesCLI
+
         cli_instance.conversation_history = []
 
         HermesCLI._handle_branch_command(cli_instance, "/branch")
@@ -136,6 +141,7 @@ class TestBranchCommandCLI:
     def test_branch_no_session_db(self, cli_instance):
         """Branching without a session DB should show an error."""
         from cli import HermesCLI
+
         cli_instance._session_db = None
 
         HermesCLI._handle_branch_command(cli_instance, "/branch")
@@ -166,7 +172,9 @@ class TestBranchCommandCLI:
 
         assert cli_instance._resumed is True
 
-    def test_branch_rotates_hermes_session_id_env_and_context(self, cli_instance, session_db):
+    def test_branch_rotates_hermes_session_id_env_and_context(
+        self, cli_instance, session_db
+    ):
         """Branching must update process-local session-id readers too."""
         from cli import HermesCLI
         from gateway.session_context import _UNSET, _VAR_MAP, get_session_env
@@ -185,8 +193,10 @@ class TestBranchCommandCLI:
             os.environ.pop("HERMES_SESSION_ID", None)
             _VAR_MAP["HERMES_SESSION_ID"].set(_UNSET)
 
-    def test_branch_fires_on_session_switch_hook(self, cli_instance, session_db):
-        """The /branch command must notify memory providers of the rotation.
+    def test_branch_prepares_memory_lineage_without_semantic_finalization(
+        self, cli_instance, session_db
+    ):
+        """The /branch command must deterministically rebind memory providers.
 
         Without this, providers that cache per-session state in
         initialize() keep writing under the old session_id. See #6672.
@@ -202,19 +212,111 @@ class TestBranchCommandCLI:
 
         HermesCLI._handle_branch_command(cli_instance, "/branch")
 
-        # Hook must have been called exactly once with the new session_id,
-        # parent pointing at the branched-from session, reset=False, and
-        # reason="branch" for diagnostics.
-        assert mm.on_session_switch.call_count == 1
-        _, kwargs = mm.on_session_switch.call_args
-        assert mm.on_session_switch.call_args.args[0] == cli_instance.session_id
-        assert kwargs["parent_session_id"] == original_id
-        assert kwargs["reset"] is False
-        assert kwargs["reason"] == "branch"
+        mm.on_session_switch.assert_called_once_with(
+            cli_instance.session_id,
+            parent_session_id=original_id,
+            reset=False,
+            reason="branch",
+        )
+        mm.commit_session_boundary_async.assert_not_called()
+        assert session_db.get_session(original_id)["end_reason"] is None
+
+    def test_branch_does_not_activate_or_end_sessions_when_boundary_fails(
+        self, cli_instance, session_db
+    ):
+        from agent.memory_manager import MemoryDurabilityError
+        from cli import HermesCLI
+
+        agent = MagicMock()
+        agent._memory_manager.on_session_switch.side_effect = (
+            MemoryDurabilityError("cortex", "session finalization")
+        )
+        cli_instance.agent = agent
+        original_id = cli_instance.session_id
+
+        HermesCLI._handle_branch_command(cli_instance, "/branch")
+
+        assert cli_instance.session_id == original_id
+        assert session_db.get_session(original_id)["end_reason"] is None
+        assert (
+            session_db._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+        )
+        agent.reset_session_state.assert_not_called()
+
+    def test_branch_restores_live_provider_if_publication_preparation_fails(
+        self, cli_instance, session_db
+    ):
+        from cli import HermesCLI
+
+        agent = MagicMock()
+        manager = agent._memory_manager
+        manager.get_provider.side_effect = RuntimeError("provider inspection failed")
+        cli_instance.agent = agent
+        original_id = cli_instance.session_id
+
+        HermesCLI._handle_branch_command(cli_instance, "/branch")
+
+        assert cli_instance.session_id == original_id
+        assert manager.on_session_switch.call_count == 2
+        first = manager.on_session_switch.call_args_list[0]
+        assert first.kwargs == {
+            "parent_session_id": original_id,
+            "reset": False,
+            "reason": "branch",
+        }
+        restore = manager.on_session_switch.call_args_list[1]
+        assert restore.args == (original_id,)
+        assert restore.kwargs == {
+            "parent_session_id": "",
+            "reset": False,
+            "reason": "resume",
+        }
+        assert session_db.get_session(original_id)["ended_at"] is None
+        assert (
+            session_db._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+            == 1
+        )
+
+    def test_agentless_branch_preserves_existing_cortex_lineage_without_admission(
+        self, cli_instance, session_db, tmp_path
+    ):
+        """A resumed transcript may branch before its agent is rebuilt."""
+        from altas.cortex.runtime import open_cortex_store
+        from cli import HermesCLI
+
+        home = tmp_path / ".hermes"
+        (home / "config.yaml").write_text(
+            "memory:\n  provider: cortex\ncortex:\n  enabled: true\n",
+            encoding="utf-8",
+        )
+        store, _config = open_cortex_store(home, {})
+        source_id = cli_instance.session_id
+        store.ensure_session(source_id)
+        cli_instance.agent = None
+
+        HermesCLI._handle_branch_command(cli_instance, "/branch detached graph")
+
+        child_id = cli_instance.session_id
+        assert child_id != source_id
+        assert store.session_lineage(source_id)["state"] == "active"
+        child = store.session_lineage(child_id)
+        assert child["parent_session_id"] == source_id
+        assert child["logical_conversation_id"] == child_id
+        with store.connect() as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM session_distill_admissions WHERE brain_id=?",
+                (store.brain_id,),
+            ).fetchone()[0] == 0
+            assert connection.execute(
+                "SELECT COUNT(*) FROM cognitive_jobs "
+                "WHERE brain_id=? AND job_type='session_distill'",
+                (store.brain_id,),
+            ).fetchone()[0] == 0
 
     def test_fork_alias(self):
         """The /fork alias should resolve to 'branch'."""
         from hermes_cli.commands import resolve_command
+
         result = resolve_command("fork")
         assert result is not None
         assert result.name == "branch"
@@ -226,26 +328,28 @@ class TestBranchCommandDef:
     def test_branch_in_registry(self):
         """The branch command should be in the command registry."""
         from hermes_cli.commands import COMMAND_REGISTRY
+
         names = [c.name for c in COMMAND_REGISTRY]
         assert "branch" in names
 
     def test_branch_has_fork_alias(self):
         """The branch command should have 'fork' as an alias."""
         from hermes_cli.commands import COMMAND_REGISTRY
+
         branch = next(c for c in COMMAND_REGISTRY if c.name == "branch")
         assert "fork" in branch.aliases
 
     def test_branch_in_session_category(self):
         """The branch command should be in the Session category."""
         from hermes_cli.commands import COMMAND_REGISTRY
+
         branch = next(c for c in COMMAND_REGISTRY if c.name == "branch")
         assert branch.category == "Session"
 
 
-class TestBranchFlushesBeforeEndSession:
+class TestBranchFlushesBeforeFork:
     """Regression for #47202: /branch must flush un-persisted messages to
-    the session DB before ending the old session, just like /new and
-    compress_context() already do."""
+    the source session DB before cloning its transcript."""
 
     def test_branch_flushes_when_agent_present(self, cli_instance, session_db):
         from cli import HermesCLI

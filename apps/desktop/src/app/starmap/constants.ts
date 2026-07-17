@@ -7,7 +7,7 @@ export const RING_INNER = 58
 export const RING_OUTER = 340
 export const ZOOM_MIN = 0.3
 export const ZOOM_MAX = 5
-export const FIT_PADDING = 80
+export const FIT_PADDING = 44
 export const TILT = 1 // vertical squash → "looking down at a tilted disk"
 export const RING_STEPS = 4
 
@@ -20,6 +20,18 @@ export const AGE_GRADIENT = { mid: 0.52, midInk: 0.74, newInk: 0.95, oldInk: 0.4
 // Node glyph per kind — pure path geometry (the seam a future sprite/instanced
 // renderer would bake from).
 export const NODE_SHAPE: Record<StarmapNode['kind'], Shape> = { memory: 'diamond', skill: 'circle' }
+
+const CORTEX_NODE_SHAPE: Record<NonNullable<StarmapNode['cortexType']>, Shape> = {
+  community: 'hexagon',
+  document: 'square',
+  entity: 'circle',
+  evidence: 'triangle',
+  memory: 'diamond',
+  session: 'hexagon'
+}
+
+export const nodeShape = (node: StarmapNode): Shape =>
+  node.cortexType ? CORTEX_NODE_SHAPE[node.cortexType] : NODE_SHAPE[node.kind]
 
 // Darken the orb body so a bright primary doesn't swallow the sheen (the
 // highlight is computed from the original ink, so it still reads).
@@ -35,11 +47,11 @@ export const LIT_BAND_ALPHA = 0.04
 
 export const MODE_DEFAULTS: Record<'dark' | 'light', GraphParams> = {
   dark: {
-    lineAlpha: 0.24,
+    lineAlpha: 0.07,
     lineDash: 1.5,
     lineDashed: true,
-    lineWidth: 0.5,
-    ringAlpha: 0.1,
+    lineWidth: 0.55,
+    ringAlpha: 0.13,
     ringDash: 4,
     ringDashed: false,
     ringWidth: 1.5
@@ -57,6 +69,6 @@ export const MODE_DEFAULTS: Record<'dark' | 'light', GraphParams> = {
 }
 
 export const RING_PARAMS: Record<'dark' | 'light', RingParams> = {
-  dark: { bandAlpha: 0.01, lightSize: 0.64, ringAlpha: 0.06, sheen: 0.12 },
+  dark: { bandAlpha: 0.018, lightSize: 0.64, ringAlpha: 0.1, sheen: 0.18 },
   light: { bandAlpha: 0.03, lightSize: 0.27, ringAlpha: 0.028, sheen: 0.1 }
 }

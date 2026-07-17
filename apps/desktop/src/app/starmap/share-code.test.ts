@@ -154,6 +154,12 @@ describe('share-code', () => {
     expect(() => decodeShareCode('')).toThrow(ShareCodeError)
   })
 
+  it('refuses to serialize a private Cortex graph', () => {
+    const graph = { ...sampleGraph(), source: 'cortex' as const }
+
+    expect(() => encodeShareCode(graph)).toThrow(ShareCodeError)
+  })
+
   it('rejects a corrupted (bit-flipped) code', () => {
     const code = encodeShareCode(sampleGraph())
     // Flip a mid-payload char (trailing base64 bits can be dropped on decode).

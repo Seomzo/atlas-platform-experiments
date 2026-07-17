@@ -5888,12 +5888,18 @@ def test_session_delete_refuses_active_session(monkeypatch):
     called: list[str] = []
 
     class _DB:
-        def delete_session(self, sid, sessions_dir=None):
-            called.append(sid)
-            return True
+        def resolve_session_id(self, session_id):
+            return session_id
+
+        def get_session_delete_closure(self, session_ids):
+            return session_ids
 
     monkeypatch.setattr(server, "_get_db", lambda: _DB())
-    monkeypatch.setitem(server._sessions, "live", {"session_key": "key-live"})
+    monkeypatch.setitem(
+        server._sessions,
+        "live",
+        {"session_key": "key-live", "running": True},
+    )
     try:
         resp = server.handle_request(
             {
@@ -5907,7 +5913,7 @@ def test_session_delete_refuses_active_session(monkeypatch):
 
     assert "error" in resp
     assert resp["error"]["code"] == 4023
-    assert "active session" in resp["error"]["message"]
+    assert "session busy" in resp["error"]["message"]
     assert called == [], "delete_session must not be called for active sessions"
 
 
@@ -5918,11 +5924,14 @@ def test_session_delete_fails_closed_when_active_snapshot_raises(monkeypatch):
     delete (fail closed) rather than fall through and allow it."""
 
     class _DB:
-        def delete_session(self, *a, **kw):
-            raise AssertionError("delete must not run when active snapshot fails")
+        def resolve_session_id(self, session_id):
+            return session_id
+
+        def get_session_delete_closure(self, session_ids):
+            return session_ids
 
     class _ExplodingDict:
-        def values(self):
+        def items(self):
             raise RuntimeError("dictionary changed size during iteration")
 
     monkeypatch.setattr(server, "_get_db", lambda: _DB())
@@ -5933,14 +5942,14 @@ def test_session_delete_fails_closed_when_active_snapshot_raises(monkeypatch):
     )
 
     assert "error" in resp
-    assert resp["error"]["code"] == 5036
-    assert "enumerate active sessions" in resp["error"]["message"]
+    assert resp["error"]["code"] == 4023
+    assert "dictionary changed size" in resp["error"]["message"]
 
 
 def test_session_delete_returns_4007_when_missing(monkeypatch):
     class _DB:
-        def delete_session(self, sid, sessions_dir=None):
-            return False
+        def resolve_session_id(self, _session_id):
+            return None
 
     monkeypatch.setattr(server, "_get_db", lambda: _DB())
 
@@ -5954,7 +5963,17 @@ def test_session_delete_returns_4007_when_missing(monkeypatch):
 
 def test_session_delete_propagates_db_exception(monkeypatch):
     class _DB:
-        def delete_session(self, sid, sessions_dir=None):
+        def resolve_session_id(self, session_id):
+            return session_id
+
+        def get_session_delete_closure(self, session_ids):
+            return session_ids
+
+        def get_session(self, session_id):
+            return {"id": session_id, "ended_at": 1}
+
+        def delete_sessions(self, session_ids, **kwargs):
+            kwargs["before_delete"](tuple(session_ids))
             raise RuntimeError("disk full")
 
     monkeypatch.setattr(server, "_get_db", lambda: _DB())
@@ -5975,10 +5994,20 @@ def test_session_delete_success_returns_deleted_id(monkeypatch):
     captured: dict = {}
 
     class _DB:
-        def delete_session(self, sid, sessions_dir=None):
-            captured["sid"] = sid
+        def resolve_session_id(self, session_id):
+            return session_id
+
+        def get_session_delete_closure(self, session_ids):
+            return session_ids
+
+        def get_session(self, session_id):
+            return {"id": session_id, "ended_at": 1}
+
+        def delete_sessions(self, session_ids, *, sessions_dir=None, **kwargs):
+            kwargs["before_delete"](tuple(session_ids))
+            captured["sid"] = session_ids[0]
             captured["sessions_dir"] = sessions_dir
-            return True
+            return len(session_ids)
 
     monkeypatch.setattr(server, "_get_db", lambda: _DB())
 
@@ -5987,7 +6016,8 @@ def test_session_delete_success_returns_deleted_id(monkeypatch):
     )
 
     assert "result" in resp, resp
-    assert resp["result"] == {"deleted": "old-1"}
+    assert resp["result"]["deleted"] == "old-1"
+    assert resp["result"]["deleted_session_ids"] == ["old-1"]
     assert captured["sid"] == "old-1"
     # sessions_dir must be forwarded so transcript files get cleaned up
     # too — not just the SQLite row.  The autouse _isolate_hermes_home
@@ -8334,20 +8364,26 @@ def test_session_close_rpc_delegates_to_close_session_by_id(monkeypatch):
     seen = []
     monkeypatch.setattr(
         server, "_close_session_by_id",
-        lambda sid, *, end_reason: bool(seen.append((sid, end_reason))) or True,
+        lambda sid, *, end_reason, finalize=True: bool(
+            seen.append((sid, end_reason, finalize))
+        )
+        or True,
     )
     resp = server.handle_request(
         {"id": "1", "method": "session.close", "params": {"session_id": "s9"}}
     )
     assert resp["result"] == {"closed": True}
-    assert seen == [("s9", "tui_close")]
+    assert seen == [("s9", "tui_close", True)]
 
 
 def test_close_sessions_for_transport_closes_flagged_repoints_rest(monkeypatch):
     seen = []
     monkeypatch.setattr(
         server, "_close_session_by_id",
-        lambda sid, *, end_reason: bool(seen.append((sid, end_reason))) or True,
+        lambda sid, *, end_reason, finalize=True: bool(
+            seen.append((sid, end_reason, finalize))
+        )
+        or True,
     )
     # Detached session "b" would schedule a real grace-reap threading.Timer that
     # outlives the test; grace=0 short-circuits it so no thread lingers.
@@ -8358,7 +8394,7 @@ def test_close_sessions_for_transport_closes_flagged_repoints_rest(monkeypatch):
     server._sessions["b"] = {"transport": transport, "close_on_disconnect": False}
     try:
         server._close_sessions_for_transport(transport, end_reason="ws_disconnect")
-        assert seen == [("a", "ws_disconnect")]  # only the flagged one closed
+        assert seen == [("a", "ws_disconnect", False)]  # flagged; non-semantic cleanup
         assert server._sessions["b"]["transport"] is server._detached_ws_transport  # re-pointed
     finally:
         server._sessions.clear()
@@ -8396,15 +8432,18 @@ def test_shutdown_sessions_closes_every_session_via_helper(monkeypatch):
     seen = []
     monkeypatch.setattr(
         server, "_close_session_by_id",
-        lambda sid, *, end_reason: seen.append((sid, end_reason)),
+        lambda sid, *, end_reason, finalize=True: seen.append(
+            (sid, end_reason, finalize)
+        ),
     )
     server._sessions.clear()
     server._sessions["a"] = {}
     server._sessions["b"] = {}
     try:
         server._shutdown_sessions()
-        assert sorted(sid for sid, _ in seen) == ["a", "b"]
-        assert {reason for _, reason in seen} == {"tui_shutdown"}
+        assert sorted(sid for sid, _, _ in seen) == ["a", "b"]
+        assert {reason for _, reason, _ in seen} == {"tui_shutdown"}
+        assert {finalize for _, _, finalize in seen} == {False}
     finally:
         server._sessions.clear()
 
@@ -8460,7 +8499,9 @@ def test_reap_idle_sessions_closes_only_evictable(monkeypatch):
     monkeypatch.setattr(server, "_session_pending_kind", lambda sid: "")
     monkeypatch.setattr(
         server, "_close_session_by_id",
-        lambda sid, *, end_reason: closed.append((sid, end_reason)),
+        lambda sid, *, end_reason, finalize=True: closed.append(
+            (sid, end_reason, finalize)
+        ),
     )
     now = time.time()
     server._sessions.clear()
@@ -8468,7 +8509,7 @@ def test_reap_idle_sessions_closes_only_evictable(monkeypatch):
     server._sessions["fresh"] = _idle_evictable_session(now) | {"last_active": now}
     try:
         server._reap_idle_sessions()
-        assert closed == [("stale", "idle_timeout")]
+        assert closed == [("stale", "idle_timeout", False)]
     finally:
         server._sessions.clear()
 

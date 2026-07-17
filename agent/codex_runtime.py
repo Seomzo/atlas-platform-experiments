@@ -20,9 +20,108 @@ import logging
 import os
 import time
 from types import SimpleNamespace
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
+
+from agent.memory_manager import MemoryDurabilityError
 
 logger = logging.getLogger(__name__)
+
+
+def _cortex_dynamic_tool_bridge(
+    agent: Any,
+    messages: List[Dict[str, Any]],
+) -> tuple[
+    list[dict[str, Any]],
+    Optional[Callable[[str, dict[str, Any]], str]],
+]:
+    """Build Codex app-server dynamic tools for the native Cortex provider.
+
+    MemoryManager can host several provider implementations over time, but the
+    Codex app-server callback surface here is intentionally narrower: only
+    schemas whose registered provider is *actually* named ``cortex`` are
+    advertised. The handler also re-checks that binding at execution time and
+    supplies the current user row out-of-band, never a model-authored field.
+    """
+    manager = getattr(agent, "_memory_manager", None)
+    provider_map = getattr(manager, "_tool_to_provider", None)
+    get_schemas = getattr(manager, "get_all_tool_schemas", None)
+    if not isinstance(provider_map, dict) or not callable(get_schemas):
+        return [], None
+
+    try:
+        schemas = get_schemas()
+    except Exception:
+        logger.warning(
+            "codex app-server: failed to enumerate Cortex dynamic tools",
+            exc_info=True,
+        )
+        return [], None
+    if not isinstance(schemas, list):
+        return [], None
+
+    specs: list[dict[str, Any]] = []
+    providers_by_name: dict[str, Any] = {}
+    for schema in schemas:
+        if not isinstance(schema, dict):
+            continue
+        name = schema.get("name")
+        provider = provider_map.get(name) if isinstance(name, str) else None
+        try:
+            is_cortex = provider is not None and provider.name == "cortex"
+        except Exception:
+            is_cortex = False
+        if not is_cortex or not isinstance(name, str) or not name:
+            continue
+        description = schema.get("description")
+        input_schema = schema.get("parameters")
+        specs.append(
+            {
+                "type": "function",
+                "name": name,
+                "description": (
+                    description if isinstance(description, str) else "Atlas Cortex tool"
+                ),
+                "inputSchema": (
+                    input_schema
+                    if isinstance(input_schema, dict)
+                    else {"type": "object", "properties": {}}
+                ),
+            }
+        )
+        providers_by_name[name] = provider
+
+    if not specs:
+        return [], None
+
+    # Use the same authoritative current-user-row lookup as the standard tool
+    # dispatcher. This preserves multimodal text extraction, skill invocation
+    # handling, and the fail-closed behavior when the row marker is stale.
+    from agent.tool_dispatch_helpers import (
+        _current_user_message_for_memory_control,
+    )
+
+    current_user_message = _current_user_message_for_memory_control(agent, messages)
+
+    def _handle(tool_name: str, arguments: dict[str, Any]) -> str:
+        expected_provider = providers_by_name.get(tool_name)
+        if (
+            expected_provider is None
+            or provider_map.get(tool_name) is not expected_provider
+            or getattr(expected_provider, "name", None) != "cortex"
+        ):
+            raise PermissionError("dynamic tool is not bound to Cortex")
+        # ``current_user_message`` is an out-of-band trust input to
+        # MemoryManager. Never let a model-authored argument masquerade as it,
+        # even though Cortex's declared schemas do not contain this property.
+        safe_arguments = dict(arguments)
+        safe_arguments.pop("current_user_message", None)
+        return manager.handle_tool_call(
+            tool_name,
+            safe_arguments,
+            current_user_message=current_user_message,
+        )
+
+    return specs, _handle
 
 
 def _codex_note_to_tool_progress(note: dict) -> tuple[str, str, dict] | None:
@@ -306,6 +405,7 @@ def run_codex_app_server_turn(
     messages: List[Dict[str, Any]],
     effective_task_id: str,
     should_review_memory: bool = False,
+    volatile_user_context: str = "",
 ) -> Dict[str, Any]:
     """Codex app-server runtime path. Hands the entire turn to a `codex
     app-server` subprocess and projects its events back into Hermes'
@@ -386,10 +486,41 @@ def run_codex_app_server_turn(
     # standard run_conversation() flow (line ~11823) before the early
     # return reaches us. Do NOT append again — that would duplicate.
 
+    dynamic_tools, dynamic_tool_handler = _cortex_dynamic_tool_bridge(
+        agent, messages
+    )
+    turn_kwargs: dict[str, Any] = {"user_input": user_message}
+    if isinstance(volatile_user_context, str) and volatile_user_context.strip():
+        turn_kwargs["untrusted_context"] = volatile_user_context.strip()
+    if dynamic_tools and dynamic_tool_handler is not None:
+        turn_kwargs.update(
+            {
+                "dynamic_tools": dynamic_tools,
+                "dynamic_tool_handler": dynamic_tool_handler,
+            }
+        )
+
     try:
-        turn = agent._codex_session.run_turn(user_input=user_message)
+        turn = agent._codex_session.run_turn(**turn_kwargs)
     except Exception as exc:
         logger.exception("codex app-server turn failed")
+        # Keep the Codex path aligned with standard turn finalization: the
+        # authoritative user input is durable even when the transport raises,
+        # while ``interrupted=True`` makes the shared helper blank any partial
+        # assistant response and skip next-turn prefetch. Any completed tool
+        # evidence already projected into ``messages`` remains available to
+        # durable providers.
+        try:
+            agent._sync_external_memory_for_turn(
+                original_user_message=original_user_message,
+                final_response="",
+                interrupted=True,
+                messages=messages,
+            )
+        except MemoryDurabilityError:
+            raise
+        except Exception:
+            logger.debug("external memory sync raised", exc_info=True)
         # Crash → unconditionally drop the session so the next turn
         # respawns from scratch instead of reusing a dead client.
         try:
@@ -463,33 +594,60 @@ def run_codex_app_server_turn(
     agent._iters_since_skill = (
         getattr(agent, "_iters_since_skill", 0) + turn.tool_iterations
     )
+    # Native Codex auto-compaction bypasses Hermes' compression function. The
+    # projected transcript is still available here, so durably flush it to
+    # memory before recording the observed boundary. Codex does not expose a
+    # hook for injecting our preservation note into its native summary yet.
+    if getattr(turn, "compacted", False):
+        memory_manager = getattr(agent, "_memory_manager", None)
+        if memory_manager is not None:
+            try:
+                memory_manager.on_pre_compress(messages)
+            except MemoryDurabilityError:
+                # Native Codex has already reported the compaction boundary,
+                # but a required Cortex capture failure still must fail the
+                # turn closed.  Swallowing it would acknowledge a turn whose
+                # pre-compaction evidence was not made durable.
+                raise
+            except Exception:
+                logger.debug(
+                    "native codex memory pre-compress hook failed",
+                    exc_info=True,
+                )
     _record_codex_app_server_compaction(agent, turn)
     usage_result = _record_codex_app_server_usage(agent, turn)
     api_calls = 1
 
     # Now check the skill nudge AFTER iters were incremented — same
     # pattern the chat_completions path uses (line ~15432).
+    from agent.native_memory_providers import cortex_owns_semantic_review
+
     should_review_skills = False
     if (
-        agent._skill_nudge_interval > 0
+        not cortex_owns_semantic_review(agent)
+        and agent._skill_nudge_interval > 0
         and agent._iters_since_skill >= agent._skill_nudge_interval
         and "skill_manage" in agent.valid_tool_names
     ):
         should_review_skills = True
         agent._iters_since_skill = 0
 
-    # External memory provider sync (mirrors line ~15439). Skipped on
-    # interrupt/error to avoid feeding partial transcripts to memory.
-    if not turn.interrupted and turn.error is None:
-        try:
-            agent._sync_external_memory_for_turn(
-                original_user_message=original_user_message,
-                final_response=turn.final_text,
-                interrupted=False,
-                messages=messages,
-            )
-        except Exception:
-            logger.debug("external memory sync raised", exc_info=True)
+    # External memory provider sync (mirrors standard turn finalization).
+    # Interrupted/error turns still preserve authoritative user input and
+    # completed tool evidence. The shared helper blanks partial assistant
+    # output and disables next-turn prefetch whenever ``interrupted`` is true.
+    memory_interrupted = bool(turn.interrupted or turn.error is not None)
+    try:
+        agent._sync_external_memory_for_turn(
+            original_user_message=original_user_message,
+            final_response=turn.final_text,
+            interrupted=memory_interrupted,
+            messages=messages,
+        )
+    except MemoryDurabilityError:
+        raise
+    except Exception:
+        logger.debug("external memory sync raised", exc_info=True)
 
     # Background review fork — same cadence + signature as the default
     # path (line ~15449). Only fires when a trigger actually tripped AND
@@ -497,6 +655,7 @@ def run_codex_app_server_turn(
     if (
         turn.final_text
         and not turn.interrupted
+        and not cortex_owns_semantic_review(agent)
         and (should_review_memory or should_review_skills)
     ):
         try:

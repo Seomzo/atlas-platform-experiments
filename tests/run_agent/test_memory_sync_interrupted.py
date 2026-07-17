@@ -1,22 +1,17 @@
-"""Regression guard for #15218 — external memory sync must skip interrupted turns.
+"""Regression guards for durable capture of completed and interrupted turns.
 
-Before this fix, ``run_conversation`` called
-``memory_manager.sync_all(original_user_message, final_response)`` at the
-end of every turn where both args were present.  That gate didn't check
-the ``interrupted`` flag, so an external memory backend received partial
-assistant output, aborted tool chains, or mid-stream resets as durable
-conversational truth.  Downstream recall then treated that not-yet-real
-state as if the user had seen it complete.
-
-The fix is ``AIAgent._sync_external_memory_for_turn`` — a small helper
-that replaces the inline block and returns early when ``interrupted``
-is True (regardless of whether ``final_response`` and
-``original_user_message`` happen to be populated).
+Interrupted work still contains authoritative evidence that must survive a
+crash or context rotation: the user's input and any completed tool results.
+It must *not* persist a partial assistant stream as a completed answer, trigger
+next-turn prefetch, or perform semantic interpretation.  Cortex therefore
+syncs the turn with an empty assistant response and explicit interrupted
+metadata; semantic consolidation remains a logical-session-end operation.
 
 These tests exercise the helper directly on a bare ``AIAgent`` built
 via ``__new__`` so the full ``run_conversation`` machinery isn't needed
 — the method is pure logic and three state arguments.
 """
+
 from unittest.mock import MagicMock
 
 import pytest
@@ -38,23 +33,40 @@ def _bare_agent():
     return agent
 
 
-class TestSyncExternalMemoryForTurn:
-    # --- Interrupt guard (the #15218 fix) -------------------------------
+def _turn_metadata(*, interrupted: bool) -> dict:
+    return {
+        "session_id": "test_session_001",
+        "turn_id": "",
+        "task_id": "",
+        "api_request_id": "",
+        "platform": "",
+        "completed": not interrupted,
+        "interrupted": interrupted,
+        "source_row_ids": [],
+        "source_timestamps": [],
+    }
 
-    def test_interrupted_turn_does_not_sync(self):
-        """The whole point of #15218: even with a final_response and a
-        user message, an interrupted turn must NOT reach the memory
-        backend."""
+
+class TestSyncExternalMemoryForTurn:
+    # --- Interrupted evidence durability --------------------------------
+
+    def test_interrupted_turn_captures_user_but_not_partial_assistant(self):
+        """Persist the user row, but never bless the partial assistant text."""
         agent = _bare_agent()
         agent._sync_external_memory_for_turn(
             original_user_message="What time is it?",
             final_response="It is 3pm.",  # looks complete — but partial
             interrupted=True,
         )
-        agent._memory_manager.sync_all.assert_not_called()
+        agent._memory_manager.sync_all.assert_called_once_with(
+            "What time is it?",
+            "",
+            session_id="test_session_001",
+            turn_metadata=_turn_metadata(interrupted=True),
+        )
         agent._memory_manager.queue_prefetch_all.assert_not_called()
 
-    def test_interrupted_turn_skips_even_when_response_is_full(self):
+    def test_interrupted_turn_discards_even_seemingly_full_response(self):
         """A long, seemingly-complete assistant response is still
         partial if ``interrupted`` is True — an interrupt may have
         landed between the streamed reply and the next tool call.  The
@@ -66,7 +78,13 @@ class TestSyncExternalMemoryForTurn:
             final_response="Here's a detailed 7-day itinerary: [...]",
             interrupted=True,
         )
-        agent._memory_manager.sync_all.assert_not_called()
+        agent._memory_manager.sync_all.assert_called_once_with(
+            "Plan a trip to Lisbon",
+            "",
+            session_id="test_session_001",
+            turn_metadata=_turn_metadata(interrupted=True),
+        )
+        agent._memory_manager.queue_prefetch_all.assert_not_called()
 
     # --- Normal completed turn still syncs ------------------------------
 
@@ -83,13 +101,63 @@ class TestSyncExternalMemoryForTurn:
             interrupted=False,
         )
         agent._memory_manager.sync_all.assert_called_once_with(
-            "What's the weather in Paris?", "It's sunny and 22°C.",
+            "What's the weather in Paris?",
+            "It's sunny and 22°C.",
             session_id="test_session_001",
+            turn_metadata=_turn_metadata(interrupted=False),
         )
         agent._memory_manager.queue_prefetch_all.assert_called_once_with(
             "What's the weather in Paris?",
             session_id="test_session_001",
         )
+
+    def test_durable_provider_failure_is_not_reported_as_a_completed_sync(self):
+        from agent.memory_manager import MemoryDurabilityError
+
+        agent = _bare_agent()
+        agent._memory_manager.sync_all.side_effect = MemoryDurabilityError(
+            "cortex", "turn sync"
+        )
+
+        with pytest.raises(MemoryDurabilityError, match="cortex"):
+            agent._sync_external_memory_for_turn(
+                original_user_message="Persist this completed turn.",
+                final_response="It is durable.",
+                interrupted=False,
+            )
+
+        agent._memory_manager.queue_prefetch_all.assert_not_called()
+
+    def test_best_effort_provider_failure_remains_non_blocking(self):
+        agent = _bare_agent()
+        agent._memory_manager.sync_all.side_effect = RuntimeError("offline")
+
+        agent._sync_external_memory_for_turn(
+            original_user_message="Best effort only.",
+            final_response="No durable guarantee requested.",
+            interrupted=False,
+        )
+
+        agent._memory_manager.queue_prefetch_all.assert_not_called()
+
+    def test_shutdown_surfaces_durable_finalize_failure_after_cleanup(self):
+        from agent.memory_manager import MemoryDurabilityError
+
+        agent = _bare_agent()
+        failure = MemoryDurabilityError("cortex", "session finalization")
+        agent._memory_manager.on_session_finalize.side_effect = failure
+
+        with pytest.raises(MemoryDurabilityError, match="cortex"):
+            agent.shutdown_memory_provider(
+                [{"role": "user", "content": "final transcript"}],
+                finalize=True,
+            )
+
+        agent._memory_manager.on_session_end.assert_called_once_with(
+            [{"role": "user", "content": "final transcript"}],
+            include_durable=False,
+        )
+        agent._memory_manager.shutdown_all.assert_called_once()
 
     def test_completed_turn_syncs_messages_when_present(self):
         agent = _bare_agent()
@@ -103,7 +171,7 @@ class TestSyncExternalMemoryForTurn:
                         "type": "function",
                         "function": {
                             "name": "terminal",
-                            "arguments": "{\"command\":\"pytest\"}",
+                            "arguments": '{"command":"pytest"}',
                         },
                     }
                 ],
@@ -113,7 +181,7 @@ class TestSyncExternalMemoryForTurn:
                 "name": "terminal",
                 "tool_call_id": "call-1",
                 "content": "final Hermes-processed output",
-            }
+            },
         ]
 
         agent._sync_external_memory_for_turn(
@@ -128,6 +196,7 @@ class TestSyncExternalMemoryForTurn:
             "tests passed",
             session_id="test_session_001",
             messages=messages,
+            turn_metadata=_turn_metadata(interrupted=False),
         )
 
     def test_completed_skill_turn_keeps_original_message_for_memory_manager(self):
@@ -157,6 +226,7 @@ class TestSyncExternalMemoryForTurn:
             skill_message,
             "Done.",
             session_id="test_session_001",
+            turn_metadata=_turn_metadata(interrupted=False),
         )
         agent._memory_manager.queue_prefetch_all.assert_called_once_with(
             skill_message,
@@ -210,9 +280,7 @@ class TestSyncExternalMemoryForTurn:
         or offline backend must not block the user from seeing their
         response by propagating the exception up."""
         agent = _bare_agent()
-        agent._memory_manager.sync_all.side_effect = RuntimeError(
-            "backend unreachable"
-        )
+        agent._memory_manager.sync_all.side_effect = RuntimeError("backend unreachable")
 
         # Must not raise.
         agent._sync_external_memory_for_turn(
@@ -252,7 +320,10 @@ class TestSyncExternalMemoryForTurn:
         agent._sync_external_memory_for_turn(
             original_user_message=[
                 {"type": "text", "text": "what is in this screenshot?"},
-                {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,abc"},
+                },
             ],
             final_response="A terminal window showing a stack trace.",
             interrupted=False,
@@ -261,6 +332,7 @@ class TestSyncExternalMemoryForTurn:
             "[1 image] what is in this screenshot?",
             "A terminal window showing a stack trace.",
             session_id="test_session_001",
+            turn_metadata=_turn_metadata(interrupted=False),
         )
         agent._memory_manager.queue_prefetch_all.assert_called_once_with(
             "[1 image] what is in this screenshot?",
@@ -275,8 +347,10 @@ class TestSyncExternalMemoryForTurn:
             interrupted=False,
         )
         agent._memory_manager.sync_all.assert_called_once_with(
-            "describe it", "a cat",
+            "describe it",
+            "a cat",
             session_id="test_session_001",
+            turn_metadata=_turn_metadata(interrupted=False),
         )
 
     def test_multimodal_with_no_text_at_all_skips(self):
@@ -293,16 +367,19 @@ class TestSyncExternalMemoryForTurn:
 
     # --- The specific matrix the reporter asked about ------------------
 
-    @pytest.mark.parametrize("interrupted,final,user,expect_sync", [
-        (False, "resp", "user",  True),   # normal completed → sync
-        (True,  "resp", "user",  False),  # interrupted → skip (the fix)
-        (False, None,   "user",  False),  # no response → skip
-        (False, "resp", None,    False),  # no user msg → skip
-        (True,  None,   "user",  False),  # interrupted + no response → skip
-        (True,  "resp", None,    False),  # interrupted + no user → skip
-        (False, None,   None,    False),  # nothing → skip
-        (True,  None,   None,    False),  # interrupted + nothing → skip
-    ])
+    @pytest.mark.parametrize(
+        "interrupted,final,user,expect_sync",
+        [
+            (False, "resp", "user", True),  # normal completed → sync
+            (True, "resp", "user", True),  # interrupted → user evidence only
+            (False, None, "user", False),  # no response → skip
+            (False, "resp", None, False),  # no user msg → skip
+            (True, None, "user", True),  # interrupted user evidence is sufficient
+            (True, "resp", None, False),  # interrupted + no user → skip
+            (False, None, None, False),  # nothing → skip
+            (True, None, None, False),  # interrupted + nothing → skip
+        ],
+    )
     def test_sync_matrix(self, interrupted, final, user, expect_sync):
         agent = _bare_agent()
         agent._sync_external_memory_for_turn(
@@ -312,7 +389,14 @@ class TestSyncExternalMemoryForTurn:
         )
         if expect_sync:
             agent._memory_manager.sync_all.assert_called_once()
-            agent._memory_manager.queue_prefetch_all.assert_called_once()
+            if interrupted:
+                assert agent._memory_manager.sync_all.call_args.args[1] == ""
+                assert agent._memory_manager.sync_all.call_args.kwargs[
+                    "turn_metadata"
+                ] == _turn_metadata(interrupted=True)
+                agent._memory_manager.queue_prefetch_all.assert_not_called()
+            else:
+                agent._memory_manager.queue_prefetch_all.assert_called_once()
         else:
             agent._memory_manager.sync_all.assert_not_called()
             agent._memory_manager.queue_prefetch_all.assert_not_called()

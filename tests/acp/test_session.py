@@ -378,14 +378,18 @@ class TestListAndCleanup:
         hits = {r["session_id"] for r in db.search_messages("needle")}
         assert state.session_id in hits
 
-    def test_cleanup_clears_all(self, manager):
+    def test_cleanup_releases_memory_but_keeps_sessions_resumable(self, manager):
         s1 = manager.create_session()
         s2 = manager.create_session()
         s1.history.append({"role": "user", "content": "one"})
         s2.history.append({"role": "user", "content": "two"})
         assert len(manager.list_sessions()) == 2
         manager.cleanup()
-        assert manager.list_sessions() == []
+        assert manager._sessions == {}
+        assert {row["session_id"] for row in manager.list_sessions()} == {
+            s1.session_id,
+            s2.session_id,
+        }
 
     def test_remove_session(self, manager):
         state = manager.create_session()
@@ -485,22 +489,29 @@ class TestPersistence:
         assert len(messages) == 1
         assert messages[0]["content"] == "test"
 
-    def test_remove_session_deletes_from_db(self, manager):
+    def test_remove_session_ends_and_preserves_db_transcript(self, manager):
         state = manager.create_session()
+        state.history.append({"role": "user", "content": "keep this history"})
+        manager.save_session(state.session_id)
         db = manager._get_db()
         assert db.get_session(state.session_id) is not None
         manager.remove_session(state.session_id)
-        assert db.get_session(state.session_id) is None
+        row = db.get_session(state.session_id)
+        assert row is not None
+        assert row["end_reason"] == "acp_close"
+        assert db.get_messages_as_conversation(state.session_id)[0]["content"] == "keep this history"
 
-    def test_cleanup_removes_all_from_db(self, manager):
+    def test_cleanup_keeps_all_db_rows_active(self, manager):
         s1 = manager.create_session()
         s2 = manager.create_session()
         db = manager._get_db()
         assert db.get_session(s1.session_id) is not None
         assert db.get_session(s2.session_id) is not None
         manager.cleanup()
-        assert db.get_session(s1.session_id) is None
-        assert db.get_session(s2.session_id) is None
+        assert db.get_session(s1.session_id)["ended_at"] is None
+        assert db.get_session(s1.session_id)["end_reason"] is None
+        assert db.get_session(s2.session_id)["ended_at"] is None
+        assert db.get_session(s2.session_id)["end_reason"] is None
 
     def test_list_sessions_includes_db_only(self, manager):
         """Sessions only in DB (not in memory) appear in list_sessions."""

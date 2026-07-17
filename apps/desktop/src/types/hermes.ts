@@ -273,6 +273,10 @@ export interface ModelOptionProvider {
   /** Per-model option support, keyed by model id (present when the picker
    *  requested capabilities). Lets the UI gate fast/reasoning controls. */
   capabilities?: Record<string, ModelCapabilities>
+  /** Cortex-only structured-output metadata. Generic chat inventories omit it. */
+  memory_capabilities?: Record<string, CortexMemoryModelCapability>
+  /** Stable preference order for the dedicated Cortex memory workload. */
+  recommended_models?: string[]
 }
 
 export interface ModelCapabilities {
@@ -429,6 +433,8 @@ export interface StarmapNode {
   id: string
   label: string
   kind: 'memory' | 'skill'
+  /** Native Cortex type. Absent on the legacy /api/learning projection. */
+  cortexType?: CortexNodeType
   memorySource?: 'memory' | 'profile'
   timestamp?: null | number
   category: string
@@ -436,12 +442,19 @@ export interface StarmapNode {
   state: string
   createdBy: null | string
   pinned: boolean
+  badges?: string[]
+  privacy?: string
+  summary?: string
 }
 
 /** A declared `related_skills` link; both endpoints are guaranteed to be nodes. */
 export interface StarmapEdge {
+  direction?: 'directed'
+  id?: string
   source: string
+  status?: string
   target: string
+  type?: string
 }
 
 export interface StarmapCluster {
@@ -462,7 +475,155 @@ export interface StarmapGraph {
   edges: StarmapEdge[]
   clusters: StarmapCluster[]
   memory: StarmapMemoryCard[]
+  source?: 'cortex' | 'legacy'
   stats: Record<string, unknown>
+}
+
+export type CortexNodeType = 'community' | 'document' | 'entity' | 'evidence' | 'memory' | 'session'
+
+export interface CortexGraphNode {
+  badges: string[]
+  community: null | string
+  created_at: null | string
+  degree: number
+  domain: string
+  id: string
+  label: string
+  metadata: Record<string, unknown>
+  privacy: string
+  status: string
+  summary: string
+  type: CortexNodeType
+  updated_at: null | string
+  usage: number
+}
+
+export interface CortexGraphEdge {
+  created_at: null | string
+  direction: 'directed'
+  id: string
+  metadata: Record<string, unknown>
+  source: string
+  status: string
+  target: string
+  type: string
+  updated_at: null | string
+}
+
+export interface CortexGraphCommunity {
+  domain: string
+  generated_at: string
+  id: string
+  label: string
+  level: number
+  member_count: number
+  parent_id: null | string
+  status: string
+  visible_member_count: number
+}
+
+export interface CortexGraphResponse {
+  communities: CortexGraphCommunity[]
+  edges: CortexGraphEdge[]
+  facets: {
+    domains: { count: number; value: string }[]
+    statuses: { count: number; value: string }[]
+    types: { count: number; value: string }[]
+  }
+  generated_at: string
+  layout_seed: string
+  next_cursor: null | string
+  nodes: CortexGraphNode[]
+  projection: string
+  redaction_summary: {
+    document_bodies_hidden: number
+    nodes_omitted_by_limit: number
+    raw_evidence_bodies_hidden: number
+  }
+  retrieval_run_id: null | string
+  timeline_window: { end: null | string; start: null | string }
+  version: 'atlas.cortex.graph.v1'
+}
+
+export interface CortexEvidenceDetail {
+  content: string
+  content_truncated: boolean
+  id: string
+  ingested_at: string
+  metadata: Record<string, unknown>
+  occurred_at: string
+  retention_class: string
+  sensitivity: string
+  source_locator: string
+  source_type: string
+}
+
+export interface CortexNodeDetailResponse {
+  content: string
+  detail: Record<string, unknown>
+  edges: CortexGraphEdge[]
+  evidence: CortexEvidenceDetail[]
+  generated_at: string
+  neighbors: Pick<CortexGraphNode, 'domain' | 'id' | 'label' | 'metadata' | 'privacy' | 'status' | 'type'>[]
+  node: CortexGraphNode
+  redaction_summary: { evidence_limit: number; evidence_omitted: number }
+  version: 'atlas.cortex.detail.v1'
+}
+
+export interface CortexHealthResponse {
+  capabilities: {
+    full_text_search: boolean
+    graphrag: boolean
+    temporal_memory: boolean
+    typed_graph: boolean
+  }
+  counts: Record<string, number>
+  generated_at: string
+  graphrag: null | {
+    created_at: string
+    document_count: number
+    published_at: null | string
+    status: string
+    version: string
+  }
+  jobs: {
+    by_status: Record<string, number>
+    expired_running: number
+    failed: number
+    latest_dream_job_id: null | string
+    oldest_overdue_age_seconds: number
+    oldest_pending_age_seconds: number
+    pending: number
+    pending_boundaries: number
+    stale: boolean
+  }
+  name: string
+  quality: {
+    disputed_memories: number
+    observations_awaiting_maintenance: number
+  }
+  schema_version: number
+  status: string
+  version: 'atlas.cortex.health.v1'
+}
+
+export interface CortexJobResponse {
+  job: {
+    attempt: number
+    completed_at: null | string
+    created_at: string
+    error: null | string
+    id: string
+    model: null | string
+    output: Record<string, boolean | number | string | null>
+    prompt_version: null | string
+    scheduled_at: string
+    started_at: null | string
+    status: string
+    type: string
+    updated_at: string
+  }
+  version: 'atlas.cortex.job.v1'
 }
 
 export interface ContextUsageCategory {
@@ -849,6 +1010,59 @@ export interface AuxiliaryTaskAssignment {
 export interface AuxiliaryModelsResponse {
   main: { model: string; provider: string }
   tasks: AuxiliaryTaskAssignment[]
+}
+
+export interface CortexMemoryModelCapability {
+  recommendation_rank: number
+  recommended: boolean
+  selectable: boolean
+  structured_json: boolean
+  structured_json_validation: 'curated' | 'managed_gateway' | 'openrouter'
+  tool_calling_required: false
+  unavailable_reason: string
+}
+
+export interface CortexMemoryModelOptionsResponse {
+  constraints: {
+    explicit_route_required: true
+    separate_from_main: true
+    structured_json_required: true
+    tool_calling_required: false
+  }
+  current: {
+    configured: boolean
+    valid: boolean
+    triage: CortexMemoryRouteStatus
+    reasoning: CortexMemoryRouteStatus
+  }
+  providers: ModelOptionProvider[]
+  recommended: { model: string; provider: string }
+  tasks: ['cortex_triage', 'cortex_reasoning']
+}
+
+export interface CortexMemoryRouteStatus {
+  advanced_route: boolean
+  catalog_selectable: boolean
+  configured: boolean
+  model: string
+  provider: string
+  runtime_valid: boolean
+  unavailable_reason: string
+  valid: boolean
+}
+
+export interface CortexMemoryModelAssignmentRequest {
+  model: string
+  provider: string
+}
+
+export interface CortexMemoryModelAssignmentResponse {
+  gateway_tools?: string[]
+  model: string
+  ok: boolean
+  provider: string
+  reasoning: { model: string; provider: string }
+  triage: { model: string; provider: string }
 }
 
 export interface MoaModelSlot {

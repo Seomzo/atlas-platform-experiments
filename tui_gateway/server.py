@@ -425,6 +425,7 @@ def _claim_active_session_slot(
     *,
     live_session_id: str,
     surface: str = "tui",
+    profile_home: str | Path | None = None,
 ) -> tuple[Any, str | None]:
     try:
         from hermes_cli.active_sessions import try_acquire_active_session
@@ -434,10 +435,14 @@ def _claim_active_session_slot(
             surface=surface,
             config=_load_cfg(),
             metadata={"live_session_id": live_session_id},
+            hermes_home=profile_home,
         )
     except Exception as exc:
         logger.warning("Failed to claim active session slot: %s", exc)
-        return None, None
+        return (
+            None,
+            "Session ownership registry is unavailable; please retry shortly.",
+        )
 
 
 def _release_active_session_slot(session: dict | None) -> None:
@@ -484,6 +489,7 @@ def _transfer_active_session_slot(
         new_session_id,
         live_session_id=sid,
         surface=_session_source(session),
+        profile_home=session.get("profile_home"),
     )
     if new_lease is not None:
         old_lease = session.pop("active_session_lease", None)
@@ -542,6 +548,28 @@ def _is_gateway_owned_source(source: str) -> bool:
         return False
 
 
+def _tui_owns_session_lifecycle(session: dict, agent=None) -> bool:
+    """Return whether this TUI runtime owns the durable conversation.
+
+    A resumed messaging-gateway session is only being viewed through the TUI.
+    Prefer the source already carried by the live record, then consult the
+    durable row because older/resumed records may not have retained ``source``.
+    Failure to read state.db must not override positive gateway ownership from
+    the live record.
+    """
+    if _is_gateway_owned_source(str(session.get("source") or "")):
+        return False
+    session_id = getattr(agent, "session_id", None) or session.get("session_key")
+    if not session_id:
+        return True
+    try:
+        with _session_db(session) as db:
+            row = db.get_session(session_id) if db is not None else None
+        return not _is_gateway_owned_source((row or {}).get("source", ""))
+    except Exception:
+        return True
+
+
 def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> None:
     """Best-effort finalize hook + memory commit for a session.
 
@@ -566,6 +594,46 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
             history = list(session.get("history", []))
     else:
         history = list(session.get("history", []))
+
+    # Establish lifecycle ownership before any persistence, plugin, memory, or
+    # delegation side effect. A TUI tab attached to a gateway-originated
+    # session is a viewer; closing it must only detach the view.
+    session_key = session.get("session_key")
+    session_id = getattr(agent, "session_id", None) or session_key
+    _tui_owns_lifecycle = _tui_owns_session_lifecycle(session, agent)
+    session["_tui_owns_lifecycle"] = _tui_owns_lifecycle
+    if not _tui_owns_lifecycle:
+        # Detaching a viewer must not touch the gateway-owned durable session,
+        # but delegations commissioned by this UI tab still lose their return
+        # address when the tab closes. Interrupt only by the viewer identity;
+        # an empty session_key deliberately preserves the gateway's work.
+        try:
+            from tools.async_delegation import interrupt_for_session
+
+            _own_sid = str(session.get("_sid") or "")
+            if not _own_sid:
+                try:
+                    with _sessions_lock:
+                        for _cand_sid, _cand in _sessions.items():
+                            if _cand is session:
+                                _own_sid = _cand_sid
+                                break
+                except Exception:
+                    _own_sid = ""
+            interrupt_for_session(
+                session_key="",
+                origin_ui_session_id=_own_sid,
+                reason=end_reason,
+            )
+        except Exception:
+            pass
+        try:
+            worker = session.get("slash_worker")
+            if worker:
+                worker.close()
+        except Exception:
+            pass
+        return
 
     # ── Persist unflushed messages to SQLite ──────────────────────────
     # Two sources, tried in order of freshness:
@@ -611,36 +679,79 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
         except Exception:
             pass
 
+    manager = None
+    if agent is not None:
+        manager = getattr(agent, "_memory_manager", None)
+        if manager is not None:
+            # Teardown must remember that the true terminal boundary was
+            # attempted even when Cortex raises. A later legacy checkpoint
+            # would otherwise mutate the evidence epoch recorded by either the
+            # completed boundary or its recovery marker.
+            session["_memory_finalize_attempted"] = True
+            try:
+                manager.on_session_finalize(
+                    getattr(agent, "_session_messages", None) or history,
+                    reason=end_reason,
+                )
+                session["_memory_finalize_pending"] = False
+            except Exception as exc:
+                # Cortex persists an evidence-bound retry marker before its
+                # fallible terminal capture. Do not follow this with the
+                # legacy durable checkpoint: that would change the evidence
+                # epoch and make safe recovery reject the marker as resumed
+                # conversation data.
+                session["_memory_finalize_pending"] = True
+                # ``AIAgent.close()`` normally ends its owned SQLite row with
+                # ``agent_close``.  A failed durable terminal boundary must
+                # leave that row open so Cortex can retry from its persisted
+                # recovery marker instead of making the failure look closed.
+                try:
+                    agent._end_session_on_close = False
+                except Exception:
+                    pass
+                logger.warning(
+                    "TUI logical memory finalization is pending recovery for "
+                    "session %s: %s",
+                    session_id or "<unknown>",
+                    exc,
+                    exc_info=True,
+                )
+
     if agent is not None and history and hasattr(agent, "commit_memory_session"):
         try:
+            # The manager just received the true logical finalization above.
+            # This call remains necessary to close context-engine state, but
+            # must not checkpoint a durable provider a second time.
+            agent.commit_memory_session(
+                history,
+                checkpoint_memory=manager is None,
+            )
+        except TypeError:
+            # Compatibility with lightweight plugin/test agents that still
+            # expose the historical one-argument method.
             agent.commit_memory_session(history)
         except Exception:
             pass
-
-    session_key = session.get("session_key")
-    session_id = getattr(agent, "session_id", None) or session_key
-    _notify_session_boundary("on_session_finalize", session_id, _session_source(session))
 
     # Mark session ended in DB so it doesn't linger as a ghost row in /resume.
     # Use session_id (from agent.session_id) not session_key — after compression,
     # session_key may be stale (the ended parent) while session_id is the live
     # continuation. Fix for #20001.
-    _tui_owns_lifecycle = True
-    if session_id:
+    if not session.get("_memory_finalize_pending", False):
+        _notify_session_boundary(
+            "on_session_finalize", session_id, _session_source(session)
+        )
+    if session_id and not session.get("_memory_finalize_pending", False):
         try:
-            db = _get_db()
-            if db is not None:
-                # Don't end gateway-originated sessions — the gateway owns
-                # their lifecycle.  The TUI is a viewer, not the owner.
-                # Ending a gateway session in state.db triggers a Groundhog
-                # Day routing loop: the gateway's #54878 self-heal detects
-                # the stale entry, recovers to the parent session, context
-                # compression splits back to the reaped child, and the cycle
-                # repeats on every inbound message.  (#60609)
-                row = db.get_session(session_id)
-                source = (row or {}).get("source", "")
-                _tui_owns_lifecycle = not _is_gateway_owned_source(source)
-                if _tui_owns_lifecycle:
+            with _session_db(session) as db:
+                if db is not None:
+                    # Don't end gateway-originated sessions — the gateway owns
+                    # their lifecycle.  The TUI is a viewer, not the owner.
+                    # Ending a gateway session in state.db triggers a Groundhog
+                    # Day routing loop: the gateway's #54878 self-heal detects
+                    # the stale entry, recovers to the parent session, context
+                    # compression splits back to the reaped child, and the cycle
+                    # repeats on every inbound message.  (#60609)
                     db.end_session(session_id, end_reason)
         except Exception:
             pass
@@ -689,19 +800,102 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
         pass
 
 
-def _teardown_session(session: dict | None, *, end_reason: str = "tui_close") -> None:
-    """Fully tear down a session: finalize, unregister, close agent + worker.
+def _prepare_resource_teardown(
+    session: dict, *, end_reason: str, checkpoint: bool = True
+) -> tuple[object | None, list, bool]:
+    """Checkpoint a live record for non-semantic resource eviction.
 
-    Shared by ``session.close`` and the orphaned-WS-session reaper. The
-    slash-worker subprocess is closed inside ``_finalize_session`` (the single
-    finalize chokepoint); this still unregisters the approval notifier and
-    closes the in-process agent. Idempotent: the ``_finalized`` guard in
-    ``_finalize_session`` and the ``poll()`` guard in ``_SlashWorker.close``
-    make repeat calls harmless.
+    Operational teardown (process exit, dead transport, idle/LRU eviction) is
+    not evidence that the customer ended the conversation. Persist the latest
+    completed snapshot for TUI-owned sessions, but never publish a lifecycle
+    hook, finalize Cortex, or end the durable SessionDB row. The returned
+    snapshot is passed to ``shutdown_memory_provider(finalize=False)`` so
+    durable providers may make their deterministic compatibility checkpoint.
+    """
+    session["_finalized"] = True
+    _release_active_session_slot(session)
+    stop_event = session.get("_notif_stop")
+    if stop_event is not None:
+        stop_event.set()
+
+    agent = session.get("agent")
+    lock = session.get("history_lock")
+    if lock is not None:
+        with lock:
+            history = list(session.get("history", []))
+    else:
+        history = list(session.get("history", []))
+    snapshot = list(getattr(agent, "_session_messages", None) or history)
+
+    owns_lifecycle = _tui_owns_session_lifecycle(session, agent)
+    session["_tui_owns_lifecycle"] = owns_lifecycle
+    if (
+        checkpoint
+        and owns_lifecycle
+        and agent is not None
+        and snapshot
+        and hasattr(agent, "_persist_session")
+    ):
+        try:
+            agent._persist_session(snapshot, conversation_history=history)
+        except Exception:
+            logger.debug(
+                "TUI resource teardown could not persist session %s",
+                getattr(agent, "session_id", None) or session.get("session_key", ""),
+                exc_info=True,
+            )
+
+    # The in-memory UI return address is gone, but the durable conversation is
+    # deliberately still live. Interrupt only work pinned to this UI instance;
+    # key-owned work remains recoverable by a resumed client.
+    try:
+        from tools.async_delegation import interrupt_for_session
+
+        interrupt_for_session(
+            session_key="",
+            origin_ui_session_id=str(session.get("_sid") or ""),
+            reason=end_reason,
+        )
+    except Exception:
+        pass
+
+    try:
+        worker = session.get("slash_worker")
+        if worker:
+            worker.close()
+    except Exception:
+        pass
+    return agent, snapshot, owns_lifecycle
+
+
+def _teardown_session(
+    session: dict | None,
+    *,
+    end_reason: str = "tui_close",
+    finalize: bool = True,
+    checkpoint: bool = True,
+) -> None:
+    """Release one live TUI record, optionally at a true logical boundary.
+
+    ``finalize=True`` is reserved for explicit, TUI-owned close/reset actions.
+    Cache/transport/process teardown passes ``False`` and remains resumable.
     """
     if not session:
         return
-    _finalize_session(session, end_reason=end_reason)
+    if finalize:
+        _finalize_session(session, end_reason=end_reason)
+        agent = session.get("agent")
+        snapshot = list(
+            getattr(agent, "_session_messages", None)
+            or session.get("history", [])
+        )
+        owns_lifecycle = bool(session.get("_tui_owns_lifecycle", True))
+    else:
+        agent, snapshot, owns_lifecycle = _prepare_resource_teardown(
+            session,
+            end_reason=end_reason,
+            checkpoint=checkpoint,
+        )
     try:
         from tools.approval import unregister_gateway_notify
 
@@ -709,16 +903,60 @@ def _teardown_session(session: dict | None, *, end_reason: str = "tui_close") ->
             unregister_gateway_notify(key)
     except Exception:
         pass
-    try:
-        agent = session.get("agent")
-        if agent is not None and hasattr(agent, "close"):
-            agent.close()
-    except Exception:
-        pass
-    # NOTE: the slash-worker is closed inside _finalize_session (the single
-    # _finalized-guarded chokepoint that main folded it into), exactly once.
-    # We deliberately do NOT re-close it here — _teardown_session's job beyond
-    # finalize is unregistering the notifier and closing the in-process agent.
+    if agent is not None:
+        # Set this before any fallible provider cleanup. Even if checkpoint or
+        # shutdown fails, generic close must never turn resource eviction into
+        # an implicit durable session end.
+        try:
+            agent._end_session_on_close = False
+        except Exception:
+            pass
+        try:
+            manager = getattr(agent, "_memory_manager", None)
+            if session.get("_memory_finalize_attempted") and manager is not None:
+                # _finalize_session already attempted the true durable
+                # boundary. Preserve legacy best-effort checkpoints while
+                # explicitly excluding durable providers, then close providers
+                # directly so AIAgent.shutdown_memory_provider(finalize=False)
+                # cannot run a second durable on_session_end checkpoint.
+                try:
+                    manager.on_session_end(
+                        getattr(agent, "_session_messages", None)
+                        or list(session.get("history", [])),
+                        include_durable=False,
+                    )
+                except Exception:
+                    logger.debug(
+                        "TUI best-effort memory checkpoint failed during teardown",
+                        exc_info=True,
+                    )
+                try:
+                    manager.shutdown_all()
+                except Exception:
+                    logger.debug(
+                        "TUI memory provider shutdown failed",
+                        exc_info=True,
+                    )
+            elif hasattr(agent, "shutdown_memory_provider"):
+                try:
+                    agent.shutdown_memory_provider(
+                        snapshot if checkpoint and owns_lifecycle else [],
+                        finalize=False,
+                        reason=end_reason,
+                    )
+                except TypeError:
+                    agent.shutdown_memory_provider(
+                        snapshot if checkpoint and owns_lifecycle else []
+                    )
+        except Exception:
+            logger.debug("TUI memory resource shutdown failed", exc_info=True)
+        try:
+            if hasattr(agent, "close"):
+                agent.close()
+        except Exception:
+            logger.debug("TUI agent resource close failed", exc_info=True)
+    # The slash worker is closed by the selected semantic/resource preparation
+    # path. We deliberately do not re-close it here.
 
 
 def _attach_worker(sid: str, session: dict, worker) -> None:
@@ -732,12 +970,18 @@ def _attach_worker(sid: str, session: dict, worker) -> None:
     worker.close()
 
 
-def _close_session_by_id(sid: str, *, end_reason: str = "tui_close") -> bool:
+def _close_session_by_id(
+    sid: str,
+    *,
+    end_reason: str = "tui_close",
+    finalize: bool = True,
+    checkpoint: bool = True,
+) -> bool:
     """Single idempotent teardown for one session: pop it under the sessions
-    lock, then finalize, unregister notify, close agent + slash worker via the
-    shared ``_teardown_session`` path. Returns True iff it closed a live
-    session. The ``_finalized`` / worker ``_closed`` guards make concurrent or
-    repeat calls (e.g. session.close racing the WS-orphan reaper) harmless."""
+    lock, then run either explicit finalization or resumable resource cleanup
+    before closing the agent and slash worker. Returns True iff it removed a
+    live in-memory session. The pop and worker guards make concurrent/repeat
+    calls (for example session.close racing the orphan reaper) harmless."""
     with _sessions_lock:
         session = _sessions.pop(sid, None)
     if session is None:
@@ -746,9 +990,111 @@ def _close_session_by_id(sid: str, *, end_reason: str = "tui_close") -> bool:
     # (e.g. _finalize_session's per-session async-delegation interrupt) can't
     # recover its live id by scanning the dict — stamp it on the record.
     session["_sid"] = sid
-    _teardown_session(session, end_reason=end_reason)
+    _teardown_session(
+        session,
+        end_reason=end_reason,
+        finalize=finalize,
+        checkpoint=checkpoint,
+    )
     return True
 
+
+def _claim_idle_session_for_close(sid: str) -> tuple[dict | None, str]:
+    """Atomically remove ``sid`` only when no work can still mutate it.
+
+    ``session.close(require_idle=true)`` is the fail-closed semantic boundary
+    used by Desktop's New Chat action.  The claim holds the session registry,
+    transcript, and prompt locks while it checks every in-process source of
+    pending work and removes the mapping.  A prompt submit is additionally
+    serialized by ``_session_resume_lock`` at the RPC boundary, while the
+    transcript lock covers notification/continuation dispatchers that can set
+    ``running`` outside that lifecycle barrier.
+
+    Returns ``(session, "")`` after a successful claim, ``(None, "")`` when
+    the runtime is already gone, and ``(None, reason)`` when it is not idle.
+    The caller owns teardown for a successfully claimed record.
+    """
+    sid = str(sid or "")
+    with _sessions_lock:
+        session = _sessions.get(sid)
+        if session is None:
+            return None, ""
+
+        history_lock = session.get("history_lock")
+        history_guard = (
+            history_lock if history_lock is not None else contextlib.nullcontext()
+        )
+        with history_guard:
+            # _pending and its payload metadata are one protected data set. Do
+            # not infer prompt idleness from ``running`` alone: approval/secret
+            # callbacks can remain blocked while a UI's busy projection is
+            # briefly stale.
+            with _prompt_lock:
+                pending_kind = _session_pending_kind_unlocked(sid)
+
+            run_thread = session.get("_run_thread")
+            run_thread_alive = bool(
+                run_thread is not None
+                and callable(getattr(run_thread, "is_alive", None))
+                and run_thread.is_alive()
+            )
+            ready = session.get("agent_ready")
+            agent_starting = bool(
+                ready is not None
+                and not ready.is_set()
+                and session.get("agent_build_started")
+            )
+            transcript_present = bool(
+                session.get("history") or session.get("display_history_prefix")
+            )
+            agent_missing_for_transcript = bool(
+                transcript_present and session.get("agent") is None
+            )
+
+            if session.get("running"):
+                return None, "the current turn is still running"
+            if pending_kind:
+                return None, f"the session is waiting for {pending_kind} input"
+            if session.get("queued_prompt"):
+                return None, "a queued user turn is still pending"
+            if run_thread_alive:
+                return None, "the current turn is still finishing"
+            if agent_starting or agent_missing_for_transcript:
+                return None, "the session is still preparing its memory boundary"
+            if session.get("lazy") and _child_run_active(
+                str(session.get("session_key") or "")
+            ):
+                return None, "the delegated session is still running"
+
+            # Mark the detached record before releasing its transcript lock.
+            # Dispatchers that already hold a stale object reference must see
+            # this and decline to start an automatic follow-up after the pop.
+            session["_close_claimed"] = True
+            popped = _sessions.pop(sid, None)
+            if popped is not session:
+                return None, "the session changed while it was being finalized"
+            session["_sid"] = sid
+            return session, ""
+
+
+def _close_idle_session_by_id(
+    sid: str,
+    *,
+    end_reason: str = "tui_close",
+    finalize: bool = True,
+    checkpoint: bool = True,
+) -> tuple[bool, str]:
+    """Claim and tear down an idle runtime without a check/pop race."""
+    session, busy_reason = _claim_idle_session_for_close(sid)
+    if session is None:
+        return False, busy_reason
+    _teardown_session(
+        session,
+        end_reason=end_reason,
+        finalize=finalize,
+        checkpoint=checkpoint,
+    )
+    return True, ""
 
 
 def _ws_session_is_orphaned(session: dict | None) -> bool:
@@ -788,7 +1134,9 @@ def _schedule_ws_orphan_reap(sid: str) -> None:
         with _session_resume_lock:
             if not _ws_session_is_orphaned(_sessions.get(sid)):
                 return
-            _close_session_by_id(sid, end_reason="ws_orphan_reap")
+            _close_session_by_id(
+                sid, end_reason="ws_orphan_reap", finalize=False
+            )
 
     timer = threading.Timer(_WS_ORPHAN_REAP_GRACE_S, _reap)
     timer.daemon = True
@@ -817,7 +1165,7 @@ def _close_sessions_for_transport(
     detached = 0
     for sid, session in owned:
         if session.get("close_on_disconnect"):
-            _close_session_by_id(sid, end_reason=end_reason)
+            _close_session_by_id(sid, end_reason=end_reason, finalize=False)
             reaped += 1
         else:
             # Point detached sessions at the drop sentinel (NOT real stdio) so
@@ -836,7 +1184,7 @@ def _shutdown_sessions() -> None:
     with _sessions_lock:
         sids = list(_sessions)
     for sid in sids:
-        _close_session_by_id(sid, end_reason="tui_shutdown")
+        _close_session_by_id(sid, end_reason="tui_shutdown", finalize=False)
 
 
 # Last-resort net for any disconnect path that slips past the WS finally. TTL is
@@ -880,7 +1228,7 @@ def _reap_idle_sessions() -> None:
     with _sessions_lock:
         victims = [sid for sid, s in _sessions.items() if _session_is_evictable(sid, s, now)]
     for sid in victims:
-        _close_session_by_id(sid, end_reason="idle_timeout")
+        _close_session_by_id(sid, end_reason="idle_timeout", finalize=False)
     _enforce_session_cap()
 
 
@@ -936,7 +1284,7 @@ def _enforce_session_cap() -> None:
     evictable.sort(key=lambda kv: float(kv[1].get("last_active") or 0.0))
     overflow = total - cap
     for sid, _s in evictable[:overflow]:
-        _close_session_by_id(sid, end_reason="lru_evict")
+        _close_session_by_id(sid, end_reason="lru_evict", finalize=False)
 
 
 def _schedule_session_cap_enforcement() -> None:
@@ -1361,8 +1709,20 @@ def _start_agent_build(sid: str, session: dict) -> None:
                 # id — pass it through so the upgrade continues that session
                 # instead of starting a fresh one under the same key.
                 kw = {"session_db": session_db}
-                if resume_sid := current.get("resume_session_id"):
+                resume_sid = current.get("resume_session_id")
+                parent_session_id = str(
+                    current.get("parent_session_id") or ""
+                ).strip()
+                if resume_sid:
                     kw["session_id"] = resume_sid
+                elif parent_session_id:
+                    # A parented session.create is a deferred branch. Build its
+                    # unpublished provider on the parent identity so the switch
+                    # below can create correct Cortex topology; initializing on
+                    # ``key`` first would insert an unrelated root that the
+                    # idempotent switch hook deliberately will not rewrite.
+                    kw["session_id"] = parent_session_id
+                    kw["parent_session_id"] = parent_session_id
                 kw["platform_override"] = _session_source(current)
                 resume_overrides = current.get("resume_runtime_overrides")
                 if isinstance(resume_overrides, dict) and resume_overrides:
@@ -1383,6 +1743,30 @@ def _start_agent_build(sid: str, session: dict) -> None:
                     if (tier := current.get("create_service_tier_override")) is not None:
                         kw["service_tier_override"] = tier
                 agent = _make_agent(sid, key, **kw)
+                if parent_session_id and not resume_sid:
+                    try:
+                        _bind_branch_agent_memory(
+                            agent,
+                            new_session_id=key,
+                            parent_session_id=parent_session_id,
+                        )
+                    except Exception:
+                        _discard_unpublished_branch(
+                            parent_session_id=parent_session_id,
+                            new_session_id=key,
+                            hermes_home=Path(profile_home or get_hermes_home()),
+                            db=session_db,
+                            delete_created_row=False,
+                        )
+                        # The child has not been published yet. Its bootstrap
+                        # identity points at the still-live parent, so generic
+                        # close must be explicitly barred from ending that row.
+                        try:
+                            agent._end_session_on_close = False
+                        except Exception:
+                            pass
+                        _close_ephemeral_agent(agent)
+                        raise
             finally:
                 _clear_session_context(tokens)
 
@@ -4151,6 +4535,10 @@ def _background_agent_kwargs(agent, task_id: str) -> dict:
         or _load_enabled_toolsets(),
         "quiet_mode": True,
         "verbose_logging": False,
+        # The background worker is an ephemeral helper whose result is emitted
+        # to the owning TUI session.  It must never initialize the customer's
+        # primary memory provider/Cortex namespace under its temporary task id.
+        "skip_memory": True,
         "ephemeral_system_prompt": getattr(agent, "ephemeral_system_prompt", None)
         or None,
         "providers_allowed": getattr(agent, "providers_allowed", None),
@@ -4183,6 +4571,32 @@ def _ephemeral_preview_agent_kwargs(agent, task_id: str) -> dict:
         }
     )
     return kwargs
+
+
+def _close_ephemeral_agent(agent) -> None:
+    """Best-effort resource teardown for one-shot helper agents.
+
+    These agents are constructed with ``skip_memory=True``.  Keep the explicit
+    non-finalizing shutdown for defense in depth, but never feed the helper
+    transcript to a provider if a future constructor regression re-enables one.
+    ``close()`` then releases tool subprocesses, browser/client resources, child
+    agents, and the helper's own SQLite row.
+    """
+    if agent is None:
+        return
+    try:
+        if hasattr(agent, "shutdown_memory_provider"):
+            try:
+                agent.shutdown_memory_provider([], finalize=False)
+            except TypeError:
+                agent.shutdown_memory_provider([])
+    except Exception:
+        logger.debug("Ephemeral agent memory shutdown failed", exc_info=True)
+    try:
+        if hasattr(agent, "close"):
+            agent.close()
+    except Exception:
+        logger.debug("Ephemeral agent resource cleanup failed", exc_info=True)
 
 
 def _preview_restart_history(session: dict, max_messages: int = 24, max_tool_chars: int = 1200) -> list[dict]:
@@ -4463,6 +4877,7 @@ def _make_agent(
     key: str,
     session_id: str | None = None,
     session_db=None,
+    parent_session_id: str | None = None,
     model_override: dict | str | None = None,
     provider_override: str | None = None,
     reasoning_config_override: dict | None = None,
@@ -4613,6 +5028,7 @@ def _make_agent(
         platform=_resolve_agent_platform(platform_override),
         session_id=session_id or key,
         session_db=session_db if session_db is not None else _get_db(),
+        parent_session_id=parent_session_id,
         ephemeral_system_prompt=system_prompt or None,
         checkpoints_enabled=is_truthy_value(os.environ.get("HERMES_TUI_CHECKPOINTS")),
         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
@@ -5105,14 +5521,22 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
     lower-priority follow-ups this cycle — the user's message wins). Mirrors the
     claim-under-lock pattern used by the goal-continuation re-fire.
     """
-    with session["history_lock"]:
-        queued = session.get("queued_prompt")
-        if not queued or session.get("running"):
-            return False
-        session["queued_prompt"] = None
-        session["running"] = True
-        if queued.get("transport") is not None:
-            session["transport"] = queued["transport"]
+    # Claim the next turn under the same lifecycle barrier used by resume,
+    # release, close, and privacy deletion. Otherwise deletion can pop an idle
+    # runtime after the preceding turn clears ``running`` while this path still
+    # holds a stale dict and starts another turn against a deleted transcript.
+    with _session_resume_lock:
+        with _sessions_lock:
+            if _sessions.get(sid) is not session:
+                return False
+        with session["history_lock"]:
+            queued = session.get("queued_prompt")
+            if not queued or session.get("running"):
+                return False
+            session["queued_prompt"] = None
+            session["running"] = True
+            if queued.get("transport") is not None:
+                session["transport"] = queued["transport"]
     try:
         _run_prompt_submit(rid, sid, session, queued["text"])
     except Exception as exc:
@@ -5202,7 +5626,10 @@ def _(rid, params: dict) -> dict:
     ready = threading.Event()
     now = time.time()
     lease, limit_message = _claim_active_session_slot(
-        key, live_session_id=sid, surface=source
+        key,
+        live_session_id=sid,
+        surface=source,
+        profile_home=profile_home,
     )
     if limit_message is not None:
         return _err(rid, 4090, limit_message)
@@ -5495,18 +5922,61 @@ def _deferred_session_record(
     }
 
 
+class _ResumeSessionAlreadyEnded(RuntimeError):
+    """Guarded recovery lost its race to a completed semantic close."""
+
+
+def _discard_unpublished_resume_agent(agent) -> None:
+    """Close a built resume loser without ending its shared durable row."""
+    try:
+        agent._end_session_on_close = False
+    except Exception:
+        pass
+    try:
+        shutdown = getattr(agent, "shutdown_memory_provider", None)
+        if callable(shutdown):
+            try:
+                shutdown([], finalize=False)
+            except TypeError:
+                shutdown([])
+    except Exception:
+        logger.debug("Unpublished resume memory shutdown failed", exc_info=True)
+    try:
+        if hasattr(agent, "close"):
+            agent.close()
+    except Exception:
+        logger.debug("Unpublished resume agent cleanup failed", exc_info=True)
+
+
 def _claim_or_reuse_live(
-    sid: str, session_key: str, record: dict, lease
+    sid: str,
+    session_key: str,
+    record: dict,
+    lease,
+    *,
+    require_unended_db=None,
 ) -> tuple[str, dict] | None:
     """Register ``record`` as the live session for ``session_key`` under the
     resume lock, or — if a concurrent resume already won — release ``lease`` and
-    return the winner for the caller to reuse."""
+    return the winner for the caller to reuse.
+
+    Guarded semantic-close recovery passes ``require_unended_db``. Its durable
+    row is re-read inside this final publication lock, after transcript loading
+    and immediately before registration, so a close that won during that work
+    cannot be reopened or published by a stale resume.
+    """
     with _session_resume_lock:
         live = _find_live_session_by_key(session_key)
         if live is not None:
             if lease is not None:
                 lease.release()
             return live
+        if require_unended_db is not None:
+            latest = require_unended_db.get_session(session_key)
+            if isinstance(latest, dict) and latest.get("ended_at") is not None:
+                if lease is not None:
+                    lease.release()
+                raise _ResumeSessionAlreadyEnded("session already ended")
         with _sessions_lock:
             _sessions[sid] = record
             _register_session_cwd(_sessions[sid])
@@ -5540,6 +6010,7 @@ def _(rid, params: dict) -> dict:
     # local profile's state.db. None/own profile → the launch profile (unchanged).
     profile = (params.get("profile") or "").strip() or None
     profile_home = _profile_home(profile)
+    require_unended = is_truthy_value(params.get("require_unended", False))
 
     # In a profile scope, the agent OWNS a long-lived db handle bound to that
     # profile (do NOT auto-close it here). Otherwise reuse the shared launch db.
@@ -5619,6 +6090,14 @@ def _(rid, params: dict) -> dict:
         live = _find_live_session_by_key(target)
         if live is not None:
             return _ok(rid, _reuse_live_payload(*live))
+        if require_unended:
+            # New Chat recovery may arrive with a stale renderer runtime id.
+            # Re-read under the same lifecycle barrier used by semantic close:
+            # if another surface already finalized this durable row, do not
+            # reopen it and run the end-of-session memory boundary twice.
+            latest = db.get_session(target)
+            if isinstance(latest, dict) and latest.get("ended_at") is not None:
+                return _err(rid, 4091, "session already ended")
 
     # Lazy/watch resume: register the live session WITHOUT building an agent.
     # Used by the desktop's subagent windows — the child runs inside the
@@ -5631,12 +6110,16 @@ def _(rid, params: dict) -> dict:
         sid = uuid.uuid4().hex[:8]
         source = _resolve_session_source(str(params.get("source") or "").strip() or None)
         lease, limit_message = _claim_active_session_slot(
-            target, live_session_id=sid, surface=source
+            target,
+            live_session_id=sid,
+            surface=source,
+            profile_home=profile_home,
         )
         if limit_message is not None:
             return _err(rid, 4090, limit_message)
         try:
-            db.reopen_session(target)
+            if not require_unended:
+                db.reopen_session(target)
             # The child's OWN conversation only — include_ancestors would prepend
             # the parent's transcript onto the subagent's branch.
             history = db.get_messages_as_conversation(target)
@@ -5656,7 +6139,17 @@ def _(rid, params: dict) -> dict:
             profile_home=profile_home,
             lazy=True,
         )
-        if (live := _claim_or_reuse_live(sid, target, record, lease)) is not None:
+        try:
+            live = _claim_or_reuse_live(
+                sid,
+                target,
+                record,
+                lease,
+                require_unended_db=db if require_unended else None,
+            )
+        except _ResumeSessionAlreadyEnded:
+            return _err(rid, 4091, "session already ended")
+        if live is not None:
             return _ok(rid, _reuse_live_payload(*live))
         # A delegated child mid-run emits no session events of its own — report
         # its liveness from the relay registry so the window shows a busy turn.
@@ -5695,7 +6188,10 @@ def _(rid, params: dict) -> dict:
         sid = uuid.uuid4().hex[:8]
         source = _resolve_session_source(str(params.get("source") or "").strip() or None)
         lease, limit_message = _claim_active_session_slot(
-            target, live_session_id=sid, surface=source
+            target,
+            live_session_id=sid,
+            surface=source,
+            profile_home=profile_home,
         )
         if limit_message is not None:
             return _err(rid, 4090, limit_message)
@@ -5703,7 +6199,8 @@ def _(rid, params: dict) -> dict:
         # the deferred build wires the remaining per-session callbacks.
         _enable_gateway_prompts()
         try:
-            db.reopen_session(target)
+            if not require_unended:
+                db.reopen_session(target)
             raw_history = db.get_messages_as_conversation(target)
             display_history = db.get_messages_as_conversation(target, include_ancestors=True)
         except Exception as e:
@@ -5734,7 +6231,17 @@ def _(rid, params: dict) -> dict:
             model_override=overrides.get("model_override"),
             resume_runtime_overrides=overrides or None,
         )
-        if (live := _claim_or_reuse_live(sid, target, record, lease)) is not None:
+        try:
+            live = _claim_or_reuse_live(
+                sid,
+                target,
+                record,
+                lease,
+                require_unended_db=db if require_unended else None,
+            )
+        except _ResumeSessionAlreadyEnded:
+            return _err(rid, 4091, "session already ended")
+        if live is not None:
             return _ok(rid, _reuse_live_payload(*live))
 
         _schedule_agent_build(sid)
@@ -5768,7 +6275,10 @@ def _(rid, params: dict) -> dict:
     sid = uuid.uuid4().hex[:8]
     source = _resolve_session_source(str(params.get("source") or "").strip() or None)
     lease, limit_message = _claim_active_session_slot(
-        target, live_session_id=sid, surface=source
+        target,
+        live_session_id=sid,
+        surface=source,
+        profile_home=profile_home,
     )
     if limit_message is not None:
         return _err(rid, 4090, limit_message)
@@ -5777,7 +6287,8 @@ def _(rid, params: dict) -> dict:
         set_hermes_home_override(str(profile_home)) if profile_home is not None else None
     )
     try:
-        db.reopen_session(target)
+        if not require_unended:
+            db.reopen_session(target)
         raw_history = db.get_messages_as_conversation(target)
         display_history = db.get_messages_as_conversation(
             target, include_ancestors=True
@@ -5826,11 +6337,10 @@ def _(rid, params: dict) -> dict:
     with _session_resume_lock:
         live = _find_live_session_by_key(target)
         if live is not None:
-            try:
-                if hasattr(agent, "close"):
-                    agent.close()
-            except Exception:
-                pass
+            # This freshly built agent lost the registration race; it never
+            # owned the durable conversation. Generic close must not terminate
+            # the winning live agent's shared row.
+            _discard_unpublished_resume_agent(agent)
             if lease is not None:
                 lease.release()
             other_sid, other_session = live
@@ -5843,6 +6353,15 @@ def _(rid, params: dict) -> dict:
             )
             payload["resumed"] = target
             return _ok(rid, payload)
+        if require_unended:
+            latest = db.get_session(target)
+            if isinstance(latest, dict) and latest.get("ended_at") is not None:
+                # A semantic close won while this agent was building. Never
+                # publish or reopen it; shut down providers non-semantically.
+                _discard_unpublished_resume_agent(agent)
+                if lease is not None:
+                    lease.release()
+                return _err(rid, 4091, "session already ended")
         try:
             init_home_token = (
                 set_hermes_home_override(str(profile_home))
@@ -5921,13 +6440,20 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, info)
 
 
-def _session_pending_kind(sid: str) -> str:
+def _session_pending_kind_unlocked(sid: str) -> str:
+    """Return pending prompt kind while the caller owns ``_prompt_lock``."""
     for rid, (owner_sid, _ev) in list(_pending.items()):
         if owner_sid != sid:
             continue
         event, _payload = _pending_prompt_payloads.get(rid, ("input.request", {}))
         return str(event).removesuffix(".request")
     return ""
+
+
+def _session_pending_kind(sid: str) -> str:
+    """Thread-safe pending-prompt lookup for lifecycle/status checks."""
+    with _prompt_lock:
+        return _session_pending_kind_unlocked(sid)
 
 
 def _session_live_status(sid: str, session: dict) -> str:
@@ -6116,46 +6642,331 @@ def _(rid, params: dict) -> dict:
     )
 
 
-@method("session.delete")
-def _(rid, params: dict) -> dict:
-    """Delete a stored session and its on-disk transcript files.
+def _cortex_store_for_session_delete(
+    session: dict | None,
+    *,
+    hermes_home: Path,
+):
+    """Resolve the exact profile/brain store without creating global state."""
+    agent = (session or {}).get("agent")
+    manager = getattr(agent, "_memory_manager", None)
+    if manager is not None:
+        try:
+            provider = manager.get_provider("cortex")
+            store = getattr(provider, "_store", None)
+            if store is not None:
+                return store
+        except Exception:
+            pass
 
-    Used by the TUI resume picker (``d`` key) so users can prune old
-    sessions without dropping to the CLI.  Refuses to delete a session
-    that is currently active in this gateway process — those rows are
-    still being written to and removing them out from under the live
-    agent corrupts message ordering and trips FK constraints when the
-    next message append flushes.
+    from altas.cortex.config import CortexConfig
+
+    config = CortexConfig.load(hermes_home)
+    if not config.database_path.exists():
+        return None
+    from altas.cortex.runtime import open_cortex_store
+
+    store, _ = open_cortex_store(hermes_home, {})
+    return store
+
+
+def _reconcile_cortex_session_delete(
+    db,
+    session_ids: list[str] | tuple[str, ...],
+    *,
+    session: dict | None,
+    hermes_home: Path,
+) -> dict[str, int]:
+    """Tombstone Cortex lineage before its canonical transcript disappears.
+
+    The dedicated privacy primitive already removes every evidence/support edge
+    in one transaction. Running a row-id rewind first would create a redundant
+    second privacy transaction and an avoidable race boundary.
     """
-    target = params.get("session_id", "")
+    ordered_ids = tuple(
+        session_id
+        for session_id in dict.fromkeys(session_ids)
+        if isinstance(session_id, str) and session_id
+    )
+    if not ordered_ids:
+        return {"evidence": 0, "sessions": 0}
+    store = _cortex_store_for_session_delete(
+        session,
+        hermes_home=hermes_home,
+    )
+    if store is None:
+        return {"evidence": 0, "sessions": 0}
+
+    affected = 0
+    logical_roots: dict[str, str] = {}
+    for physical_id in ordered_ids:
+        lineage = store.session_lineage(physical_id)
+        if not lineage:
+            continue
+        logical_id = str(lineage.get("logical_conversation_id") or physical_id)
+        logical_roots.setdefault(logical_id, physical_id)
+    for physical_id in logical_roots.values():
+        affected += store.reconcile_session_delete(physical_id)
+
+    with store.connect() as connection:
+        for logical_id in logical_roots:
+            remaining = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM evidence_items e JOIN sessions s "
+                    "ON s.id=e.session_id AND s.brain_id=e.brain_id "
+                    "WHERE e.brain_id=? AND s.logical_conversation_id=? "
+                    "AND e.tombstoned_at IS NULL",
+                    (store.brain_id, logical_id),
+                ).fetchone()[0]
+            )
+            active_segments = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM sessions WHERE brain_id=? "
+                    "AND logical_conversation_id=? AND state!='deleted'",
+                    (store.brain_id, logical_id),
+                ).fetchone()[0]
+            )
+            if remaining or active_segments:
+                raise RuntimeError(
+                    "Cortex privacy reconciliation did not fully tombstone "
+                    f"logical session {logical_id}"
+                )
+    return {"evidence": affected, "sessions": len(ordered_ids)}
+
+
+def _delete_runtime_candidate(
+    db,
+    *,
+    targets: list[str] | tuple[str, ...],
+    runtime_id: str,
+) -> tuple[str, dict] | None:
+    """Find and detach an idle live runtime represented by ``targets``."""
+    target_ids = {str(target) for target in targets if target}
+    resolved_ids = set(target_ids)
+    for target in target_ids:
+        try:
+            resolved_ids.add(str(db.resolve_resume_session_id(target) or target))
+        except Exception:
+            pass
+    with _sessions_lock:
+        if runtime_id:
+            candidates = [(runtime_id, _sessions.get(runtime_id))]
+        else:
+            candidates = list(_sessions.items())
+        for sid, session in candidates:
+            if not session or session.get("_finalized"):
+                continue
+            keys = {
+                str(session.get("session_key") or ""),
+                _session_lookup_key(session, fallback=sid),
+            }
+            if keys.isdisjoint(resolved_ids):
+                if runtime_id:
+                    raise ValueError(
+                        "runtime_session_id does not own the requested stored session"
+                    )
+                continue
+            if session.get("running") or _session_pending_kind(sid):
+                raise RuntimeError(
+                    "session busy — interrupt the current turn before deleting"
+                )
+            popped = _sessions.pop(sid, None)
+            if popped is not session:
+                raise RuntimeError("session changed while deletion was being claimed")
+            session["_sid"] = sid
+            return sid, session
+    return None
+
+
+def _delete_session_rpc_with_db(
+    rid,
+    params: dict,
+    db,
+    *,
+    profile_home: str | Path | None = None,
+) -> dict:
+    """Privacy-delete a stored session without creating semantic work."""
+    target = str(params.get("session_id") or "").strip()
     if not target:
         return _err(rid, 4006, "session_id required")
-    db = _get_db()
-    if db is None:
-        return _db_unavailable_error(rid, code=5036)
-    # Block deletion of any session currently bound to a live TUI session
-    # in this process.  The picker hides the active session anyway, but a
-    # racing caller could still target it.  Snapshot via ``list(...)``
-    # because ``_sessions`` is mutated by concurrent RPCs on the thread
-    # pool — iterating the dict directly can raise ``RuntimeError:
-    # dictionary changed size during iteration``.  If even the snapshot
-    # raises, fail closed (refuse the delete) rather than fail open.
     try:
-        with _sessions_lock:
-            snapshot = list(_sessions.values())
+        resolver = getattr(db, "resolve_session_id", None)
+        resolved = resolver(target) if callable(resolver) else target
     except Exception as e:
-        return _err(rid, 5036, f"could not enumerate active sessions: {e}")
-    active = {s.get("session_key") for s in snapshot if s.get("session_key")}
-    if target in active:
-        return _err(rid, 4023, "cannot delete an active session")
-    sessions_dir = get_hermes_home() / "sessions"
-    try:
-        deleted = db.delete_session(target, sessions_dir=sessions_dir)
-    except Exception as e:
-        return _err(rid, 5036, f"delete failed: {e}")
-    if not deleted:
+        return _err(rid, 5036, f"could not resolve session: {e}")
+    if not resolved:
         return _err(rid, 4007, "session not found")
-    return _ok(rid, {"deleted": target})
+    target = str(resolved)
+    try:
+        closure_getter = getattr(db, "get_session_delete_closure", None)
+        if callable(closure_getter):
+            delete_ids = closure_getter([target])
+        else:
+            lineage_getter = getattr(db, "get_compression_lineage", None)
+            delete_ids = (
+                lineage_getter(target)
+                if callable(lineage_getter)
+                else [target]
+            )
+    except Exception as e:
+        return _err(rid, 5036, f"could not resolve session deletion lineage: {e}")
+    delete_ids = [
+        session_id
+        for session_id in dict.fromkeys(delete_ids or [])
+        if isinstance(session_id, str) and session_id
+    ]
+    if not delete_ids:
+        return _err(rid, 4007, "session not found")
+    runtime_id = str(params.get("runtime_session_id") or "").strip()
+    claimed: tuple[str, dict] | None = None
+    try:
+        with _session_resume_lock:
+            claimed = _delete_runtime_candidate(
+                db,
+                targets=delete_ids,
+                runtime_id=runtime_id,
+            )
+    except ValueError as e:
+        return _err(rid, 4091, str(e))
+    except RuntimeError as e:
+        return _err(rid, 4023, str(e))
+
+    active_session = claimed[1] if claimed is not None else None
+    home = Path(
+        profile_home
+        or (active_session or {}).get("profile_home")
+        or get_hermes_home()
+    ).expanduser()
+    reconciliation: dict[str, int] = {"evidence": 0, "sessions": 0}
+    reconciled = False
+    own_lease = (active_session or {}).get("active_session_lease")
+    ignore_lease_ids = (
+        [str(own_lease.lease_id)]
+        if own_lease is not None and getattr(own_lease, "lease_id", None)
+        else []
+    )
+    allowed_active_ids: set[str] = set()
+    if active_session is not None:
+        active_key = str(active_session.get("session_key") or "")
+        if active_key:
+            allowed_active_ids.add(active_key)
+            try:
+                allowed_active_ids.add(
+                    str(db.resolve_resume_session_id(active_key) or active_key)
+                )
+            except Exception:
+                pass
+    sessions_dir = home / "sessions"
+    try:
+        from hermes_cli.active_sessions import claim_session_deletion
+        from hermes_cli.session_deletion import session_activity_aliases
+
+        aliases = session_activity_aliases(db, delete_ids)
+        with claim_session_deletion(
+            delete_ids,
+            hermes_home=home,
+            active_aliases=aliases,
+            ignore_lease_ids=ignore_lease_ids,
+        ) as deletion:
+
+            def before_delete(exact_ids: tuple[str, ...]) -> None:
+                nonlocal reconciliation, reconciled
+                if exact_ids != tuple(delete_ids):
+                    raise RuntimeError(
+                        "session deletion scope changed before privacy reconciliation"
+                    )
+                reconciliation = _reconcile_cortex_session_delete(
+                    db,
+                    delete_ids,
+                    session=active_session,
+                    hermes_home=home,
+                )
+                deletion.seal(exact_ids)
+                reconciled = True
+
+            deleted = db.delete_sessions(
+                delete_ids,
+                sessions_dir=sessions_dir,
+                before_delete=before_delete,
+                exact_scope=True,
+                validate_related_scope=True,
+                require_ended=True,
+                allowed_active_ids=tuple(allowed_active_ids),
+            )
+    except Exception as e:
+        if type(e).__name__ in {
+            "ActiveSessionConflict",
+            "ActiveSessionDeleteConflict",
+        }:
+            if claimed is not None:
+                sid, session = claimed
+                with _sessions_lock:
+                    if sid not in _sessions:
+                        _sessions[sid] = session
+            return _err(rid, 4023, str(e))
+        if not reconciled and claimed is not None:
+            # No canonical transcript was removed. Restore an unmodified live
+            # runtime so a transient registry/Cortex/active-row conflict can retry.
+            sid, session = claimed
+            with _sessions_lock:
+                if sid not in _sessions:
+                    _sessions[sid] = session
+        elif reconciled and active_session is not None:
+            _teardown_session(
+                active_session,
+                end_reason="privacy_delete",
+                finalize=False,
+                checkpoint=False,
+            )
+        stage = "delete" if reconciled else "privacy reconciliation"
+        return _err(rid, 5036, f"{stage} failed: {e}")
+
+    if deleted != len(delete_ids):
+        if active_session is not None:
+            _teardown_session(
+                active_session,
+                end_reason="privacy_delete",
+                finalize=False,
+                checkpoint=False,
+            )
+        return _err(
+            rid,
+            5036,
+            "delete set changed after privacy reconciliation; retry required",
+        )
+    if active_session is not None:
+        _teardown_session(
+            active_session,
+            end_reason="privacy_delete",
+            finalize=False,
+            checkpoint=False,
+        )
+    return _ok(
+        rid,
+        {"deleted": target, "deleted_session_ids": delete_ids, "cortex": reconciliation},
+    )
+
+
+@method("session.delete")
+def _(rid, params: dict) -> dict:
+    """Route privacy deletion through the SessionDB that owns the profile."""
+    runtime_id = str(params.get("runtime_session_id") or "").strip()
+    with _sessions_lock:
+        runtime_session = _sessions.get(runtime_id) if runtime_id else None
+    profile_home = (runtime_session or {}).get("profile_home")
+    if not profile_home:
+        profile = str(params.get("profile") or "").strip() or None
+        resolved_home = _profile_home(profile)
+        profile_home = str(resolved_home) if resolved_home is not None else None
+    with _session_db({"profile_home": profile_home}) as db:
+        if db is None:
+            return _db_unavailable_error(rid, code=5036)
+        return _delete_session_rpc_with_db(
+            rid,
+            params,
+            db,
+            profile_home=profile_home,
+        )
 
 
 @method("session.title")
@@ -8004,14 +8815,139 @@ def _(rid, params: dict) -> dict:
 
 @method("session.close")
 def _(rid, params: dict) -> dict:
-    sid = params.get("session_id", "")
+    """End a logical conversation and release its live runtime.
+
+    The historical/default mode remains best-effort so terminal shutdown and
+    existing callers retain their force-close semantics.  Interactive surfaces
+    that must never finalize a half-written turn pass ``require_idle=true``;
+    that mode atomically refuses running, queued, prompting, or still-building
+    sessions and leaves the runtime untouched for a safe retry.
+    """
+    sid = str(params.get("session_id") or "")
+    require_idle = is_truthy_value(params.get("require_idle", False))
     # Serialize against the WS-orphan reaper (which also pops under
     # _session_resume_lock) so a disconnect-reap and an explicit close can't
-    # both tear the same session down. _close_session_by_id is the single
-    # idempotent teardown path (pop + _teardown_session) and returns False
-    # when the session is already gone.
+    # both tear the same session down. Both close modes claim by removing the
+    # registry entry under _sessions_lock, then share _teardown_session; a
+    # repeat close therefore reports closed=False without a second teardown.
     with _session_resume_lock:
-        return _ok(rid, {"closed": _close_session_by_id(sid, end_reason="tui_close")})
+        if require_idle:
+            closed, busy_reason = _close_idle_session_by_id(
+                sid,
+                end_reason="tui_close",
+                finalize=True,
+            )
+            if busy_reason:
+                return _err(
+                    rid,
+                    4023,
+                    f"session is not idle: {busy_reason}; stop it and retry",
+                )
+            return _ok(rid, {"closed": closed})
+        return _ok(
+            rid,
+            {
+                "closed": _close_session_by_id(sid, end_reason="tui_close")
+            },
+        )
+
+
+@method("session.release")
+def _(rid, params: dict) -> dict:
+    """Release a live runtime without ending its logical conversation."""
+    sid = str(params.get("session_id") or "")
+    with _session_resume_lock:
+        with _sessions_lock:
+            session = _sessions.get(sid)
+            busy = bool(
+                session
+                and (session.get("running") or _session_pending_kind(sid))
+            )
+        if busy:
+            return _err(
+                rid,
+                4023,
+                "session busy — interrupt the current turn before releasing",
+            )
+        released = _close_session_by_id(
+            sid,
+            end_reason="tui_release",
+            finalize=False,
+            checkpoint=False,
+        )
+    return _ok(rid, {"released": released})
+
+
+def _bind_branch_agent_memory(agent, *, new_session_id: str, parent_session_id: str) -> None:
+    """Bind a newly built branch agent without ending its live source.
+
+    The child is intentionally constructed against the parent session id, then
+    switched before publication. Cortex therefore creates the child with its
+    physical parent and a fresh logical-conversation id; a plain initialize on
+    the child id would insert an unparented row that its idempotent switch hook
+    cannot later rewrite. ``on_session_switch`` is lineage-only and never
+    admits session-distillation work.
+    """
+    manager = getattr(agent, "_memory_manager", None)
+    if manager is not None:
+        manager.on_session_switch(
+            new_session_id,
+            parent_session_id=parent_session_id,
+            reset=True,
+            reason="branch",
+        )
+    agent.session_id = new_session_id
+    try:
+        agent._parent_session_id = parent_session_id
+    except Exception:
+        pass
+
+
+def _discard_unpublished_branch(
+    *,
+    parent_session_id: str,
+    new_session_id: str,
+    hermes_home: Path,
+    db=None,
+    delete_created_row: bool,
+) -> bool:
+    """Compensate a branch that failed before it became user-visible."""
+    try:
+        from altas.cortex.lifecycle import discard_detached_session_branch
+
+        cortex_discarded = discard_detached_session_branch(
+            hermes_home,
+            parent_session_id,
+            new_session_id=new_session_id,
+        )
+    except Exception:
+        logger.exception("failed to discard unpublished Cortex branch %s", new_session_id)
+        return False
+    if not cortex_discarded:
+        logger.error("refused to discard non-empty Cortex branch %s", new_session_id)
+        return False
+    if db is None:
+        return True
+    try:
+        row = db.get_session(new_session_id)
+        if row is None:
+            return True
+        if delete_created_row:
+            return bool(
+                db.delete_session(
+                    new_session_id,
+                    sessions_dir=hermes_home / "sessions",
+                )
+            )
+        return bool(
+            db.delete_session_if_empty(
+                new_session_id,
+                sessions_dir=hermes_home / "sessions",
+            )
+        )
+    except Exception:
+        logger.exception("failed to discard unpublished SessionDB branch %s", new_session_id)
+        return False
 
 
 @method("session.branch")
@@ -8031,7 +8967,10 @@ def _(rid, params: dict) -> dict:
     new_sid = uuid.uuid4().hex[:8]
     source = _session_source(session)
     lease, limit_message = _claim_active_session_slot(
-        new_key, live_session_id=new_sid, surface=source
+        new_key,
+        live_session_id=new_sid,
+        surface=source,
+        profile_home=session.get("profile_home"),
     )
     if limit_message is not None:
         return _err(rid, 4090, limit_message)
@@ -8069,18 +9008,37 @@ def _(rid, params: dict) -> dict:
     except Exception as e:
         if lease is not None:
             lease.release()
+        compensated = _discard_unpublished_branch(
+            parent_session_id=old_key,
+            new_session_id=new_key,
+            hermes_home=Path(session.get("profile_home") or get_hermes_home()),
+            db=db,
+            delete_created_row=True,
+        )
+        if not compensated:
+            logger.error("branch storage compensation incomplete for %s", new_key)
         return _err(rid, 5008, f"branch failed: {e}")
+    agent = None
     try:
         tokens = _set_session_context(new_key)
         try:
+            # Bootstrap the unpublished child on the parent identity so its
+            # provider can create branch lineage via a non-finalizing switch.
+            # The source agent/provider is never rebound or finalized.
             agent = _make_agent(
                 new_sid,
                 new_key,
-                session_id=new_key,
+                session_id=old_key,
+                parent_session_id=old_key,
                 platform_override=source,
             )
         finally:
             _clear_session_context(tokens)
+        _bind_branch_agent_memory(
+            agent,
+            new_session_id=new_key,
+            parent_session_id=old_key,
+        )
         _init_session(
             new_sid,
             new_key,
@@ -8094,6 +9052,31 @@ def _(rid, params: dict) -> dict:
     except Exception as e:
         if lease is not None:
             lease.release()
+        closed_runtime = False
+        with _session_resume_lock:
+            if new_sid in _sessions:
+                closed_runtime = _close_session_by_id(
+                    new_sid,
+                    end_reason="branch_publish_failed",
+                    finalize=False,
+                    checkpoint=False,
+                )
+        if agent is not None:
+            try:
+                agent._end_session_on_close = False
+            except Exception:
+                pass
+            if not closed_runtime:
+                _close_ephemeral_agent(agent)
+        compensated = _discard_unpublished_branch(
+            parent_session_id=old_key,
+            new_session_id=new_key,
+            hermes_home=Path(session.get("profile_home") or get_hermes_home()),
+            db=db,
+            delete_created_row=True,
+        )
+        if not compensated:
+            logger.error("branch failure compensation incomplete for %s", new_key)
         return _err(rid, 5000, f"agent init failed on branch: {e}")
     return _ok(rid, {"session_id": new_sid, "title": title, "parent": old_key})
 
@@ -8408,54 +9391,88 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     sid, text = params.get("session_id", ""), params.get("text", "")
     truncate_user_ordinal = params.get("truncate_before_user_ordinal")
-    session, err = _sess_nowait(params, rid)
-    if err:
-        return err
-    # Re-bind to the current client transport for this request. This keeps
-    # streaming events on the active websocket even if an earlier disconnect
-    # or fallback moved the session transport to stdio.
-    if (t := current_transport()) is not None:
-        session["transport"] = t
-    with session["history_lock"]:
-        if session.get("running"):
-            # Don't reject a mid-turn prompt — queue it (and, by default,
-            # interrupt the live turn) so it runs as the next turn. See
-            # _handle_busy_submit for why the old "session busy" rejection
-            # dropped messages when teardown outlived the client's retry window.
-            return _handle_busy_submit(rid, sid, session, text, t or session.get("transport"))
-        # A watch session's run lives in the PARENT turn, so its own running
-        # flag is False — without this, typing mid-run builds a second agent
-        # racing the in-flight child on the same stored session (interleaved
-        # transcript, stale fork). After the run completes, submitting is fine:
-        # the upgrade resumes the child's transcript as a normal conversation.
-        if session.get("lazy") and _child_run_active(str(session.get("session_key") or "")):
-            return _err(rid, 4009, "subagent still running — wait for it to finish")
-        if truncate_user_ordinal is not None:
-            try:
-                ordinal = int(truncate_user_ordinal)
-            except (TypeError, ValueError):
-                return _err(rid, 4004, "truncate_before_user_ordinal must be an integer")
-            history = session.get("history", [])
-            user_indices = [i for i, m in enumerate(history) if m.get("role") == "user"]
-            # Reject out-of-range ordinals on BOTH ends. A negative value would
-            # otherwise sail past the upper-bound check and hit Python's negative
-            # indexing below (user_indices[-1] -> the LAST user turn), silently
-            # truncating history to everything before it and persisting that loss
-            # via replace_messages — an unrecoverable overwrite of the session DB.
-            if ordinal < 0 or ordinal >= len(user_indices):
-                return _err(rid, 4018, "target user message is no longer in session history")
-            truncated = history[: user_indices[ordinal]]
-            session["history"] = truncated
-            session["history_version"] = int(session.get("history_version", 0)) + 1
-            if (db := _get_db()) is not None:
+    # Lookup and turn ownership are one atomic lifecycle claim. Privacy delete
+    # uses this same barrier before it removes a runtime: either this method sets
+    # ``running`` first (so deletion refuses it), or deletion removes the mapping
+    # first (so this method returns not-found). A stale session dict can never
+    # recreate SessionDB/Cortex state after deletion.
+    with _session_resume_lock:
+        with _sessions_lock:
+            session = _sessions.get(sid)
+        if session is None or session.get("_finalized"):
+            return _err(rid, 4001, "session not found")
+        # Re-bind to the current client transport for this request. This keeps
+        # streaming events on the active websocket even if an earlier disconnect
+        # or fallback moved the session transport to stdio.
+        t = current_transport()
+        if t is not None:
+            session["transport"] = t
+        with session["history_lock"]:
+            if session.get("running"):
+                # Don't reject a mid-turn prompt — queue it (and, by default,
+                # interrupt the live turn) so it runs as the next turn. See
+                # _handle_busy_submit for why the old "session busy" rejection
+                # dropped messages when teardown outlived the client's retry window.
+                return _handle_busy_submit(
+                    rid,
+                    sid,
+                    session,
+                    text,
+                    t or session.get("transport"),
+                )
+            # A watch session's run lives in the PARENT turn, so its own running
+            # flag is False — without this, typing mid-run builds a second agent
+            # racing the in-flight child on the same stored session (interleaved
+            # transcript, stale fork). After the run completes, submitting is fine:
+            # the upgrade resumes the child's transcript as a normal conversation.
+            if session.get("lazy") and _child_run_active(
+                str(session.get("session_key") or "")
+            ):
+                return _err(
+                    rid, 4009, "subagent still running — wait for it to finish"
+                )
+            if truncate_user_ordinal is not None:
                 try:
-                    db.replace_messages(session["session_key"], truncated)
-                except Exception as exc:
-                    print(f"[tui_gateway] prompt.submit: replace_messages failed: {exc}", file=sys.stderr)
-        session["running"] = True
-        session["_turn_cancel_requested"] = False
-        session["last_active"] = time.time()
-        _start_inflight_turn(session, text)
+                    ordinal = int(truncate_user_ordinal)
+                except (TypeError, ValueError):
+                    return _err(
+                        rid,
+                        4004,
+                        "truncate_before_user_ordinal must be an integer",
+                    )
+                history = session.get("history", [])
+                user_indices = [
+                    i for i, m in enumerate(history) if m.get("role") == "user"
+                ]
+                # Reject out-of-range ordinals on BOTH ends. A negative value would
+                # otherwise sail past the upper-bound check and hit Python's negative
+                # indexing below (user_indices[-1] -> the LAST user turn), silently
+                # truncating history to everything before it and persisting that loss
+                # via replace_messages — an unrecoverable overwrite of the session DB.
+                if ordinal < 0 or ordinal >= len(user_indices):
+                    return _err(
+                        rid,
+                        4018,
+                        "target user message is no longer in session history",
+                    )
+                truncated = history[: user_indices[ordinal]]
+                session["history"] = truncated
+                session["history_version"] = (
+                    int(session.get("history_version", 0)) + 1
+                )
+                if (db := _get_db()) is not None:
+                    try:
+                        db.replace_messages(session["session_key"], truncated)
+                    except Exception as exc:
+                        print(
+                            "[tui_gateway] prompt.submit: replace_messages failed: "
+                            f"{exc}",
+                            file=sys.stderr,
+                        )
+            session["running"] = True
+            session["_turn_cancel_requested"] = False
+            session["last_active"] = time.time()
+            _start_inflight_turn(session, text)
 
     # Persist the DB row lazily, now that the user has actually sent a message.
     _ensure_session_db_row(session)
@@ -8722,6 +9739,17 @@ def _notification_poller_loop(
         if not text:
             continue
 
+        # An idle-required semantic close claims the record under this same
+        # lock before removing it from _sessions. Preserve the completion for a
+        # future resume instead of starting a turn through a stale dict.
+        with session["history_lock"]:
+            close_claimed = bool(
+                session.get("_close_claimed") or session.get("_finalized")
+            )
+        if close_claimed:
+            process_registry.completion_queue.put(evt)
+            break
+
         # Only emit the same notification identity to TUI once — re-queued
         # completions get re-emitted every 0.5s otherwise when session is busy,
         # while distinct watch_match events from the same process must remain
@@ -8733,7 +9761,11 @@ def _notification_poller_loop(
 
         _requeued = False
         with session["history_lock"]:
-            if session.get("running"):
+            if (
+                session.get("running")
+                or session.get("_close_claimed")
+                or session.get("_finalized")
+            ):
                 process_registry.completion_queue.put(evt)
                 _requeued = True
             else:
@@ -8757,6 +9789,12 @@ def _notification_poller_loop(
             )
             with session["history_lock"]:
                 session["running"] = False
+
+    # A claimed semantic close deliberately leaves durable notifications for a
+    # future session owner. Draining them here would recreate work after the
+    # close's atomic idle check.
+    if session.get("_close_claimed"):
+        return
 
     # Drain any remaining events after stop signal (process all pending
     # before exiting so nothing is lost on shutdown). Events owned by other
@@ -8792,7 +9830,11 @@ def _notification_poller_loop(
             _emitted.add(_dedup_key)
 
         with session["history_lock"]:
-            if session.get("running"):
+            if (
+                session.get("running")
+                or session.get("_close_claimed")
+                or session.get("_finalized")
+            ):
                 process_registry.completion_queue.put(evt)
                 break
             session["running"] = True
@@ -9314,9 +10356,13 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
         # we check that guard before re-firing.
         if goal_followup:
             with session["history_lock"]:
-                if session.get("running"):
+                if (
+                    session.get("running")
+                    or session.get("_close_claimed")
+                    or session.get("_finalized")
+                ):
                     # User already sent something — their turn wins,
-                    # the judge will re-run on the next turn anyway.
+                    # or a semantic close owns the terminal boundary.
                     return
                 session["running"] = True
             try:
@@ -9347,7 +10393,11 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 owns_event=lambda e: _session_owns_notification_event(sid, session, e),
             ):
                 with session["history_lock"]:
-                    if session.get("running"):
+                    if (
+                        session.get("running")
+                        or session.get("_close_claimed")
+                        or session.get("_finalized")
+                    ):
                         process_registry.completion_queue.put(_evt)
                         break
                     session["running"] = True
@@ -10000,12 +11050,14 @@ def _(rid, params: dict) -> dict:
 
     def run():
         session_tokens = _set_session_context(task_id, cwd=_session_cwd(session))
+        background_agent = None
         try:
             from run_agent import AIAgent
 
-            result = AIAgent(
+            background_agent = AIAgent(
                 **_background_agent_kwargs(session["agent"], task_id)
-            ).run_conversation(
+            )
+            result = background_agent.run_conversation(
                 user_message=text,
                 task_id=task_id,
             )
@@ -10028,6 +11080,7 @@ def _(rid, params: dict) -> dict:
                 {"task_id": task_id, "text": f"error: {e}"},
             )
         finally:
+            _close_ephemeral_agent(background_agent)
             _clear_session_context(session_tokens)
 
     threading.Thread(target=run, daemon=True).start()
@@ -12148,6 +13201,7 @@ def _(rid, params: dict) -> dict:
                         parent_session_id="",
                         reset=False,
                         rewound=True,
+                        rewound_row_ids=result.get("rewound_message_ids", []),
                     )
                 except Exception:
                     pass

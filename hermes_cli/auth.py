@@ -6224,6 +6224,34 @@ def get_api_key_provider_status(provider_id: str) -> Dict[str, Any]:
     }
 
 
+def get_openrouter_auth_status() -> Dict[str, Any]:
+    """Return structural auth status for the built-in OpenRouter aggregator.
+
+    OpenRouter is intentionally absent from ``PROVIDER_REGISTRY`` because it
+    has dedicated runtime routing semantics.  Status consumers still need to
+    recognize both its preferred dotenv key and credential-pool entries, so
+    resolve those through the same API-key helper used by registered providers.
+    """
+    pconfig = ProviderConfig(
+        id="openrouter",
+        name="OpenRouter",
+        auth_type="api_key",
+        inference_base_url=OPENROUTER_BASE_URL,
+        api_key_env_vars=("OPENROUTER_API_KEY",),
+        base_url_env_var="OPENROUTER_BASE_URL",
+    )
+    api_key, key_source = _resolve_api_key_provider_secret("openrouter", pconfig)
+    base_url = os.getenv(pconfig.base_url_env_var, "").strip() or pconfig.inference_base_url
+    return {
+        "configured": bool(api_key),
+        "provider": "openrouter",
+        "name": pconfig.name,
+        "key_source": key_source,
+        "base_url": base_url,
+        "logged_in": bool(api_key),
+    }
+
+
 def get_external_process_provider_status(provider_id: str) -> Dict[str, Any]:
     """Status snapshot for providers that run a local subprocess."""
     pconfig = PROVIDER_REGISTRY.get(provider_id)
@@ -6275,6 +6303,8 @@ def get_auth_status(provider_id: Optional[str] = None) -> Dict[str, Any]:
         return get_external_process_provider_status(target)
     if target == "azure-foundry":
         return _get_azure_foundry_auth_status()
+    if target == "openrouter":
+        return get_openrouter_auth_status()
     # API-key providers
     pconfig = PROVIDER_REGISTRY.get(target)
     if pconfig and pconfig.auth_type == "api_key":

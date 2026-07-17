@@ -7,6 +7,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import {
   getAuxiliaryModels,
+  getCortexMemoryModelOptions,
   getGlobalModelInfo,
   getGlobalModelOptions,
   getMoaModels,
@@ -18,6 +19,7 @@ import {
 } from '@/hermes'
 import type {
   AuxiliaryModelsResponse,
+  CortexMemoryModelOptionsResponse,
   MoaConfigResponse,
   MoaModelSlot,
   ModelOptionProvider,
@@ -33,6 +35,7 @@ import { invalidateHermesConfig, setHermesConfigCache, useHermesConfigRecord } f
 import { useOnProfileSwitch } from '../hooks/use-on-profile-switch'
 
 import { CONTROL_TEXT } from './constants'
+import { selectableCortexMemoryProviders } from './cortex-memory-options'
 import { getNested, setNested } from './helpers'
 import { ListRow, Pill, SectionHeading } from './primitives'
 
@@ -119,8 +122,14 @@ const AUX_TASKS: readonly AuxTaskMeta[] = [
   { key: 'approval' },
   { key: 'mcp' },
   { key: 'title_generation' },
-  { key: 'curator' }
+  { key: 'curator' },
+  { key: 'cortex_triage' },
+  { key: 'cortex_reasoning' }
 ]
+
+const CORTEX_AUX_TASKS = new Set(['cortex_triage', 'cortex_reasoning'])
+
+export const isCortexAuxTask = (task: string): boolean => CORTEX_AUX_TASKS.has(task)
 
 const NO_PROVIDERS: readonly ModelOptionProvider[] = [{ name: '—', slug: '', models: [] }]
 
@@ -132,6 +141,7 @@ export const withActive = (models: readonly string[], active: string): readonly 
 
 interface StaleAuxWarningProps {
   applying: boolean
+  actionLabel: string
   onReset: () => void
   slots: readonly StaleAuxAssignment[]
   taskLabel: (key: string) => string
@@ -141,7 +151,7 @@ interface StaleAuxWarningProps {
 // current main. Surfaces the silent credit-burn path (e.g. aux pinned to a
 // $0-balance provider after switching main away from it) and offers the
 // existing one-click reset rather than auto-clearing legitimate pins.
-function StaleAuxWarning({ applying, onReset, slots, taskLabel }: StaleAuxWarningProps) {
+function StaleAuxWarning({ actionLabel, applying, onReset, slots, taskLabel }: StaleAuxWarningProps) {
   if (!slots.length) {
     return null
   }
@@ -151,14 +161,14 @@ function StaleAuxWarning({ applying, onReset, slots, taskLabel }: StaleAuxWarnin
   const names = slots.map(slot => taskLabel(slot.task)).join(', ')
 
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+    <div className="flex flex-wrap items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
       <AlertTriangle className="size-3.5 shrink-0" />
       <span className="grow">
         {slots.length} auxiliary task{slots.length === 1 ? '' : 's'} ({names}) still run on{' '}
         <span className="font-mono">{allSameProvider ? provider : 'other providers'}</span>, not your main model.
       </span>
       <Button disabled={applying} onClick={onReset} size="sm" variant="textStrong">
-        Reset all to main
+        {actionLabel}
       </Button>
     </div>
   )
@@ -179,6 +189,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
   const [selectedProvider, setSelectedProvider] = useState('')
   const [selectedModel, setSelectedModel] = useState('')
   const [auxiliary, setAuxiliary] = useState<AuxiliaryModelsResponse | null>(null)
+  const [cortexModels, setCortexModels] = useState<CortexMemoryModelOptionsResponse | null>(null)
   const [moa, setMoa] = useState<MoaConfigResponse | null>(null)
   const [selectedMoaPreset, setSelectedMoaPreset] = useState('')
   const [newMoaPresetName, setNewMoaPresetName] = useState('')
@@ -208,10 +219,11 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
     setError('')
 
     try {
-      const [modelInfo, modelOptions, auxiliaryModels, moaModels] = await Promise.all([
+      const [modelInfo, modelOptions, auxiliaryModels, cortexModelOptions, moaModels] = await Promise.all([
         getGlobalModelInfo(),
         getGlobalModelOptions(),
         getAuxiliaryModels(),
+        getCortexMemoryModelOptions(),
         getMoaModels().catch(() => null)
       ])
 
@@ -224,6 +236,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
       setSelectedProvider(prev => prev || modelInfo.provider)
       setSelectedModel(prev => prev || modelInfo.model)
       setAuxiliary(auxiliaryModels)
+      setCortexModels(cortexModelOptions)
       setMoa(moaModels)
 
       if (moaModels) {
@@ -257,6 +270,18 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
 
   const providerOptions = providers.length ? providers : NO_PROVIDERS
 
+  // The memory catalog intentionally keeps unauthenticated rows visible so
+  // onboarding can offer provider setup. Settings is an assignment surface:
+  // only authenticated rows with explicitly verified structured-output models
+  // belong in its selectors. Re-filtering here keeps stale/older responses from
+  // re-enabling a model the backend has marked unavailable.
+  const selectableCortexProviders = useMemo<ModelOptionProvider[]>(
+    () => selectableCortexMemoryProviders(cortexModels),
+    [cortexModels]
+  )
+
+  const cortexProviderOptions = selectableCortexProviders.length ? selectableCortexProviders : NO_PROVIDERS
+
   // MoA reference/aggregator slots must never be the moa virtual provider —
   // that would create a recursive MoA tree (the backend rejects it on save).
   // Hide it from the slot selectors so it isn't offered as a dead choice.
@@ -281,8 +306,11 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
   }, [selectedProvider])
 
   const auxDraftProviderModels = useMemo(
-    () => providers.find(provider => provider.slug === auxDraft.provider)?.models ?? [],
-    [auxDraft.provider, providers]
+    () =>
+      (isCortexAuxTask(editingAuxTask ?? '') ? selectableCortexProviders : providers)?.find(
+        provider => provider.slug === auxDraft.provider
+      )?.models ?? [],
+    [auxDraft.provider, editingAuxTask, providers, selectableCortexProviders]
   )
 
   const modelsForProvider = useCallback(
@@ -361,6 +389,10 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
 
     return auxiliary.tasks
       .filter(entry => {
+        if (isCortexAuxTask(entry.task)) {
+          return false
+        }
+
         const p = (entry.provider ?? '').toLowerCase()
 
         return p && p !== 'auto' && p !== mainProvider
@@ -409,7 +441,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
         notifyError(err, m.defaultsFailed)
       }
     },
-    [config, m.defaultsFailed]
+    [config, m.defaultsFailed, setConfig]
   )
 
   // Paste an API key for the selected `api_key` provider, persist it, then
@@ -500,7 +532,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
       const provider = result.provider || selectedProvider
       const model = result.model || selectedModel
       setMainModel({ provider, model })
-      setSwitchStaleAux(result.stale_aux ?? [])
+      setSwitchStaleAux((result.stale_aux ?? []).filter(entry => !isCortexAuxTask(entry.task)))
       onMainModelChanged?.(provider, model)
       await refresh()
     } catch (err) {
@@ -557,6 +589,35 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
     (task: string) => {
       const current = auxiliary?.tasks.find(entry => entry.task === task)
 
+      if (isCortexAuxTask(task)) {
+        const currentProvider = selectableCortexProviders.find(row => row.slug === current?.provider)
+
+        const currentIsSelectable = Boolean(current?.model && currentProvider?.models?.includes(current.model))
+
+        const recommendedProvider = selectableCortexProviders.find(
+          row =>
+            row.slug === cortexModels?.recommended.provider &&
+            (row.models ?? []).includes(cortexModels?.recommended.model ?? '')
+        )
+
+        const fallbackProvider = recommendedProvider?.slug || selectableCortexProviders[0]?.slug || ''
+
+        const provider = currentIsSelectable ? current?.provider || '' : fallbackProvider
+
+        const fallbackModel =
+          (recommendedProvider?.slug === provider ? cortexModels?.recommended.model : '') ||
+          selectableCortexProviders.find(row => row.slug === provider)?.models?.[0] ||
+          ''
+
+        setAuxDraft({
+          provider,
+          model: currentIsSelectable ? current?.model || '' : fallbackModel
+        })
+        setEditingAuxTask(task)
+
+        return
+      }
+
       const initialProvider =
         current?.provider && current.provider !== 'auto' ? current.provider : (mainModel?.provider ?? '')
 
@@ -564,7 +625,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
       setAuxDraft({ provider: initialProvider, model: initialModel })
       setEditingAuxTask(task)
     },
-    [auxiliary, mainModel]
+    [auxiliary, cortexModels, mainModel, selectableCortexProviders]
   )
 
   const resetAuxiliaryModels = useCallback(async () => {
@@ -713,6 +774,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
         {switchStaleAux.length > 0 && (
           <div className="mt-2">
             <StaleAuxWarning
+              actionLabel={m.resetHelpersToMain}
               applying={applying}
               onReset={() => void resetAuxiliaryModels()}
               slots={switchStaleAux}
@@ -731,13 +793,16 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
             size="sm"
             variant="textStrong"
           >
-            {m.resetAllToMain}
+            {m.resetHelpersToMain}
           </Button>
         </div>
-        <p className="mb-2 text-xs text-muted-foreground">{m.auxiliaryDesc}</p>
+        <p className="mb-2 text-xs text-muted-foreground">
+          {m.auxiliaryDesc} {m.cortexDedicatedNote}
+        </p>
         {switchStaleAux.length === 0 && persistentStaleAux.length > 0 && (
           <div className="mb-2.5">
             <StaleAuxWarning
+              actionLabel={m.resetHelpersToMain}
               applying={applying}
               onReset={() => void resetAuxiliaryModels()}
               slots={persistentStaleAux}
@@ -751,22 +816,26 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
             const current = auxiliary?.tasks.find(entry => entry.task === meta.key)
             const isAuto = !current || !current.provider || current.provider === 'auto'
             const isEditing = editingAuxTask === meta.key
+            const isCortex = isCortexAuxTask(meta.key)
+            const editProviderOptions = isCortex ? cortexProviderOptions : providerOptions
 
             return (
               <ListRow
                 action={
                   !isEditing && (
                     <div className="flex shrink-0 items-center gap-1.5">
+                      {!isCortex && (
+                        <Button
+                          disabled={!mainModel || applying}
+                          onClick={() => void setAuxiliaryToMain(meta.key)}
+                          size="sm"
+                          variant="text"
+                        >
+                          {m.setToMain}
+                        </Button>
+                      )}
                       <Button
-                        disabled={!mainModel || applying}
-                        onClick={() => void setAuxiliaryToMain(meta.key)}
-                        size="sm"
-                        variant="text"
-                      >
-                        {m.setToMain}
-                      </Button>
-                      <Button
-                        disabled={!providers.length || applying}
+                        disabled={applying || (isCortex ? selectableCortexProviders.length === 0 : !providers.length)}
                         onClick={() => beginAuxiliaryEdit(meta.key)}
                         size="sm"
                         variant="textStrong"
@@ -787,7 +856,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
                           <SelectValue placeholder={m.provider} />
                         </SelectTrigger>
                         <SelectContent>
-                          {providerOptions.map(provider => (
+                          {editProviderOptions.map(provider => (
                             <SelectItem key={provider.slug || 'none'} value={provider.slug || 'none'}>
                               {provider.name}
                             </SelectItem>
@@ -802,11 +871,13 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
                           <SelectValue placeholder={m.model} />
                         </SelectTrigger>
                         <SelectContent>
-                          {withActive(auxDraftProviderModels, auxDraft.model).map(model => (
-                            <SelectItem key={model} value={model}>
-                              {model}
-                            </SelectItem>
-                          ))}
+                          {(isCortex ? auxDraftProviderModels : withActive(auxDraftProviderModels, auxDraft.model)).map(
+                            model => (
+                              <SelectItem key={model} value={model}>
+                                {model}
+                              </SelectItem>
+                            )
+                          )}
                         </SelectContent>
                       </Select>
                       <Button

@@ -52,16 +52,17 @@ import {
   CRON_ROUTE,
   MESSAGING_ROUTE,
   PROFILES_ROUTE,
-  sessionRoute,
   SETTINGS_ROUTE,
   SKILLS_ROUTE
 } from '../routes'
 
 export interface KeybindRuntimeDeps {
+  /** Open a stored chat through the controller's destination race guard. */
+  openStoredSession: (sessionId: string) => boolean
   /** Open/close the command center overlay (sessions / system / usage). */
   toggleCommandCenter: () => void
-  /** Drop to a fresh new-session draft. */
-  startFreshSession: () => void
+  /** Finalize the current session, then drop to a fresh draft. */
+  startFreshSession: () => Promise<boolean>
   /** Pin/unpin the active session. */
   toggleSelectedPin: () => void
 }
@@ -87,7 +88,7 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
 
   const goToSession = (sessionId: null | string) => {
     if (sessionId) {
-      navigate(sessionRoute(sessionId))
+      deps.openStoredSession(sessionId)
     }
   }
 
@@ -135,8 +136,14 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
       // target the current live profile, not a stale per-profile quick-create
       // selection from a prior action.
       $newChatProfile.set(null)
-      deps.startFreshSession()
-      window.dispatchEvent(new CustomEvent('hermes:new-session-shortcut'))
+      void deps
+        .startFreshSession()
+        .then(started => {
+          if (started) {
+            window.dispatchEvent(new CustomEvent('hermes:new-session-shortcut'))
+          }
+        })
+        .catch(() => undefined)
     },
     'session.newWindow': () => void openNewSessionInNewWindow(),
     'session.next': () => stepSession(1),

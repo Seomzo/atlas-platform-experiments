@@ -37,6 +37,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
+from agent.memory_manager import MemoryDurabilityError
 from agent.model_metadata import estimate_request_tokens_rough
 
 logger = logging.getLogger(__name__)
@@ -471,6 +472,15 @@ def compress_context(
     # thread/compact mechanism. Behavior is controlled by
     # ``compression.codex_app_server_auto`` (native|hermes|off).
     if getattr(agent, "api_mode", None) == "codex_app_server":
+        # Even though Codex owns the actual compaction, first-party memory must
+        # durably capture the pre-compaction transcript before the thread is
+        # compacted. Codex cannot currently accept the returned preservation
+        # note, but evidence durability is still guaranteed.
+        memory_manager = getattr(agent, "_memory_manager", None)
+        if memory_manager:
+            # A durable provider failure must stop before ``thread/compact``;
+            # swallowing it here would let Codex discard the only live copy.
+            memory_manager.on_pre_compress(messages)
         return _compress_context_via_codex_app_server(
             agent,
             messages,
@@ -629,14 +639,28 @@ def compress_context(
                 logger.debug("compression lock release failed: %s", _rel_err)
 
     # Notify external memory provider before compression discards context
-    if agent._memory_manager:
+    preservation_context = ""
+    memory_manager = getattr(agent, "_memory_manager", None)
+    if memory_manager:
         try:
-            agent._memory_manager.on_pre_compress(messages)
-        except Exception:
-            pass
+            preservation_context = (
+                memory_manager.on_pre_compress(messages) or ""
+            )[:8_000]
+        except BaseException:
+            # The session lock was acquired before the durability barrier.
+            # Release it and propagate so no compressor, DB rewrite, or
+            # session rotation can run after a failed required capture.
+            _release_lock()
+            raise
 
     try:
-        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force)
+        compressed = agent.context_compressor.compress(
+            messages,
+            current_tokens=approx_tokens,
+            focus_topic=focus_topic,
+            force=force,
+            preservation_context=preservation_context,
+        )
     except TypeError:
         # Plugin context engine with strict signature that doesn't accept
         # focus_topic / force — fall back to calling without them.
@@ -709,6 +733,24 @@ def compress_context(
         new_system_prompt = agent._build_system_prompt(system_message)
         agent._cached_system_prompt = new_system_prompt
 
+        # A session DB is optional. In no-DB mode there are no rows to guard,
+        # but the in-place provider boundary still has to run before the
+        # caller adopts the compressed transcript.
+        if in_place and not agent._session_db and memory_manager:
+            try:
+                memory_manager.on_session_switch(
+                    agent.session_id or "",
+                    parent_session_id=agent.session_id or "",
+                    reset=False,
+                    reason="compression",
+                )
+            except MemoryDurabilityError:
+                raise
+            except Exception as _me_err:
+                logger.debug(
+                    "memory manager on_session_switch (compression): %s", _me_err
+                )
+
         if agent._session_db:
             try:
                 # Trigger memory extraction on the current session before the
@@ -718,6 +760,27 @@ def compress_context(
                 agent.commit_memory_session(messages)
 
                 if in_place:
+                    # In-place compaction keeps the same durable identity, but
+                    # providers still use this boundary to invalidate
+                    # transcript-derived buffers. Preserve the historical
+                    # checkpoint-before-switch order while running the durable
+                    # rebind barrier before archiving any live DB rows.
+                    if memory_manager:
+                        try:
+                            memory_manager.on_session_switch(
+                                agent.session_id or "",
+                                parent_session_id=agent.session_id or "",
+                                reset=False,
+                                reason="compression",
+                            )
+                        except MemoryDurabilityError:
+                            raise
+                        except Exception as _me_err:
+                            logger.debug(
+                                "memory manager on_session_switch "
+                                "(compression): %s",
+                                _me_err,
+                            )
                     # ── In-place compaction: keep the same session_id ──────────
                     # No end_session, no new row, no parent_session_id, no title
                     # renumber, no contextvar/env/logging re-sync. The session's
@@ -758,9 +821,109 @@ def compress_context(
                         pass  # best-effort — don't block compression on a flush error
                     # Propagate title to the new session with auto-numbering
                     old_title = agent._session_db.get_session_title(agent.session_id)
-                    agent._session_db.end_session(agent.session_id, "compression")
                     old_session_id = agent.session_id
-                    agent.session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+                    new_session_id = (
+                        f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_"
+                        f"{uuid.uuid4().hex[:6]}"
+                    )
+                    agent._session_db.end_session(old_session_id, "compression")
+                    agent._session_db_created = False
+                    try:
+                        agent._session_db.create_session(
+                            session_id=new_session_id,
+                            source=agent.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+                            model=agent.model,
+                            model_config=agent._session_init_model_config,
+                            parent_session_id=old_session_id,
+                        )
+                    except Exception as _cs_err:
+                        # The child row could not be created (e.g. FK constraint,
+                        # contended write). Previously the outer handler simply
+                        # warned and let the agent continue on the NEW id — which
+                        # has no row in state.db, producing an orphan: the parent
+                        # is ended, the child is never indexed, and every
+                        # subsequent message would otherwise be attributed to a
+                        # session that doesn't exist (#33906/#33907). The live
+                        # agent has not moved yet, so just reopen its parent.
+                        logger.warning(
+                            "Compression child session create failed (%s) — "
+                            "rolling back to parent session %s to avoid an orphan.",
+                            _cs_err, old_session_id,
+                        )
+                        # Re-open the parent: it was ended above, but we're
+                        # continuing on it, so it must not stay closed.
+                        try:
+                            agent._session_db.reopen_session(old_session_id)
+                        except Exception:
+                            pass
+                        old_session_id = None  # no rotation happened
+                        # The parent row already exists in state.db, so mark the
+                        # session as created — _ensure_db_session would otherwise
+                        # retry a (harmless INSERT OR IGNORE) create next turn.
+                        agent._session_db_created = True
+                        raise
+
+                    # Prepare provider-local target state before publishing the
+                    # child id to the agent, routing ContextVar, or logging
+                    # context. A durable failure therefore cannot leave normal
+                    # turns targeting a child while Cortex remains on the
+                    # parent. The empty child row is removed and the parent is
+                    # reopened before the failure is propagated.
+                    if memory_manager:
+                        try:
+                            memory_manager.on_session_switch(
+                                new_session_id,
+                                parent_session_id=old_session_id,
+                                reset=False,
+                                reason="compression",
+                            )
+                        except MemoryDurabilityError:
+                            try:
+                                memory_manager.on_session_switch(
+                                    old_session_id,
+                                    parent_session_id="",
+                                    reset=False,
+                                    reason="compression_rollback",
+                                )
+                            except Exception:
+                                logger.error(
+                                    "Memory provider rollback to compression parent "
+                                    "failed for session %s",
+                                    old_session_id,
+                                    exc_info=True,
+                                )
+                            try:
+                                agent._session_db.reopen_session(old_session_id)
+                            except Exception:
+                                logger.error(
+                                    "Could not reopen compression parent %s after "
+                                    "memory rebind failure",
+                                    old_session_id,
+                                    exc_info=True,
+                                )
+                            try:
+                                agent._session_db.delete_session_if_empty(
+                                    new_session_id
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "Could not remove abandoned compression child %s",
+                                    new_session_id,
+                                    exc_info=True,
+                                )
+                            agent._session_db_created = True
+                            raise
+                        except Exception as _me_err:
+                            logger.debug(
+                                "memory manager on_session_switch "
+                                "(compression): %s",
+                                _me_err,
+                            )
+
+                    # The child DB row and required provider binding now both
+                    # exist. Publish the new identity atomically from the
+                    # perspective of subsequent agent work.
+                    agent.session_id = new_session_id
                     # Ordering contract: the agent thread updates the contextvar here;
                     # the gateway propagates to SessionEntry after run_in_executor returns.
                     try:
@@ -784,53 +947,6 @@ def compress_context(
                         set_session_context(agent.session_id)
                     except Exception:
                         pass
-                    agent._session_db_created = False
-                    try:
-                        agent._session_db.create_session(
-                            session_id=agent.session_id,
-                            source=agent.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
-                            model=agent.model,
-                            model_config=agent._session_init_model_config,
-                            parent_session_id=old_session_id,
-                        )
-                    except Exception as _cs_err:
-                        # The child row could not be created (e.g. FK constraint,
-                        # contended write). Previously the outer handler simply
-                        # warned and let the agent continue on the NEW id — which
-                        # has no row in state.db, producing an orphan: the parent
-                        # is ended, the child is never indexed, and every
-                        # subsequent message is attributed to a session that
-                        # doesn't exist (#33906/#33907). Roll the live id back to
-                        # the parent so the conversation stays attached to a real,
-                        # indexed session instead of a phantom.
-                        logger.warning(
-                            "Compression child session create failed (%s) — "
-                            "rolling back to parent session %s to avoid an orphan.",
-                            _cs_err, old_session_id,
-                        )
-                        agent.session_id = old_session_id
-                        try:
-                            from gateway.session_context import set_current_session_id
-                            set_current_session_id(agent.session_id)
-                        except Exception:
-                            os.environ["HERMES_SESSION_ID"] = agent.session_id
-                        try:
-                            from hermes_logging import set_session_context
-                            set_session_context(agent.session_id)
-                        except Exception:
-                            pass
-                        # Re-open the parent: it was ended above, but we're
-                        # continuing on it, so it must not stay closed.
-                        try:
-                            agent._session_db.reopen_session(old_session_id)
-                        except Exception:
-                            pass
-                        old_session_id = None  # no rotation happened
-                        # The parent row already exists in state.db, so mark the
-                        # session as created — _ensure_db_session would otherwise
-                        # retry a (harmless INSERT OR IGNORE) create next turn.
-                        agent._session_db_created = True
-                        raise
                     agent._session_db_created = True
                     # Carry a persistent /goal onto the continuation session.
                     # Compression mints a fresh child id; load_goal does a flat
@@ -855,6 +971,11 @@ def compress_context(
                 # next turn re-bases its append diff.
                 agent._session_db.update_system_prompt(agent.session_id, new_system_prompt)
                 agent._last_flushed_db_idx = 0
+            except MemoryDurabilityError:
+                # Required provider barriers are lifecycle preconditions, not
+                # best-effort DB diagnostics. The rotation branch above has
+                # already restored the parent identity before reaching here.
+                raise
             except Exception as e:
                 # If the rotation rolled back to the parent (orphan-avoidance
                 # above), agent.session_id is the still-indexed parent and
@@ -895,22 +1016,9 @@ def compress_context(
         except Exception as _ce_err:
             logger.debug("context engine on_session_start (compression): %s", _ce_err)
 
-        # Notify memory providers of the compaction boundary so provider-cached
-        # per-session state (Hindsight's _document_id, accumulated turn buffers,
-        # counters) refreshes. reset=False because the logical conversation
-        # continues. See #6672. Fires in BOTH modes: in-place uses the same id as
-        # parent (the conversation didn't fork, but the buffer must still be told
-        # the transcript was compacted so it doesn't double-count dropped turns).
-        try:
-            if _is_boundary and agent._memory_manager:
-                agent._memory_manager.on_session_switch(
-                    agent.session_id or "",
-                    parent_session_id=_boundary_parent,
-                    reset=False,
-                    reason="compression",
-                )
-        except Exception as _me_err:
-            logger.debug("memory manager on_session_switch (compression): %s", _me_err)
+        # Memory providers were rebound before the in-place DB rewrite or
+        # before the rotated child identity was published above. Keeping the
+        # durability barrier ahead of those mutations prevents split lineage.
 
         # Warn on repeated compressions (quality degrades with each pass).
         # Route through _emit_status (like the other compression warnings above)

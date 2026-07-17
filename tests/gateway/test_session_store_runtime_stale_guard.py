@@ -11,10 +11,11 @@ next restart pruned it.
 
 This is the live-gateway variant of #52804/FM9 (#52808/#54138 startup prune),
 which required an actual gateway *crash*. Here the guard inside
-`get_or_create_session` detects the ended row at routing time and drops the
+`get_or_create_session` detects the ended row at routing time and rotates the
 stale entry, falling through to `_recover_session_from_db` (which reopens
 `agent_close`-ended rows and resumes the SAME session_id, preserving the
-transcript) or, failing recovery, to a fresh session.
+transcript) or, failing recovery, to a fresh session carrying the ended id as a
+durable Cortex-boundary retry token.
 """
 
 from datetime import datetime, timedelta
@@ -155,6 +156,7 @@ class TestRuntimeStaleGuard:
         result = store.get_or_create_session(source)
 
         assert result.session_id != "sid_stale"
+        assert result.previous_session_id == "sid_stale"
         # A fresh session row was created for the new session_id.
         db.create_session.assert_called_once()
         assert store._entries[key].session_id == result.session_id
@@ -187,7 +189,25 @@ class TestRuntimeStaleGuard:
 
         # Did not return the stale (suspended) entry; created a fresh session.
         assert result.session_id != "sid_stale"
+        assert result.previous_session_id == "sid_stale"
         db.create_session.assert_called_once()
+
+    def test_finalized_stale_entry_needs_no_predecessor_retry_token(self, tmp_path):
+        """A persisted boundary acknowledgement makes stale removal safe."""
+        source = _source()
+        db = _db_returning(
+            {"sid_stale": {"end_reason": "session_expired", "id": "sid_stale"}}
+        )
+        store = _make_store_with_db(tmp_path, db)
+        key = store._generate_session_key(source)
+        stale = _make_entry(key, "sid_stale")
+        stale.expiry_finalized = True
+        store._entries[key] = stale
+
+        result = store.get_or_create_session(source)
+
+        assert result.session_id != "sid_stale"
+        assert result.previous_session_id is None
 
     def test_force_new_skips_stale_check(self, tmp_path):
         """force_new short-circuits the whole existing-entry branch; the stale

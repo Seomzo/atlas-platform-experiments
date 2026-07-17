@@ -34,6 +34,8 @@ export interface ChatBarState {
 export interface ChatBarProps {
   busy: boolean
   disabled: boolean
+  /** Keep the draft editable while temporarily blocking every send path. */
+  submissionsDisabled?: boolean
   focusKey?: string | null
   maxRecordingSeconds?: number
   state: ChatBarState

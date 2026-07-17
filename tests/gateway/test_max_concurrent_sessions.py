@@ -99,6 +99,48 @@ def _silence_global_gateway_hooks(monkeypatch):
     monkeypatch.setattr("tools.approval.has_blocking_approval", lambda *args, **kwargs: False)
 
 
+def test_gateway_lease_uses_durable_id_and_selected_profile_home(tmp_path):
+    from hermes_cli.active_sessions import active_session_registry_snapshot
+
+    runner = _make_runner()
+    source = _make_source("durable")
+    session_key = build_session_key(source)
+    profile_home = tmp_path / "named-profile"
+    runner.session_store.peek_session_id.return_value = "durable-session-id"
+    runner._resolve_profile_home_for_source = lambda _source: profile_home
+
+    lease, message = runner._claim_active_session_slot(session_key, source)
+
+    assert message is None
+    assert lease is not None
+    assert lease.session_id == "durable-session-id"
+    snapshot = active_session_registry_snapshot(profile_home)
+    assert snapshot[0]["session_id"] == "durable-session-id"
+    assert snapshot[0]["metadata"]["session_key"] == session_key
+    lease.release()
+
+
+def test_gateway_durable_tombstone_blocks_stale_route_rebuild(tmp_path):
+    from hermes_cli.active_sessions import claim_session_deletion
+
+    runner = _make_runner()
+    source = _make_source("deleted")
+    session_key = build_session_key(source)
+    profile_home = tmp_path / "named-profile"
+    runner.session_store.peek_session_id.return_value = "deleted-durable-id"
+    runner._resolve_profile_home_for_source = lambda _source: profile_home
+    with claim_session_deletion(
+        ["deleted-durable-id"],
+        hermes_home=profile_home,
+    ) as deletion:
+        deletion.seal()
+
+    lease, message = runner._claim_active_session_slot(session_key, source)
+
+    assert lease is None
+    assert message == "This session was deleted and cannot be resumed."
+
+
 def test_new_session_gets_clean_error_at_active_session_limit(monkeypatch):
     _silence_global_gateway_hooks(monkeypatch)
     runner = _make_runner(max_concurrent_sessions=1)

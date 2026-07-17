@@ -1,5 +1,5 @@
 """Managed worker runtime and external policy enforcement."""
 
-from altas.managed.context import ManagedContext
+from altas.managed.context import ManagedContext, ManagedRequestAuthorization
 
-__all__ = ["ManagedContext"]
+__all__ = ["ManagedContext", "ManagedRequestAuthorization"]

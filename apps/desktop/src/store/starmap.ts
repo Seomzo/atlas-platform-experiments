@@ -1,16 +1,55 @@
 import { atom } from 'nanostores'
 
-import { getStarmapGraph } from '@/hermes'
-import type { StarmapGraph } from '@/types/hermes'
+import { cortexToStarmap } from '@/app/starmap/cortex'
+import { getCortexDream, getCortexGraph, getCortexHealth, getStarmapGraph, runCortexDream } from '@/hermes'
+import type { CortexGraphResponse, CortexHealthResponse, CortexJobResponse, StarmapGraph } from '@/types/hermes'
 
-// On-demand cache for the star map. The graph scan touches the skills catalog +
-// usage ledger + memory files, so we fetch it only when the panel opens (and on
-// an explicit refresh), never on a turn boundary.
+// On-demand cache for the memory graph. Native Cortex is preferred; an older
+// backend transparently falls back to /api/learning without changing that
+// compatibility route or its mutation behavior.
 export const $starmapGraph = atom<StarmapGraph | null>(null)
 export const $starmapLoading = atom(false)
 export const $starmapError = atom<null | string>(null)
+export const $cortexGraph = atom<CortexGraphResponse | null>(null)
+export const $cortexHealth = atom<CortexHealthResponse | null>(null)
+export const $cortexDreamJob = atom<CortexJobResponse | null>(null)
+export const $cortexStatusError = atom<null | string>(null)
 
 let inflight: Promise<void> | null = null
+let requestEpoch = 0
+
+function message(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+function mayUseLegacyGraph(err: unknown): boolean {
+  const status =
+    typeof err === 'object' && err !== null && 'statusCode' in err
+      ? Number((err as { statusCode?: unknown }).statusCode)
+      : Number(message(err).match(/^\s*(\d{3})\b/)?.[1])
+
+  return status === 404 || (status === 503 && /Cortex is disabled for this profile/i.test(message(err)))
+}
+
+function loadLatestDream(health: CortexHealthResponse | null, epoch: number): void {
+  const jobId = health?.jobs.latest_dream_job_id
+
+  if (!jobId) {
+    return
+  }
+
+  void getCortexDream(jobId).then(
+    job => {
+      if (epoch === requestEpoch) {
+        $cortexDreamJob.set(job)
+      }
+    },
+    () => {
+      // Activity telemetry is additive; a missing historical job must never
+      // make the graph itself unavailable.
+    }
+  )
+}
 
 export async function loadStarmapGraph(force = false): Promise<void> {
   if (inflight) {
@@ -21,28 +60,137 @@ export async function loadStarmapGraph(force = false): Promise<void> {
     return
   }
 
+  const epoch = requestEpoch
   $starmapLoading.set(true)
   $starmapError.set(null)
+  $cortexStatusError.set(null)
 
-  inflight = (async () => {
+  let task!: Promise<void>
+  task = (async () => {
     try {
-      $starmapGraph.set(await getStarmapGraph())
+      // Start health with the graph so opening the panel costs one round trip.
+      // Health is non-fatal: the visualization remains useful while maintenance
+      // telemetry is temporarily unavailable.
+      const healthRequest = getCortexHealth().catch(() => null)
+
+      try {
+        const cortex = await getCortexGraph()
+        const health = await healthRequest
+
+        if (epoch !== requestEpoch) {
+          return
+        }
+
+        $cortexGraph.set(cortex)
+        $cortexHealth.set(health)
+        $starmapGraph.set(cortexToStarmap(cortex))
+        loadLatestDream(health, epoch)
+      } catch (cortexError) {
+        // Backward compatibility is only for an un-upgraded backend or a
+        // profile that explicitly disabled Cortex. Auth, corruption, server,
+        // and contract failures must stay visible instead of being masked by
+        // an unrelated legacy graph.
+        if (!mayUseLegacyGraph(cortexError)) {
+          throw cortexError
+        }
+
+        try {
+          const legacy = await getStarmapGraph()
+
+          if (epoch !== requestEpoch) {
+            return
+          }
+
+          $cortexGraph.set(null)
+          $cortexHealth.set(null)
+          $starmapGraph.set({ ...legacy, source: 'legacy' })
+        } catch (legacyError) {
+          throw new Error(`Cortex: ${message(cortexError)}. Legacy graph: ${message(legacyError)}`)
+        }
+      }
     } catch (err) {
-      $starmapError.set(err instanceof Error ? err.message : String(err))
+      if (epoch === requestEpoch) {
+        $starmapError.set(message(err))
+      }
     } finally {
-      $starmapLoading.set(false)
-      inflight = null
+      if (epoch === requestEpoch) {
+        $starmapLoading.set(false)
+      }
+
+      if (inflight === task) {
+        inflight = null
+      }
     }
   })()
 
-  return inflight
+  inflight = task
+
+  return task
 }
 
-/** Drop one node from the cached graph immediately; return rollback. */
+export async function refreshCortexHealth(): Promise<void> {
+  const epoch = requestEpoch
+
+  try {
+    const health = await getCortexHealth()
+
+    if (epoch === requestEpoch) {
+      $cortexHealth.set(health)
+      $cortexStatusError.set(null)
+      loadLatestDream(health, epoch)
+    }
+  } catch (err) {
+    if (epoch === requestEpoch) {
+      $cortexStatusError.set(message(err))
+    }
+  }
+}
+
+export async function runCortexDreamNow(): Promise<void> {
+  const epoch = requestEpoch
+
+  try {
+    const job = await runCortexDream()
+
+    if (epoch === requestEpoch) {
+      $cortexDreamJob.set(job)
+      $cortexStatusError.set(null)
+    }
+  } catch (err) {
+    if (epoch === requestEpoch) {
+      $cortexStatusError.set(message(err))
+    }
+  }
+}
+
+export async function refreshCortexDreamStatus(jobId: string): Promise<void> {
+  const epoch = requestEpoch
+
+  try {
+    const job = await getCortexDream(jobId)
+
+    if (epoch === requestEpoch) {
+      $cortexDreamJob.set(job)
+      $cortexStatusError.set(null)
+
+      if (!['queued', 'running'].includes(job.job.status)) {
+        await Promise.all([refreshCortexHealth(), loadStarmapGraph(true)])
+      }
+    }
+  } catch (err) {
+    if (epoch === requestEpoch) {
+      $cortexStatusError.set(message(err))
+    }
+  }
+}
+
+/** Drop one legacy node from the cached graph immediately; return rollback. */
 export function evictStarmapNode(id: string): () => void {
   const prev = $starmapGraph.get()
 
-  if (!prev) {
+  // Cortex mutations use typed APIs and must never be routed through the
+  // legacy learning delete path. The Cortex UI is read-only in this phase.
+  if (!prev || prev.source === 'cortex') {
     return () => {}
   }
 
@@ -57,9 +205,15 @@ export function evictStarmapNode(id: string): () => void {
   return () => $starmapGraph.set(prev)
 }
 
-/** Drop the cache so the next open refetches against the now-active profile. */
+/** Drop every profile-scoped response and invalidate all in-flight writes. */
 export function resetStarmapGraph(): void {
+  requestEpoch += 1
   inflight = null
   $starmapGraph.set(null)
+  $cortexGraph.set(null)
+  $cortexHealth.set(null)
+  $cortexDreamJob.set(null)
+  $cortexStatusError.set(null)
   $starmapError.set(null)
+  $starmapLoading.set(false)
 }

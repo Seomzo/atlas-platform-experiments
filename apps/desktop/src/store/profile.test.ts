@@ -9,6 +9,7 @@ import type { ProfileInfo } from '@/types/hermes'
 const ensureGatewayForProfile = vi.fn(async () => undefined)
 const $gateway = atom<unknown>({ id: 'live-socket' })
 const resetStarmapGraph = vi.fn()
+const notify = vi.fn()
 
 vi.mock('@/store/gateway', () => ({ $gateway, ensureGatewayForProfile }))
 vi.mock('@/hermes', () => ({
@@ -16,10 +17,14 @@ vi.mock('@/hermes', () => ({
   setApiRequestProfile: vi.fn()
 }))
 vi.mock('@/lib/query-client', () => ({ queryClient: { invalidateQueries: vi.fn() } }))
+vi.mock('@/store/notifications', () => ({ notify }))
 vi.mock('@/store/starmap', () => ({ resetStarmapGraph }))
 
-const { $activeGatewayProfile, $profiles, ensureGatewayProfile, refreshProfiles } = await import('./profile')
+const { $activeGatewayProfile, $profiles, ensureGatewayProfile, refreshProfiles, selectProfile } =
+  await import('./profile')
+
 const { $connection } = await import('./session')
+const { $workspaceMutationActive } = await import('./workspace-handoff')
 const { queryClient } = await import('@/lib/query-client')
 const { getProfiles } = await import('@/hermes')
 
@@ -48,9 +53,11 @@ beforeEach(() => {
   $activeGatewayProfile.set('default')
   $connection.set(localConn())
   $profiles.set([])
+  $workspaceMutationActive.set(false)
   vi.stubGlobal('window', { hermesDesktop: { getConnection } })
   vi.mocked(queryClient.invalidateQueries).mockClear()
   resetStarmapGraph.mockClear()
+  notify.mockClear()
 })
 
 afterEach(() => {
@@ -112,6 +119,16 @@ describe('profile-scoped cache invalidation', () => {
 
     expect(queryClient.invalidateQueries).toHaveBeenCalled()
     expect(resetStarmapGraph).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('workspace mutation boundary', () => {
+  it('rejects a profile destination while an acquired Git mutation is active', () => {
+    $workspaceMutationActive.set(true)
+
+    expect(selectProfile('vps-remote')).toBe(false)
+    expect(ensureGatewayForProfile).not.toHaveBeenCalled()
+    expect(notify).toHaveBeenCalledWith(expect.objectContaining({ id: 'workspace-handoff-busy' }))
   })
 })
 

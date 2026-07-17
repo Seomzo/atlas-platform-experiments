@@ -24,7 +24,6 @@ interface UseComposerSubmitArgs {
   editorRef: RefObject<HTMLDivElement | null>
   exitQueuedEdit: (action: 'cancel' | 'save') => boolean
   focusInput: () => void
-  inputDisabled: boolean
   loadIntoComposer: (text: string, attachments: ComposerAttachment[]) => void
   onCancel: ChatBarProps['onCancel']
   onSteer: ChatBarProps['onSteer']
@@ -59,7 +58,6 @@ export function useComposerSubmit({
   editorRef,
   exitQueuedEdit,
   focusInput,
-  inputDisabled,
   loadIntoComposer,
   onCancel,
   onSteer,
@@ -96,11 +94,11 @@ export function useComposerSubmit({
   useEffect(
     () =>
       onComposerSubmitRequest(({ target, text }) => {
-        if (target === 'main' && !inputDisabled) {
+        if (target === 'main' && !disabled) {
           dispatchSubmitRef.current(text)
         }
       }),
-    [inputDisabled]
+    [disabled]
   )
 
   const submitDraft = () => {

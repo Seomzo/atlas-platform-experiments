@@ -18,6 +18,12 @@ export function formatDate(ts?: null | number): string {
 export function metaBadges(n: StarmapNode): string[] {
   const out: string[] = [formatDate(n.timestamp)]
 
+  if (n.cortexType) {
+    out.push(n.cortexType, n.category, n.privacy ?? '', ...(n.badges ?? []).slice(0, 2))
+
+    return [...new Set(out.filter(Boolean))]
+  }
+
   if (n.kind === 'memory') {
     out.push(n.memorySource === 'profile' ? 'profile memory' : 'memory')
   } else {
@@ -37,14 +43,16 @@ export function metaBadges(n: StarmapNode): string[] {
 
 // Bare "xN" use-count, last in the badge row. Null when never used.
 export function countLabel(n: StarmapNode): null | string {
-  return n.kind === 'skill' && n.useCount > 0 ? `x${n.useCount}` : null
+  return n.useCount > 0 ? `x${n.useCount}` : null
 }
 
 // Footer-row content for the tooltip. Reserved primitive — returns nothing for
 // now (skills have no UUID; their id is just the name). Wire real detail here
 // later and the tooltip lays it out automatically.
 export function nodeFooter(node: StarmapNode): null | string {
-  void node
+  if (node.cortexType) {
+    return [node.state, node.privacy].filter(Boolean).join(' · ')
+  }
 
   return null
 }

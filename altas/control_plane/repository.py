@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from altas.cortex.managed_dispatch import CortexDispatchAdmission
+
 from .database import Database
 from .redaction import sanitize_for_storage
 from .security import hash_secret
@@ -29,6 +31,7 @@ DEMO_CAPABILITIES = (
     "jobs.poll",
     "model.chat",
     "fixed_ops.daily_report",
+    "cortex.memory_maintenance",
 )
 
 
@@ -80,6 +83,10 @@ class IdempotencyConflict(ValueError):
 
 class ModelUsageLimitExceeded(ValueError):
     """A model request would exceed a persisted per-job allowance."""
+
+
+class CortexDispatchLimitExceeded(ValueError):
+    """A worker attempted to exceed server-owned Cortex dispatch admission."""
 
 
 class InvalidJobClaim(ValueError):
@@ -429,6 +436,8 @@ class ControlPlaneRepository:
         requested_by: str,
         idempotency_key: str | None,
     ) -> tuple[dict[str, Any], bool]:
+        if capability == "cortex.memory_maintenance":
+            raise ValueError("cortex_dispatch_requires_dedicated_admission")
         now = utc_now()
         job_id = f"job_{uuid.uuid4().hex}"
         with self.database.transaction(immediate=True) as connection:
@@ -484,6 +493,192 @@ class ControlPlaneRepository:
         if job is None:
             raise RuntimeError("queued job disappeared")
         return job, True
+
+    def ensure_cortex_maintenance_job(
+        self,
+        *,
+        tenant_id: str,
+        store_id: str,
+        agent_id: str,
+        device_id: str,
+        dispatch_key: str,
+        dispatch_admission: dict[str, Any],
+        max_jobs_per_24h: int,
+    ) -> tuple[dict[str, Any], bool, bool]:
+        """Atomically admit one bounded, idempotent Cortex maintenance job.
+
+        The caller's opaque digest provides retry identity only; it does not
+        authorize arbitrary spend. The server permits one active Cortex job
+        for the bound device/profile and caps all admissions, including
+        terminal-job requeues, in a rolling day.
+        """
+
+        admission = CortexDispatchAdmission.from_mapping(dispatch_admission)
+        if not admission.is_canonical() or not hmac.compare_digest(
+            admission.canonical_dispatch_key(), dispatch_key
+        ):
+            raise ValueError("cortex_dispatch_commitment_mismatch")
+        cortex_payload = {"dispatch_admission": admission.to_mapping()}
+        idempotency_key = f"cortex-maintenance:{dispatch_key}"
+        requested_by = f"worker:{device_id}"
+        job_id = f"job_{uuid.uuid4().hex}"
+        with self.database.transaction(immediate=True) as connection:
+            now_datetime = datetime.now(UTC)
+            now = now_datetime.isoformat(timespec="seconds").replace("+00:00", "Z")
+            window_start = (
+                (now_datetime - timedelta(hours=24))
+                .isoformat(timespec="seconds")
+                .replace("+00:00", "Z")
+            )
+
+            def enforce_rolling_admission_limit() -> None:
+                recent_count = int(
+                    connection.execute(
+                        """
+                        SELECT COUNT(*) FROM cortex_dispatch_admissions
+                        WHERE tenant_id=? AND store_id=? AND agent_id=? AND device_id=?
+                          AND admitted_at>=?
+                        """,
+                        (tenant_id, store_id, agent_id, device_id, window_start),
+                    ).fetchone()[0]
+                )
+                if recent_count >= max_jobs_per_24h:
+                    raise CortexDispatchLimitExceeded(
+                        "cortex_dispatch_daily_limit_exceeded"
+                    )
+
+            def record_admission(*, admitted_job_id: str, admission_kind: str) -> None:
+                admission_id = (
+                    f"cortex-create:{admitted_job_id}"
+                    if admission_kind == "created"
+                    else f"cortex-requeue:{uuid.uuid4().hex}"
+                )
+                connection.execute(
+                    """
+                    INSERT INTO cortex_dispatch_admissions
+                        (id, tenant_id, store_id, agent_id, device_id, job_id,
+                         admission_kind, admitted_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        admission_id,
+                        tenant_id,
+                        store_id,
+                        agent_id,
+                        device_id,
+                        admitted_job_id,
+                        admission_kind,
+                        now,
+                    ),
+                )
+
+            existing = connection.execute(
+                """
+                SELECT * FROM jobs
+                WHERE tenant_id = ? AND idempotency_key = ?
+                """,
+                (tenant_id, idempotency_key),
+            ).fetchone()
+            if existing:
+                item = _record(existing, json_columns=("payload_json", "result_json"))
+                if item is None:
+                    raise RuntimeError("failed to decode existing Cortex job")
+                expected = {
+                    "store_id": store_id,
+                    "agent_id": agent_id,
+                    "device_id": device_id,
+                    "capability": "cortex.memory_maintenance",
+                    "payload": cortex_payload,
+                    "requested_by": requested_by,
+                }
+                actual = {key: item.get(key) for key in expected}
+                if actual != expected:
+                    raise IdempotencyConflict("idempotency_key_conflict")
+                requeued = False
+                if item["status"] in {"failed", "canceled"}:
+                    other_active = connection.execute(
+                        """
+                        SELECT id FROM jobs
+                        WHERE tenant_id=? AND store_id=? AND agent_id=? AND device_id=?
+                          AND capability='cortex.memory_maintenance'
+                          AND status IN ('queued','running') AND id!=?
+                        LIMIT 1
+                        """,
+                        (tenant_id, store_id, agent_id, device_id, item["id"]),
+                    ).fetchone()
+                    if other_active:
+                        raise CortexDispatchLimitExceeded(
+                            "cortex_dispatch_already_active"
+                        )
+                    enforce_rolling_admission_limit()
+                    connection.execute(
+                        """
+                        UPDATE jobs
+                        SET status='queued', claimed_by_device_id=NULL,
+                            claim_token_hash=NULL, result_json=NULL, error=NULL,
+                            started_at=NULL, completed_at=NULL, updated_at=?
+                        WHERE id=? AND status IN ('failed','canceled')
+                        """,
+                        (now, item["id"]),
+                    )
+                    record_admission(
+                        admitted_job_id=str(item["id"]),
+                        admission_kind="requeued",
+                    )
+                    updated = connection.execute(
+                        "SELECT * FROM jobs WHERE id=?", (item["id"],)
+                    ).fetchone()
+                    item = _record(
+                        updated, json_columns=("payload_json", "result_json")
+                    )
+                    if item is None:
+                        raise RuntimeError("requeued Cortex job disappeared")
+                    requeued = True
+                item.pop("claim_token_hash", None)
+                return item, False, requeued
+
+            active = connection.execute(
+                """
+                SELECT id FROM jobs
+                WHERE tenant_id=? AND store_id=? AND agent_id=? AND device_id=?
+                  AND capability='cortex.memory_maintenance'
+                  AND status IN ('queued', 'running')
+                LIMIT 1
+                """,
+                (tenant_id, store_id, agent_id, device_id),
+            ).fetchone()
+            if active:
+                raise CortexDispatchLimitExceeded("cortex_dispatch_already_active")
+
+            enforce_rolling_admission_limit()
+
+            connection.execute(
+                """
+                INSERT INTO jobs
+                    (id, tenant_id, store_id, agent_id, device_id, capability,
+                     status, payload_json, requested_by, idempotency_key,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 'cortex.memory_maintenance', 'queued',
+                        ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    tenant_id,
+                    store_id,
+                    agent_id,
+                    device_id,
+                    _json(cortex_payload),
+                    requested_by,
+                    idempotency_key,
+                    now,
+                    now,
+                ),
+            )
+            record_admission(admitted_job_id=job_id, admission_kind="created")
+        job = self.get_job(job_id)
+        if job is None:
+            raise RuntimeError("queued Cortex job disappeared")
+        return job, True, False
 
     def claim_next_job(
         self,
@@ -652,6 +847,13 @@ class ControlPlaneRepository:
 
         now = utc_now()
         with self.database.transaction(immediate=True) as connection:
+            existing = connection.execute(
+                "SELECT capability FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if existing is not None and str(existing["capability"]) == (
+                "cortex.memory_maintenance"
+            ):
+                raise ValueError("cortex_dispatch_requires_dedicated_admission")
             cursor = connection.execute(
                 """
                 UPDATE jobs
@@ -668,6 +870,31 @@ class ControlPlaneRepository:
         if job is None:
             raise KeyError(job_id)
         return job
+
+    def has_cortex_dispatch_admission(self, job_id: str) -> bool:
+        """Return whether the dedicated admission ledger authorizes this job."""
+
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM cortex_dispatch_admissions WHERE job_id=? LIMIT 1",
+                (job_id,),
+            ).fetchone()
+        return row is not None
+
+    def quarantine_cortex_dispatch(self, job_id: str, *, device_id: str) -> bool:
+        """Terminally quarantine an invalid claimed Cortex dispatch."""
+
+        now = utc_now()
+        with self.database.transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                "UPDATE jobs SET status='canceled', claimed_by_device_id=NULL, "
+                "claim_token_hash=NULL, error='CortexDispatchAdmissionInvalid', "
+                "completed_at=?, updated_at=? WHERE id=? AND status='running' "
+                "AND capability='cortex.memory_maintenance' "
+                "AND claimed_by_device_id=?",
+                (now, now, job_id, device_id),
+            )
+        return cursor.rowcount == 1
 
     def toggle(
         self, resource: str, resource_id: str, enabled: bool | None
@@ -741,6 +968,8 @@ class ControlPlaneRepository:
         requested_tokens: int,
         request_limit: int,
         requested_token_limit: int,
+        cortex_dispatch_admission: dict[str, Any] | None = None,
+        cortex_dispatch_commitment: str | None = None,
     ) -> dict[str, Any]:
         event_id = f"usage_{uuid.uuid4().hex}"
         reservation_id = f"reservation_{uuid.uuid4().hex}"
@@ -749,7 +978,7 @@ class ControlPlaneRepository:
         with self.database.transaction(immediate=True) as connection:
             claim = connection.execute(
                 """
-                SELECT claim_token_hash FROM jobs
+                SELECT claim_token_hash, capability, payload_json FROM jobs
                 WHERE id = ? AND status = 'running'
                   AND tenant_id = ? AND store_id = ? AND agent_id = ?
                   AND claimed_by_device_id = ?
@@ -761,6 +990,34 @@ class ControlPlaneRepository:
                 str(expected_claim_hash), supplied_claim_hash
             ):
                 raise InvalidJobClaim("job_claim_invalid")
+            if str(claim["capability"]) == "cortex.memory_maintenance":
+                try:
+                    supplied_admission = CortexDispatchAdmission.from_mapping(
+                        cortex_dispatch_admission or {}
+                    )
+                    persisted_payload = json.loads(str(claim["payload_json"] or ""))
+                    persisted_admission = CortexDispatchAdmission.from_mapping(
+                        persisted_payload["dispatch_admission"]
+                    )
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise InvalidJobClaim("cortex_dispatch_admission_invalid") from exc
+                ledger_row = connection.execute(
+                    "SELECT 1 FROM cortex_dispatch_admissions WHERE job_id=? LIMIT 1",
+                    (job_id,),
+                ).fetchone()
+                supplied_json = supplied_admission.canonical_json()
+                persisted_json = persisted_admission.canonical_json()
+                commitment = str(cortex_dispatch_commitment or "")
+                if (
+                    ledger_row is None
+                    or not hmac.compare_digest(supplied_json, persisted_json)
+                    or not hmac.compare_digest(
+                        commitment, persisted_admission.dispatch_key_commitment
+                    )
+                ):
+                    raise InvalidJobClaim("cortex_dispatch_admission_invalid")
+            elif cortex_dispatch_admission is not None or cortex_dispatch_commitment:
+                raise InvalidJobClaim("cortex_dispatch_scope_invalid")
             totals = connection.execute(
                 """
                 SELECT COUNT(*) AS request_count,

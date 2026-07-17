@@ -58,7 +58,7 @@ interface SlashCommandDeps {
   refreshSessions: () => Promise<void>
   requestGateway: GatewayRequest
   resumeStoredSession: (storedSessionId: string) => Promise<void> | void
-  startFreshSessionDraft: () => void
+  startFreshSessionDraft: () => Promise<boolean>
   submitPromptText: (
     rawText: string,
     options?: { attachments?: ComposerAttachment[]; fromQueue?: boolean }
@@ -229,7 +229,7 @@ export function useSlashCommand(deps: SlashCommandDeps) {
       // new branch in a dispatch ladder.
       const actionHandlers: Record<DesktopActionId, (ctx: SlashActionCtx) => Promise<void>> = {
         new: async () => {
-          startFreshSessionDraft()
+          await startFreshSessionDraft()
         },
         branch: async () => {
           await branchCurrentSession()

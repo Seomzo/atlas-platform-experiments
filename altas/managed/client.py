@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from altas.managed.context import ManagedContext
+from altas.cortex.managed_dispatch import CortexDispatchAdmission
 from altas.managed.errors import (
     ControlPlaneUnavailable,
     DeviceAuthenticationError,
@@ -18,9 +19,13 @@ from altas.managed.errors import (
 class Lease:
     token: str
     expires_at: str
+    capabilities: tuple[str, ...] = ()
 
     def __repr__(self) -> str:
-        return f"Lease(token='[REDACTED]', expires_at={self.expires_at!r})"
+        return (
+            "Lease(token='[REDACTED]', "
+            f"expires_at={self.expires_at!r}, capabilities={self.capabilities!r})"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +49,7 @@ class AltasControlPlaneClient:
         if not device_token:
             raise ValueError("device_token is required")
         self._device_token = device_token
+        self._next_job_authorization_lease: Lease | None = None
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
             timeout=timeout_seconds,
@@ -130,6 +136,11 @@ class AltasControlPlaneClient:
         return Lease(
             token=str(lease_payload["token"]),
             expires_at=str(lease_payload["expires_at"]),
+            capabilities=tuple(
+                str(value)
+                for value in lease_payload.get("capabilities", [])
+                if str(value).strip()
+            ),
         )
 
     def evaluate_policy(
@@ -184,7 +195,9 @@ class AltasControlPlaneClient:
         tenant_id: str,
         store_id: str,
         agent_id: str,
+        capability: str | None = None,
     ) -> dict[str, Any] | None:
+        self._next_job_authorization_lease = None
         response = self._request(
             "GET",
             "/api/v1/worker/jobs/next",
@@ -194,6 +207,7 @@ class AltasControlPlaneClient:
                 "X-Atlas-Store-ID": store_id,
                 "X-Atlas-Agent-ID": agent_id,
             },
+            params={"capability": capability} if capability else None,
         )
         response.raise_for_status()
         payload = self._json(response)
@@ -202,7 +216,78 @@ class AltasControlPlaneClient:
             return None
         if not isinstance(job, dict):
             raise ControlPlaneUnavailable("Control Plane returned an invalid job")
+        lease_payload = payload.get("authorization_lease")
+        if isinstance(lease_payload, dict):
+            token = str(lease_payload.get("token") or "").strip()
+            expires_at = str(lease_payload.get("expires_at") or "").strip()
+            if not token or not expires_at:
+                raise ControlPlaneUnavailable(
+                    "Control Plane returned an invalid job authorization lease"
+                )
+            self._next_job_authorization_lease = Lease(
+                token=token,
+                expires_at=expires_at,
+                capabilities=tuple(
+                    str(value)
+                    for value in lease_payload.get("capabilities", [])
+                    if str(value).strip()
+                ),
+            )
         return job
+
+    def take_job_authorization_lease(self) -> Lease | None:
+        """Consume the longer lease attached to the most recent claimed job."""
+
+        lease = self._next_job_authorization_lease
+        self._next_job_authorization_lease = None
+        return lease
+
+    def ensure_cortex_maintenance(
+        self,
+        *,
+        lease: str,
+        tenant_id: str,
+        store_id: str,
+        agent_id: str,
+        dispatch_key: str,
+        dispatch_admission: CortexDispatchAdmission,
+    ) -> dict[str, Any]:
+        """Idempotently request a managed job for one queued local Cortex job."""
+        if not isinstance(dispatch_admission, CortexDispatchAdmission):
+            raise TypeError("dispatch_admission must be a CortexDispatchAdmission")
+        if not dispatch_admission.matches_dispatch_key(dispatch_key):
+            raise ValueError("dispatch key does not match Cortex admission")
+        response = self._request(
+            "POST",
+            "/api/v1/worker/jobs/cortex/ensure",
+            headers=self._headers(lease=lease),
+            json={
+                "tenant_id": tenant_id,
+                "store_id": store_id,
+                "agent_id": agent_id,
+                "dispatch_key": dispatch_key,
+                "dispatch_admission": dispatch_admission.to_mapping(),
+            },
+        )
+        if response.status_code in {409, 429}:
+            payload = self._json(response)
+            detail = payload.get("detail")
+            code = str(detail.get("code") or "") if isinstance(detail, dict) else ""
+            if code in {
+                "cortex_dispatch_already_active",
+                "cortex_dispatch_daily_limit_exceeded",
+            }:
+                # Admission denial applies only to creating another Cortex
+                # dispatch. The worker must continue polling/executing the
+                # already queued job and unrelated entitled work.
+                return {
+                    "admitted": False,
+                    "created": False,
+                    "requeued": False,
+                    "code": code,
+                }
+        response.raise_for_status()
+        return self._json(response)
 
     def complete_job(
         self,

@@ -97,6 +97,178 @@ MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
 
 
+class _CortexSessionBoundaryConflict(RuntimeError):
+    """A requested API fork conflicts with an existing Cortex lineage."""
+
+
+class _APISessionMutationInProgress(RuntimeError):
+    """An agent turn attempted to enter during an explicit end/fork barrier."""
+
+
+def _api_messages_require_cortex_admission(
+    messages: List[Dict[str, Any]],
+) -> bool:
+    """Whether a SessionDB transcript contains retainable semantic evidence.
+
+    This mirrors Cortex's transcript suppression rules closely enough to avoid
+    turning a deliberate "do not retain this turn" request into a permanent
+    503, while failing closed if those rules cannot be loaded.
+    """
+
+    if not messages:
+        return False
+    try:
+        from altas.cortex.provider import (
+            _has_no_retention_intent,
+            _is_internal_scaffolding,
+            _text_content,
+        )
+    except Exception:
+        return True
+
+    suppress_turn = False
+    for message in messages:
+        if _is_internal_scaffolding(message):
+            continue
+        role = str(message.get("role") or "")
+        content = _text_content(message.get("content"))
+        if role == "user":
+            suppress_turn = _has_no_retention_intent(content)
+        if not suppress_turn and role in {"user", "assistant", "tool"} and content:
+            return True
+    return False
+
+
+def _commit_api_cortex_boundary(
+    profile_home: Path,
+    session_id: str,
+    *,
+    has_persisted_content: bool,
+    requires_semantic_admission: bool,
+    new_session_id: str = "",
+    parent_session_id: str = "",
+    reason: str,
+    reset: bool = False,
+) -> bool:
+    """Own an API session boundary in the active profile's Cortex store.
+
+    ``False`` is a compatibility result: this profile does not select Cortex,
+    or Cortex is explicitly disabled.  Once Cortex is selected and enabled,
+    every other failure raises so the HTTP handler can leave ``state.db``
+    untouched.  A missing lineage is only initialized for a genuinely empty
+    SessionDB row; silently fabricating one for an existing transcript would
+    discard the evidence that the durable provider was expected to capture.
+    """
+
+    from altas.cortex.config import CortexConfig
+    from hermes_cli.config import load_config
+    from hermes_constants import (
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+
+    home = Path(profile_home).expanduser().resolve()
+    home_token = set_hermes_home_override(home)
+    try:
+        raw_config = load_config()
+    finally:
+        reset_hermes_home_override(home_token)
+    memory_config = raw_config.get("memory") if isinstance(raw_config, dict) else {}
+    provider = str(
+        (memory_config if isinstance(memory_config, dict) else {}).get("provider")
+        or ""
+    ).strip().lower()
+    if provider != "cortex":
+        return False
+    raw_cortex = raw_config.get("cortex") if isinstance(raw_config, dict) else {}
+    if isinstance(raw_cortex, dict) and raw_cortex.get("enabled") is False:
+        return False
+    cortex_config = CortexConfig.load(home)
+    if not cortex_config.enabled:
+        return False
+
+    # Do not create a fresh store and then pretend a non-empty legacy/session
+    # transcript was durably captured.  Atlas must fail closed in that case.
+    if has_persisted_content and not cortex_config.database_path.exists():
+        raise RuntimeError("required Cortex store has not been initialized")
+
+    from altas.cortex.lifecycle import (
+        commit_detached_session_boundary,
+        finalize_detached_session,
+        prepare_detached_session_branch,
+    )
+    from altas.cortex.runtime import open_cortex_store
+
+    store, _ = open_cortex_store(home, {})
+    source_lineage = store.session_lineage(session_id)
+    if not source_lineage:
+        if has_persisted_content:
+            raise RuntimeError("required Cortex session lineage is missing")
+        store.ensure_session(session_id)
+
+    require_admission = bool(
+        requires_semantic_admission and cortex_config.capture_enabled
+    )
+    branch_only = bool(new_session_id and reason == "branch")
+    boundary_spec = store.lineage_distill_spec(session_id)
+    evidence_ids = boundary_spec.get("input_data", {}).get("evidence_ids", [])
+    if require_admission and not evidence_ids:
+        raise RuntimeError("required Cortex transcript evidence is missing")
+
+    if new_session_id:
+        target_lineage = store.session_lineage(new_session_id)
+        if target_lineage and (
+            target_lineage.get("parent_session_id") != session_id
+            or target_lineage.get("logical_conversation_id") != new_session_id
+        ):
+            raise _CortexSessionBoundaryConflict(
+                "target Cortex session belongs to another parent"
+            )
+        if branch_only:
+            committed = prepare_detached_session_branch(
+                home,
+                session_id,
+                new_session_id=new_session_id,
+                parent_session_id=parent_session_id,
+            )
+        else:
+            committed = commit_detached_session_boundary(
+                home,
+                session_id,
+                new_session_id=new_session_id,
+                parent_session_id=parent_session_id,
+                reason=reason,
+                reset=reset,
+            )
+    else:
+        committed = finalize_detached_session(home, session_id, reason=reason)
+    if not committed:
+        raise RuntimeError("Cortex did not own the required session boundary")
+    if require_admission and not branch_only:
+        input_hash = str(boundary_spec.get("input_hash") or "")
+        with store.connect() as connection:
+            admission = connection.execute(
+                "SELECT id FROM session_distill_admissions "
+                "WHERE brain_id=? AND canonical_input_hash=?",
+                (store.brain_id, input_hash),
+            ).fetchone()
+            root = (
+                connection.execute(
+                    "SELECT id FROM cognitive_jobs WHERE brain_id=? "
+                    "AND admission_id=? AND job_type='session_distill' "
+                    "AND parent_job_id IS NULL",
+                    (store.brain_id, admission["id"]),
+                ).fetchone()
+                if admission is not None
+                else None
+            )
+        if admission is None or root is None:
+            raise RuntimeError(
+                "Cortex boundary did not persist its semantic admission"
+            )
+    return True
+
+
 def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
     """Parse a listen port without letting malformed env/config values crash startup."""
     try:
@@ -900,6 +1072,11 @@ class APIServerAdapter(BasePlatformAdapter):
         # Number of in-flight runs on the non-streaming chat/responses paths
         # (the /v1/runs path tracks its own in-flight set via _run_streams).
         self._inflight_agent_runs: int = 0
+        # Exact session ids for the shared _run_agent path.  Session-control
+        # mutations use this alongside _active_run_tasks so an explicit end or
+        # fork cannot race a turn that is still appending durable evidence.
+        self._active_session_agent_runs: Dict[str, int] = {}
+        self._session_lifecycle_mutations: set[str] = set()
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -1154,6 +1331,99 @@ class APIServerAdapter(BasePlatformAdapter):
             except Exception as e:
                 logger.debug("SessionDB unavailable for API server: %s", e)
         return self._session_db
+
+    @staticmethod
+    def _cortex_profile_home() -> Path:
+        """Return the canonical active profile home for API-owned sessions."""
+
+        from hermes_constants import get_hermes_home
+
+        return Path(get_hermes_home()).expanduser().resolve()
+
+    async def _commit_cortex_session_boundary(
+        self,
+        session_id: str,
+        *,
+        has_persisted_content: bool,
+        requires_semantic_admission: bool,
+        new_session_id: str = "",
+        parent_session_id: str = "",
+        reason: str,
+        reset: bool = False,
+    ) -> bool:
+        """Run the blocking durable Cortex boundary off the aiohttp loop."""
+
+        return await asyncio.to_thread(
+            _commit_api_cortex_boundary,
+            self._cortex_profile_home(),
+            session_id,
+            has_persisted_content=has_persisted_content,
+            requires_semantic_admission=requires_semantic_admission,
+            new_session_id=new_session_id,
+            parent_session_id=parent_session_id,
+            reason=reason,
+            reset=reset,
+        )
+
+    def _session_has_active_api_request(self, session_id: str) -> bool:
+        """Whether this exact session is still being mutated by an API turn.
+
+        The adapter has exact in-process ownership for every API entry path.
+        SessionDB does not expose a cross-process active-turn lease, so this
+        cannot prove that a non-API CLI/gateway process using the same profile
+        is idle; Cortex's SQLite transaction still serializes its durable write.
+        """
+
+        if self._active_session_agent_runs.get(session_id, 0) > 0:
+            return True
+        # /v1/runs creates its agent directly instead of calling _run_agent.
+        # Its task/status pair still exposes the exact requested session id.
+        for run_id, task in tuple(self._active_run_tasks.items()):
+            if task.done():
+                continue
+            status = self._run_statuses.get(run_id) or {}
+            if str(status.get("session_id") or "") == session_id:
+                return True
+        return False
+
+    def _track_session_agent_run(self, session_id: str) -> None:
+        if session_id:
+            self._active_session_agent_runs[session_id] = (
+                self._active_session_agent_runs.get(session_id, 0) + 1
+            )
+
+    def _release_session_agent_run(self, session_id: str) -> None:
+        if not session_id:
+            return
+        remaining = self._active_session_agent_runs.get(session_id, 0) - 1
+        if remaining > 0:
+            self._active_session_agent_runs[session_id] = remaining
+        else:
+            self._active_session_agent_runs.pop(session_id, None)
+
+    def _begin_session_lifecycle_mutation(self, session_id: str) -> bool:
+        """Atomically reserve one session against new API turns on this loop."""
+
+        if (
+            session_id in self._session_lifecycle_mutations
+            or self._session_has_active_api_request(session_id)
+        ):
+            return False
+        self._session_lifecycle_mutations.add(session_id)
+        return True
+
+    def _finish_session_lifecycle_mutation(self, session_id: str) -> None:
+        self._session_lifecycle_mutations.discard(session_id)
+
+    @staticmethod
+    def _session_active_mutation_response(session_id: str) -> "web.Response":
+        return web.json_response(
+            _openai_error(
+                f"Session has an active API request: {session_id}",
+                code="session_active",
+            ),
+            status=409,
+        )
 
     # ------------------------------------------------------------------
     # Agent creation helper
@@ -1785,15 +2055,87 @@ class APIServerAdapter(BasePlatformAdapter):
             return web.json_response(_openai_error(f"Unsupported session fields: {', '.join(unknown)}", code="unsupported_session_field"), status=400)
 
         db = self._ensure_session_db()
+        normalized_title: Optional[str] = None
         if "title" in body:
             try:
-                db.set_session_title(session_id, "" if body["title"] is None else str(body["title"]))
+                normalized_title = db.sanitize_title(
+                    "" if body["title"] is None else str(body["title"])
+                )
             except ValueError as exc:
                 return web.json_response(_openai_error(str(exc), code="invalid_title"), status=400)
-        if body.get("end_reason"):
-            db.end_session(session_id, str(body["end_reason"]))
-        session = db.get_session(session_id) or session
-        return web.json_response({"object": "hermes.session", "session": self._session_response(session)})
+
+        end_reason = str(body["end_reason"]) if body.get("end_reason") else ""
+        if end_reason:
+            # Validate a combined rename before owning the irreversible Cortex
+            # boundary.  The subsequent set remains the authoritative race-safe
+            # uniqueness check inside SessionDB.
+            if normalized_title:
+                conflict = db.get_session_by_title(normalized_title)
+                if conflict and str(conflict.get("id") or "") != session_id:
+                    return web.json_response(
+                        _openai_error(
+                            f"Title '{normalized_title}' is already in use by "
+                            f"session {conflict.get('id')}",
+                            code="invalid_title",
+                        ),
+                        status=400,
+                    )
+            if not self._begin_session_lifecycle_mutation(session_id):
+                return self._session_active_mutation_response(session_id)
+
+        try:
+            if end_reason:
+                try:
+                    persisted_messages = db.get_messages(
+                        session_id, include_inactive=True
+                    )
+                    await self._commit_cortex_session_boundary(
+                        session_id,
+                        has_persisted_content=bool(persisted_messages),
+                        requires_semantic_admission=(
+                            _api_messages_require_cortex_admission(
+                                persisted_messages
+                            )
+                        ),
+                        reason=end_reason,
+                    )
+                except Exception:
+                    logger.warning(
+                        "API session %s Cortex finalization failed; state.db was not changed",
+                        session_id,
+                        exc_info=True,
+                    )
+                    return web.json_response(
+                        _openai_error(
+                            "Atlas Cortex could not durably finalize the session; "
+                            "the session was left unchanged",
+                            err_type="server_error",
+                            code="cortex_session_boundary_failed",
+                        ),
+                        status=503,
+                    )
+
+            # StateDB is published only after Cortex either owned the exact
+            # durable boundary or explicitly reported a non-Cortex profile.
+            if "title" in body:
+                try:
+                    db.set_session_title(session_id, normalized_title or "")
+                except ValueError as exc:
+                    return web.json_response(
+                        _openai_error(str(exc), code="invalid_title"), status=400
+                    )
+            if end_reason:
+                db.end_session(session_id, end_reason)
+            session = db.get_session(session_id) or session
+            return web.json_response(
+                {
+                    "object": "hermes.session",
+                    "session": self._session_response(session),
+                }
+            )
+        finally:
+            if end_reason:
+                self._finish_session_lifecycle_mutation(session_id)
 
     async def _handle_delete_session(self, request: "web.Request") -> "web.Response":
         """DELETE /api/sessions/{session_id}."""
@@ -1801,12 +2143,61 @@ class APIServerAdapter(BasePlatformAdapter):
         if auth_err:
             return auth_err
         session_id = request.match_info["session_id"]
-        session, err = self._get_existing_session_or_404(session_id)
+        _session, err = self._get_existing_session_or_404(session_id)
         if err:
             return err
         db = self._ensure_session_db()
-        deleted = db.delete_session(session_id)
-        return web.json_response({"object": "hermes.session.deleted", "id": session_id, "deleted": bool(deleted)})
+        delete_ids = db.get_session_delete_closure([session_id])
+        reserved: list[str] = []
+        for delete_id in delete_ids:
+            if not self._begin_session_lifecycle_mutation(delete_id):
+                for reserved_id in reserved:
+                    self._finish_session_lifecycle_mutation(reserved_id)
+                return self._session_active_mutation_response(delete_id)
+            reserved.append(delete_id)
+        try:
+            try:
+                from hermes_cli.session_deletion import (
+                    delete_sessions_with_cortex,
+                )
+
+                _deleted_ids, deleted = await asyncio.to_thread(
+                    delete_sessions_with_cortex,
+                    db,
+                    self._cortex_profile_home(),
+                    delete_ids,
+                    allowed_active_ids=delete_ids,
+                )
+            except Exception as exc:
+                from hermes_cli.active_sessions import ActiveSessionConflict
+
+                if isinstance(exc, ActiveSessionConflict):
+                    return self._session_active_mutation_response(session_id)
+                logger.warning(
+                    "API session %s Cortex privacy reconciliation failed; "
+                    "state.db was not changed",
+                    session_id,
+                    exc_info=True,
+                )
+                return web.json_response(
+                    _openai_error(
+                        "Atlas Cortex could not reconcile the session deletion; "
+                        "the transcript was left unchanged",
+                        err_type="server_error",
+                        code="cortex_session_delete_failed",
+                    ),
+                    status=503,
+                )
+            return web.json_response(
+                {
+                    "object": "hermes.session.deleted",
+                    "id": session_id,
+                    "deleted": bool(deleted),
+                }
+            )
+        finally:
+            for reserved_id in reserved:
+                self._finish_session_lifecycle_mutation(reserved_id)
 
     async def _handle_session_messages(self, request: "web.Request") -> "web.Response":
         """GET /api/sessions/{session_id}/messages."""
@@ -1840,25 +2231,22 @@ class APIServerAdapter(BasePlatformAdapter):
             return err
         db = self._ensure_session_db()
         fork_id = str(body.get("id") or body.get("session_id") or f"api_{int(time.time())}_{uuid.uuid4().hex[:8]}").strip()
-        if not fork_id or re.search(r'[\r\n\x00]', fork_id):
+        from gateway.session import _is_path_unsafe
+
+        if (
+            not fork_id
+            or re.search(r'[\r\n\x00]', fork_id)
+            or _is_path_unsafe(fork_id)
+        ):
             return web.json_response(_openai_error("Invalid session ID", code="invalid_session_id"), status=400)
+        if len(fork_id) > self._MAX_SESSION_HEADER_LEN:
+            return web.json_response(
+                _openai_error("Session ID too long", code="invalid_session_id"),
+                status=400,
+            )
         if db.get_session(fork_id):
             return web.json_response(_openai_error(f"Session already exists: {fork_id}", code="session_exists"), status=409)
 
-        # Match the CLI /branch semantics: mark the original as branched, then
-        # create a child session that carries the transcript forward. This uses
-        # SessionDB's native parent_session_id/end_reason visibility model rather
-        # than inventing a parallel fork store.
-        db.end_session(source_id, "branched")
-        db.create_session(
-            fork_id,
-            "api_server",
-            model=source.get("model"),
-            system_prompt=source.get("system_prompt"),
-            parent_session_id=source_id,
-        )
-        messages = db.get_messages(source_id)
-        db.replace_messages(fork_id, messages)
         title = body.get("title")
         if title is None:
             base = source.get("title") or "fork"
@@ -1867,11 +2255,180 @@ class APIServerAdapter(BasePlatformAdapter):
             except Exception:
                 title = f"{base} fork"
         try:
-            db.set_session_title(fork_id, str(title))
+            normalized_title = db.sanitize_title(str(title))
         except ValueError as exc:
-            return web.json_response(_openai_error(str(exc), code="invalid_title"), status=400)
-        fork = db.get_session(fork_id) or {"id": fork_id, "parent_session_id": source_id}
-        return web.json_response({"object": "hermes.session", "session": self._session_response(fork)}, status=201)
+            return web.json_response(
+                _openai_error(str(exc), code="invalid_title"), status=400
+            )
+        if normalized_title:
+            title_conflict = db.get_session_by_title(normalized_title)
+            if title_conflict:
+                return web.json_response(
+                    _openai_error(
+                        f"Title '{normalized_title}' is already in use by "
+                        f"session {title_conflict.get('id')}",
+                        code="invalid_title",
+                    ),
+                    status=400,
+                )
+
+        if not self._begin_session_lifecycle_mutation(source_id):
+            return self._session_active_mutation_response(source_id)
+        try:
+            try:
+                persisted_messages = db.get_messages(
+                    source_id, include_inactive=True
+                )
+                await self._commit_cortex_session_boundary(
+                    source_id,
+                    has_persisted_content=bool(persisted_messages),
+                    requires_semantic_admission=(
+                        _api_messages_require_cortex_admission(
+                            persisted_messages
+                        )
+                    ),
+                    new_session_id=fork_id,
+                    parent_session_id=source_id,
+                    reason="branch",
+                    reset=False,
+                )
+            except _CortexSessionBoundaryConflict:
+                logger.warning(
+                    "API fork %s -> %s conflicts with an existing Cortex lineage",
+                    source_id,
+                    fork_id,
+                )
+                return web.json_response(
+                    _openai_error(
+                        "The requested fork ID is already linked to another Cortex "
+                        "session",
+                        code="cortex_session_conflict",
+                    ),
+                    status=409,
+                )
+            except Exception:
+                logger.warning(
+                    "API fork %s -> %s Cortex commit failed; state.db was not changed",
+                    source_id,
+                    fork_id,
+                    exc_info=True,
+                )
+                return web.json_response(
+                    _openai_error(
+                        "Atlas Cortex could not durably prepare the session fork; "
+                        "the source session was left unchanged",
+                        err_type="server_error",
+                        code="cortex_session_boundary_failed",
+                    ),
+                    status=503,
+                )
+
+            # Publish the child without ending the source. Cortex has already
+            # prepared only the deterministic child topology: a fork is not a
+            # logical end and therefore creates no semantic admission. If a
+            # SessionDB write fails, delete the unpublished child row so a retry
+            # can reuse that same, already-correct Cortex child.
+            child_created = False
+            try:
+                def _insert_fork_child(connection):
+                    connection.execute(
+                        "INSERT INTO sessions(id, source, model, system_prompt, "
+                        "parent_session_id, started_at) VALUES(?,?,?,?,?,?)",
+                        (
+                            fork_id,
+                            "api_server",
+                            source.get("model"),
+                            source.get("system_prompt"),
+                            source_id,
+                            time.time(),
+                        ),
+                    )
+
+                # SessionDB.create_session is intentionally an upsert for agent
+                # enrichment. A fork publication needs an exclusive insert so
+                # a title/id race cannot make compensation delete somebody
+                # else's concurrently-created session.
+                db._execute_write(_insert_fork_child)
+                child_created = True
+                created_child = db.get_session(fork_id)
+                if (
+                    not created_child
+                    or str(created_child.get("parent_session_id") or "")
+                    != source_id
+                ):
+                    raise RuntimeError(
+                        "fork target was concurrently claimed by another session"
+                    )
+                messages = db.get_messages(source_id)
+                db.replace_messages(fork_id, messages)
+                db.set_session_title(fork_id, normalized_title or "")
+            except sqlite3.IntegrityError:
+                if child_created:
+                    try:
+                        db.delete_session(fork_id)
+                    except Exception:
+                        logger.error(
+                            "Failed to remove conflicted API fork child %s",
+                            fork_id,
+                            exc_info=True,
+                        )
+                return web.json_response(
+                    _openai_error(
+                        f"Session or title was concurrently claimed: {fork_id}",
+                        code="session_fork_conflict",
+                    ),
+                    status=409,
+                )
+            except ValueError as exc:
+                if child_created:
+                    try:
+                        db.delete_session(fork_id)
+                    except Exception:
+                        logger.error(
+                            "Failed to remove unpublished API fork child %s",
+                            fork_id,
+                            exc_info=True,
+                        )
+                return web.json_response(
+                    _openai_error(str(exc), code="session_title_conflict"),
+                    status=409,
+                )
+            except Exception:
+                if child_created:
+                    try:
+                        db.delete_session(fork_id)
+                    except Exception:
+                        logger.error(
+                            "Failed to remove unpublished API fork child %s",
+                            fork_id,
+                            exc_info=True,
+                        )
+                logger.warning(
+                    "API fork %s -> %s SessionDB publication failed before source end",
+                    source_id,
+                    fork_id,
+                    exc_info=True,
+                )
+                return web.json_response(
+                    _openai_error(
+                        "The durable fork was prepared, but its session record "
+                        "could not be published; retry the same fork request",
+                        err_type="server_error",
+                        code="session_fork_publish_failed",
+                    ),
+                    status=503,
+                )
+
+            fork = db.get_session(fork_id) or {
+                "id": fork_id,
+                "parent_session_id": source_id,
+            }
+            return web.json_response(
+                {"object": "hermes.session", "session": self._session_response(fork)},
+                status=201,
+            )
+        finally:
+            self._finish_session_lifecycle_mutation(source_id)
 
     async def _handle_session_chat(self, request: "web.Request") -> "web.Response":
         """POST /api/sessions/{session_id}/chat — one synchronous agent turn."""
@@ -4047,6 +4604,11 @@ class APIServerAdapter(BasePlatformAdapter):
         callers (e.g. the SSE writer) to call ``agent.interrupt()`` from
         another thread to stop in-progress LLM calls.
         """
+        tracked_session_id = str(session_id or "")
+        if tracked_session_id in self._session_lifecycle_mutations:
+            raise _APISessionMutationInProgress(
+                f"session lifecycle mutation in progress: {tracked_session_id}"
+            )
         loop = asyncio.get_running_loop()
 
         def _run():
@@ -4091,11 +4653,26 @@ class APIServerAdapter(BasePlatformAdapter):
             finally:
                 clear_session_vars(tokens)
 
+        self._track_session_agent_run(tracked_session_id)
         self._inflight_agent_runs += 1
+        executor_future = loop.run_in_executor(None, _run)
+
+        def _release_tracked_session(_future=None) -> None:
+            self._release_session_agent_run(tracked_session_id)
+
         try:
-            return await loop.run_in_executor(None, _run)
+            # Shield the executor wrapper so cancelling an SSE/request task
+            # does not mark the Future complete while its worker thread is
+            # still appending evidence. The HTTP task may exit immediately,
+            # but the exact-session active marker is released only when the
+            # underlying thread really returns.
+            return await asyncio.shield(executor_future)
         finally:
             self._inflight_agent_runs -= 1
+            if executor_future.done():
+                _release_tracked_session()
+            else:
+                executor_future.add_done_callback(_release_tracked_session)
 
     # ------------------------------------------------------------------
     # /v1/runs — structured event streaming
@@ -4244,6 +4821,8 @@ class APIServerAdapter(BasePlatformAdapter):
 
         run_id = f"run_{uuid.uuid4().hex}"
         session_id = body.get("session_id") or stored_session_id or run_id
+        if str(session_id) in self._session_lifecycle_mutations:
+            return self._session_active_mutation_response(str(session_id))
         # Approval queues gate host-side tool execution and must be isolated
         # per API run.  Client-provided session IDs and memory session keys are
         # conversation/memory scopes, not authorization namespaces: multiple
@@ -4371,7 +4950,22 @@ class APIServerAdapter(BasePlatformAdapter):
                     }
                     return r, u
 
-                result, usage = await asyncio.get_running_loop().run_in_executor(None, _run_sync)
+                tracked_run_session_id = str(session_id or "")
+                executor_future = asyncio.get_running_loop().run_in_executor(
+                    None, _run_sync
+                )
+                self._track_session_agent_run(tracked_run_session_id)
+
+                def _release_run_session(_future=None) -> None:
+                    self._release_session_agent_run(tracked_run_session_id)
+
+                try:
+                    result, usage = await asyncio.shield(executor_future)
+                finally:
+                    if executor_future.done():
+                        _release_run_session()
+                    else:
+                        executor_future.add_done_callback(_release_run_session)
                 # Check for structured failure (non-retryable client errors like
                 # 401/400 return failed=True instead of raising, so the except
                 # block below never fires — issue #15561).

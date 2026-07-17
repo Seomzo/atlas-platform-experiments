@@ -29,10 +29,22 @@ class ControlPlaneSettings:
     mock_model: bool = True
     lease_ttl_seconds: int = 300
     job_visibility_timeout_seconds: int = 900
+    # A claimed Cortex batch can make at most 20 sequential 30-second model
+    # requests. Give that exact job a longer signed lease while keeping it
+    # below the 900-second claim visibility timeout.
+    cortex_job_lease_ttl_seconds: int = 840
     max_model_requests_per_job: int = 8
     max_requested_tokens_per_job: int = 4096
+    # Default Cortex batch: 100 candidates / 20 per call, with at most one
+    # repair and one reviewed call (+ repair) per batch = 20 bounded calls.
+    cortex_max_model_requests_per_job: int = 20
+    cortex_max_requested_tokens_per_job: int = 80_000
+    # Counts both first-time dispatches and requeues of terminal dispatches.
+    cortex_max_jobs_per_device_per_24h: int = 24
     default_model_max_tokens: int = 400
     model_id: str = "altas-fixed-ops"
+    cortex_model_id: str = "atlas-cortex-memory"
+    cortex_upstream_model: str | None = None
     upstream_base_url: str = "https://api.openai.com/v1"
     upstream_api_key: str | None = field(default=None, repr=False)
     request_timeout_seconds: float = 30.0
@@ -49,16 +61,40 @@ class ControlPlaneSettings:
             raise ValueError(
                 "job_visibility_timeout_seconds must be at least 15 seconds"
             )
+        if self.cortex_job_lease_ttl_seconds < self.lease_ttl_seconds:
+            raise ValueError(
+                "cortex_job_lease_ttl_seconds must not be shorter than lease_ttl_seconds"
+            )
+        if self.cortex_job_lease_ttl_seconds >= self.job_visibility_timeout_seconds:
+            raise ValueError(
+                "cortex_job_lease_ttl_seconds must be shorter than the job visibility timeout"
+            )
         if self.max_model_requests_per_job < 1:
             raise ValueError("max_model_requests_per_job must be at least 1")
         if self.max_requested_tokens_per_job < 1:
             raise ValueError("max_requested_tokens_per_job must be at least 1")
+        if self.cortex_max_model_requests_per_job < 1:
+            raise ValueError("cortex_max_model_requests_per_job must be at least 1")
+        if self.cortex_max_requested_tokens_per_job < 1:
+            raise ValueError("cortex_max_requested_tokens_per_job must be at least 1")
+        if self.cortex_max_jobs_per_device_per_24h < 1:
+            raise ValueError("cortex_max_jobs_per_device_per_24h must be at least 1")
         if not 1 <= self.default_model_max_tokens <= 32768:
             raise ValueError("default_model_max_tokens must be between 1 and 32768")
         if self.default_model_max_tokens > self.max_requested_tokens_per_job:
             raise ValueError(
                 "default_model_max_tokens must not exceed max_requested_tokens_per_job"
             )
+        if not self.model_id.strip() or not self.cortex_model_id.strip():
+            raise ValueError("model aliases must not be empty")
+        if self.model_id == self.cortex_model_id:
+            raise ValueError(
+                "Cortex must use a model alias distinct from the chat model"
+            )
+        if self.cortex_upstream_model is not None:
+            self.cortex_upstream_model = self.cortex_upstream_model.strip() or None
+        if self.cortex_upstream_model == self.model_id:
+            raise ValueError("Cortex must not route to the configured chat model")
         if self.seed_demo_data and not self.mock_model:
             raise ValueError(
                 "demo seed data cannot be combined with a real model provider"
@@ -96,16 +132,30 @@ class ControlPlaneSettings:
             job_visibility_timeout_seconds=int(
                 os.getenv("ATLAS_JOB_VISIBILITY_TIMEOUT_SECONDS", "900")
             ),
+            cortex_job_lease_ttl_seconds=int(
+                os.getenv("ATLAS_CORTEX_JOB_LEASE_TTL_SECONDS", "840")
+            ),
             max_model_requests_per_job=int(
                 os.getenv("ATLAS_MAX_MODEL_REQUESTS_PER_JOB", "8")
             ),
             max_requested_tokens_per_job=int(
                 os.getenv("ATLAS_MAX_REQUESTED_TOKENS_PER_JOB", "4096")
             ),
+            cortex_max_model_requests_per_job=int(
+                os.getenv("ATLAS_CORTEX_MAX_MODEL_REQUESTS_PER_JOB", "20")
+            ),
+            cortex_max_requested_tokens_per_job=int(
+                os.getenv("ATLAS_CORTEX_MAX_REQUESTED_TOKENS_PER_JOB", "80000")
+            ),
+            cortex_max_jobs_per_device_per_24h=int(
+                os.getenv("ATLAS_CORTEX_MAX_JOBS_PER_DEVICE_PER_24H", "24")
+            ),
             default_model_max_tokens=int(
                 os.getenv("ATLAS_DEFAULT_MODEL_MAX_TOKENS", "400")
             ),
             model_id=os.getenv("ATLAS_MODEL_ID", "altas-fixed-ops"),
+            cortex_model_id=os.getenv("ATLAS_CORTEX_MODEL_ID", "atlas-cortex-memory"),
+            cortex_upstream_model=os.getenv("ATLAS_CORTEX_UPSTREAM_MODEL"),
             upstream_base_url=os.getenv(
                 "ATLAS_UPSTREAM_BASE_URL", "https://api.openai.com/v1"
             ).rstrip("/"),

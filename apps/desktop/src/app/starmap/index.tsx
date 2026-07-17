@@ -8,6 +8,7 @@ import type { StarmapGraph } from '@/types/hermes'
 
 import { Panel, PanelEmpty } from '../overlays/panel'
 
+import { CortexWorkspace } from './cortex-workspace'
 import { StarMap } from './star-map'
 
 // Star map overlay: a top-down map of what Atlas has learned for a profile,
@@ -25,6 +26,7 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
   // graph, overriding the live profile scan. Cleared by "back to my map" and
   // whenever a fresh profile graph loads in.
   const [imported, setImported] = useState<StarmapGraph | null>(null)
+  const [selectedCortexNode, setSelectedCortexNode] = useState<null | string>(null)
 
   useEffect(() => {
     void loadStarmapGraph()
@@ -33,25 +35,44 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
   // Drop a stale import when the underlying profile graph changes out from under it.
   useEffect(() => {
     setImported(null)
+    setSelectedCortexNode(null)
   }, [graph])
 
   const shown = imported ?? graph
+  const cortex = !imported && shown?.source === 'cortex'
 
   return (
-    <Panel closeLabel={t.starmap.close} onClose={onClose}>
+    <Panel
+      className={
+        cortex
+          ? 'border-white/10! bg-[#050b14]! [--chrome-action-hover:rgba(255,255,255,0.08)] [--ui-text-tertiary:#9db2c7]'
+          : undefined
+      }
+      closeLabel={t.starmap.close}
+      contentClassName={cortex ? 'p-0!' : undefined}
+      onClose={onClose}
+    >
       {error ? (
         <PanelEmpty description={error} icon="warning" title={t.starmap.loadFailed} />
       ) : !shown && loading ? (
         <PageLoader aria-label={t.starmap.loading} className="min-h-0 flex-1" />
-      ) : shown && shown.nodes.length === 0 && !imported ? (
+      ) : shown && shown.nodes.length === 0 && !imported && !cortex ? (
         <PanelEmpty description={t.starmap.emptyDesc} icon="lightbulb" title={t.starmap.emptyTitle} />
+      ) : shown && cortex ? (
+        <CortexWorkspace graph={shown} onSelectNode={setSelectedCortexNode} selectedNodeId={selectedCortexNode} />
       ) : shown ? (
-        <StarMap
-          graph={shown}
-          imported={imported !== null}
-          onImport={setImported}
-          onResetMap={() => setImported(null)}
-        />
+        <div className="flex min-h-0 flex-1">
+          <div className="relative min-w-0 flex-1">
+            <StarMap
+              graph={shown}
+              imported={imported !== null}
+              onImport={setImported}
+              onNodeSelect={undefined}
+              onResetMap={() => setImported(null)}
+              selectedNodeId={undefined}
+            />
+          </div>
+        </div>
       ) : null}
     </Panel>
   )

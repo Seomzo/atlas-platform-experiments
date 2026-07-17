@@ -10,11 +10,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import stat
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from hermes_constants import get_hermes_home
 
@@ -77,16 +78,24 @@ def active_session_limit_message(active_count: int, max_sessions: int) -> str:
     )
 
 
-def _state_dir() -> Path:
-    return Path(get_hermes_home()) / "runtime"
+def _registry_home(hermes_home: str | Path | None = None) -> Path:
+    return Path(hermes_home or get_hermes_home()).expanduser().resolve()
 
 
-def _state_path() -> Path:
-    return _state_dir() / "active_sessions.json"
+def _state_dir(hermes_home: str | Path | None = None) -> Path:
+    return _registry_home(hermes_home) / "runtime"
 
 
-def _lock_path() -> Path:
-    return _state_dir() / "active_sessions.lock"
+def _state_path(hermes_home: str | Path | None = None) -> Path:
+    return _state_dir(hermes_home) / "active_sessions.json"
+
+
+def _deleted_path(hermes_home: str | Path | None = None) -> Path:
+    return _state_dir(hermes_home) / "deleted_sessions.json"
+
+
+def _lock_path(hermes_home: str | Path | None = None) -> Path:
+    return _state_dir(hermes_home) / "active_sessions.lock"
 
 
 class _FileLock:
@@ -95,8 +104,19 @@ class _FileLock:
         self._fh = None
 
     def __enter__(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = open(self.path, "a+b")
+        _ensure_private_dir(self.path.parent)
+        _reject_unsafe_file(self.path)
+        flags = os.O_RDWR | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(self.path, flags, 0o600)
+        try:
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+            self._fh = os.fdopen(fd, "a+b")
+        except BaseException:
+            os.close(fd)
+            raise
         if os.name == "nt":
             try:
                 import msvcrt
@@ -142,27 +162,130 @@ class _FileLock:
             self._fh = None
 
 
-def _read_entries(path: Path) -> list[dict[str, Any]]:
+def _ensure_private_dir(path: Path) -> None:
+    if path.is_symlink():
+        raise RuntimeError(f"active session runtime directory cannot be a symlink: {path}")
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
+        path.chmod(0o700)
+    except OSError:
+        if os.name != "nt":
+            raise
+
+
+def _reject_unsafe_file(path: Path) -> None:
+    if path.is_symlink():
+        raise RuntimeError(f"active session registry cannot be a symlink: {path}")
+    if path.exists() and not path.is_file():
+        raise RuntimeError(f"active session registry is not a regular file: {path}")
+
+
+def _private_open_new(path: Path):
+    _ensure_private_dir(path.parent)
+    _reject_unsafe_file(path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
+        return os.fdopen(fd, "w", encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _private_read_json(path: Path) -> Any:
+    _reject_unsafe_file(path)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise RuntimeError(f"active session registry is not a regular file: {path}")
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            fd = -1
+            return json.load(fh)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _read_entries(path: Path, *, strict: bool = False) -> list[dict[str, Any]]:
+    _reject_unsafe_file(path)
+    try:
+        data = _private_read_json(path)
     except FileNotFoundError:
         return []
-    except Exception:
+    except Exception as exc:
+        if strict:
+            raise RuntimeError(f"active session registry is unreadable: {path}") from exc
         logger.warning("Ignoring corrupt active session registry at %s", path)
         return []
     entries = data.get("entries") if isinstance(data, dict) else data
     if not isinstance(entries, list):
+        if strict:
+            raise RuntimeError(f"active session registry is invalid: {path}")
         return []
+    if strict and any(not isinstance(entry, dict) for entry in entries):
+        raise RuntimeError(f"active session registry is invalid: {path}")
     return [entry for entry in entries if isinstance(entry, dict)]
 
 
 def _write_entries(path: Path, entries: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_private_dir(path.parent)
+    _reject_unsafe_file(path)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    with open(tmp, "w", encoding="utf-8") as fh:
+    with _private_open_new(tmp) as fh:
         json.dump({"entries": entries}, fh, sort_keys=True)
     os.replace(tmp, path)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        if os.name != "nt":
+            raise
+
+
+def _read_deleted_sessions(path: Path) -> dict[str, float]:
+    _reject_unsafe_file(path)
+    try:
+        data = _private_read_json(path)
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        # A corrupt privacy tombstone registry cannot be treated as empty:
+        # doing so could let a stale process recreate a deleted transcript.
+        raise RuntimeError(f"deleted session registry is unreadable: {path}")
+    rows = data.get("sessions") if isinstance(data, dict) else None
+    if not isinstance(rows, dict):
+        raise RuntimeError(f"deleted session registry is invalid: {path}")
+    result: dict[str, float] = {}
+    for session_id, deleted_at in rows.items():
+        if not isinstance(session_id, str) or not session_id:
+            continue
+        try:
+            result[session_id] = float(deleted_at)
+        except (TypeError, ValueError):
+            result[session_id] = 0.0
+    return result
+
+
+def _write_deleted_sessions(path: Path, sessions: dict[str, float]) -> None:
+    _ensure_private_dir(path.parent)
+    _reject_unsafe_file(path)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    with _private_open_new(tmp) as fh:
+        json.dump({"sessions": sessions}, fh, sort_keys=True)
+    os.replace(tmp, path)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        if os.name != "nt":
+            raise
 
 
 def _process_start_time(pid: int) -> Optional[float]:
@@ -222,6 +345,7 @@ class ActiveSessionLease:
     lease_id: str
     session_id: str
     surface: str
+    hermes_home: str = ""
     enabled: bool = True
     released: bool = False
 
@@ -231,28 +355,128 @@ class ActiveSessionLease:
         release_active_session(self)
 
 
+class ActiveSessionConflict(RuntimeError):
+    """Raised when privacy deletion overlaps a live cross-process lease."""
+
+    def __init__(self, session_ids: Iterable[str]):
+        self.session_ids = tuple(dict.fromkeys(str(item) for item in session_ids if item))
+        detail = ", ".join(self.session_ids) or "unknown"
+        super().__init__(f"session is active and cannot be deleted: {detail}")
+
+
+class SessionDeletionLease:
+    """Hold the registry lock across Cortex reconciliation and DB deletion.
+
+    ``active_aliases`` may include gateway routing keys in addition to durable
+    SessionDB ids. Only canonical ``session_ids`` are permanently tombstoned,
+    so deleting one gateway conversation does not disable its reusable route.
+    """
+
+    def __init__(
+        self,
+        session_ids: Iterable[str],
+        *,
+        active_aliases: Iterable[str] = (),
+        hermes_home: str | Path | None = None,
+        ignore_lease_ids: Iterable[str] = (),
+    ) -> None:
+        self.session_ids = tuple(
+            dict.fromkeys(str(item) for item in session_ids if item)
+        )
+        self.active_aliases = frozenset(
+            (*self.session_ids, *(str(item) for item in active_aliases if item))
+        )
+        self.ignore_lease_ids = frozenset(
+            str(item) for item in ignore_lease_ids if item
+        )
+        self.hermes_home = str(_registry_home(hermes_home))
+        self._lock: _FileLock | None = None
+        self._sealed = False
+
+    def __enter__(self) -> "SessionDeletionLease":
+        lock = _FileLock(_lock_path(self.hermes_home))
+        lock.__enter__()
+        self._lock = lock
+        try:
+            state_path = _state_path(self.hermes_home)
+            raw_entries = _read_entries(state_path, strict=True)
+            entries = _prune_dead(raw_entries)
+            if len(entries) != len(raw_entries):
+                _write_entries(state_path, entries)
+            conflicts = [
+                str(entry.get("session_id") or "")
+                for entry in entries
+                if str(entry.get("lease_id") or "") not in self.ignore_lease_ids
+                and str(entry.get("session_id") or "") in self.active_aliases
+            ]
+            if conflicts:
+                raise ActiveSessionConflict(conflicts)
+            return self
+        except BaseException:
+            lock.__exit__(None, None, None)
+            self._lock = None
+            raise
+
+    def seal(self, session_ids: Iterable[str] | None = None) -> None:
+        """Publish durable no-revival tombstones after Cortex succeeds."""
+        if self._lock is None:
+            raise RuntimeError("session deletion lease is not active")
+        if self._sealed:
+            return
+        path = _deleted_path(self.hermes_home)
+        deleted = _read_deleted_sessions(path)
+        now = time.time()
+        selected = tuple(
+            dict.fromkeys(
+                str(item)
+                for item in (self.session_ids if session_ids is None else session_ids)
+                if item and str(item) in self.session_ids
+            )
+        )
+        for session_id in selected:
+            deleted.setdefault(session_id, now)
+        _write_deleted_sessions(path, deleted)
+        self._sealed = True
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        lock = self._lock
+        self._lock = None
+        if lock is not None:
+            lock.__exit__(exc_type, exc, tb)
+
+
+def claim_session_deletion(
+    session_ids: Iterable[str],
+    *,
+    active_aliases: Iterable[str] = (),
+    hermes_home: str | Path | None = None,
+    ignore_lease_ids: Iterable[str] = (),
+) -> SessionDeletionLease:
+    """Reserve an inactive deletion set until both durable stores agree."""
+    return SessionDeletionLease(
+        session_ids,
+        active_aliases=active_aliases,
+        hermes_home=hermes_home,
+        ignore_lease_ids=ignore_lease_ids,
+    )
+
+
 def try_acquire_active_session(
     *,
     session_id: str,
     surface: str,
     config: Any,
     metadata: Optional[dict[str, Any]] = None,
+    hermes_home: str | Path | None = None,
 ) -> tuple[Optional[ActiveSessionLease], Optional[str]]:
     """Acquire an active-session slot.
 
-    Returns ``(lease, None)`` on success.  When the cap is disabled, the lease is
-    a no-op object so callers can unconditionally call ``release()``.
+    Returns ``(lease, None)`` on success. Leases are recorded even when the
+    concurrency cap is disabled because privacy deletion uses the same registry
+    as a cross-process ownership barrier.
     """
     max_sessions = resolve_max_concurrent_sessions(config)
     lease_id = uuid.uuid4().hex
-    if max_sessions is None:
-        return ActiveSessionLease(
-            lease_id=lease_id,
-            session_id=session_id,
-            surface=surface,
-            enabled=False,
-        ), None
-
     now = time.time()
     entry = {
         "lease_id": lease_id,
@@ -268,15 +492,19 @@ def try_acquire_active_session(
             str(k): v for k, v in metadata.items() if isinstance(k, str)
         }
 
-    state_path = _state_path()
-    with _FileLock(_lock_path()):
-        raw_entries = _read_entries(state_path)
+    registry_home = str(_registry_home(hermes_home))
+    state_path = _state_path(registry_home)
+    with _FileLock(_lock_path(registry_home)):
+        deleted = _read_deleted_sessions(_deleted_path(registry_home))
+        if str(session_id) in deleted:
+            return None, "This session was deleted and cannot be resumed."
+        raw_entries = _read_entries(state_path, strict=True)
         entries = _prune_dead(raw_entries)
         pruned = len(raw_entries) - len(entries)
         if pruned:
             logger.info("Pruned %d stale active session lease(s)", pruned)
         active_count = len(entries)
-        if active_count >= max_sessions:
+        if max_sessions is not None and active_count >= max_sessions:
             _write_entries(state_path, entries)
             logger.info(
                 "Active session limit reached: active=%d max=%d surface=%s",
@@ -292,14 +520,15 @@ def try_acquire_active_session(
         lease_id=lease_id,
         session_id=str(session_id),
         surface=str(surface),
+        hermes_home=registry_home,
     ), None
 
 
 def release_active_session(lease: ActiveSessionLease) -> None:
-    state_path = _state_path()
+    state_path = _state_path(lease.hermes_home or None)
     try:
-        with _FileLock(_lock_path()):
-            entries = _prune_dead(_read_entries(state_path))
+        with _FileLock(_lock_path(lease.hermes_home or None)):
+            entries = _prune_dead(_read_entries(state_path, strict=True))
             kept = [
                 entry
                 for entry in entries
@@ -323,13 +552,12 @@ def transfer_active_session(
         return False
     if lease.released:
         return False
-    if not lease.enabled:
-        lease.session_id = new_session_id
-        return True
-
-    state_path = _state_path()
-    with _FileLock(_lock_path()):
-        entries = _prune_dead(_read_entries(state_path))
+    state_path = _state_path(lease.hermes_home or None)
+    with _FileLock(_lock_path(lease.hermes_home or None)):
+        deleted = _read_deleted_sessions(_deleted_path(lease.hermes_home or None))
+        if new_session_id in deleted:
+            return False
+        entries = _prune_dead(_read_entries(state_path, strict=True))
         updated = False
         for entry in entries:
             if str(entry.get("lease_id") or "") != lease.lease_id:
@@ -348,10 +576,12 @@ def transfer_active_session(
         return updated
 
 
-def active_session_registry_snapshot() -> list[dict[str, Any]]:
+def active_session_registry_snapshot(
+    hermes_home: str | Path | None = None,
+) -> list[dict[str, Any]]:
     """Return the pruned active-session registry for diagnostics/tests."""
-    state_path = _state_path()
-    with _FileLock(_lock_path()):
-        entries = _prune_dead(_read_entries(state_path))
+    state_path = _state_path(hermes_home)
+    with _FileLock(_lock_path(hermes_home)):
+        entries = _prune_dead(_read_entries(state_path, strict=True))
         _write_entries(state_path, entries)
         return entries

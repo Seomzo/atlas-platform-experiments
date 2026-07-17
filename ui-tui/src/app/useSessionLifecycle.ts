@@ -73,6 +73,7 @@ export const scheduleResumeScrollToBottom = (
   delays: readonly number[] = [0, 80, 240]
 ) => {
   const startedAt = Date.now()
+
   const timers = delays.map((delay, index) =>
     setTimeout(() => {
       const scroll = scrollRef.current
@@ -148,6 +149,13 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
       targetSid ? rpc<SessionCloseResponse>('session.close', { session_id: targetSid }) : Promise.resolve(null),
     [rpc]
   )
+
+  const releaseSession = useCallback(
+    (targetSid?: null | string) =>
+      targetSid ? rpc('session.release', { session_id: targetSid }) : Promise.resolve(null),
+    [rpc]
+  )
+
   const cancelResumeScrollRef = useRef<null | (() => void)>(null)
 
   const resetSession = useCallback(() => {
@@ -376,7 +384,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
             cancelResumeScrollRef.current = scheduleResumeScrollToBottom(scrollRef)
 
             if (previousSid && previousSid !== r.session_id) {
-              void closeSession(previousSid)
+              void releaseSession(previousSid)
             }
 
           })
@@ -386,7 +394,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
           })
       })
     },
-    [closeSession, colsRef, gw, panel, resetSession, rpc, scrollRef, setHistoryItems, setSessionStartedAt, sys]
+    [colsRef, gw, panel, releaseSession, resetSession, rpc, scrollRef, setHistoryItems, setSessionStartedAt, sys]
   )
 
   const guardBusySessionSwitch = useCallback(
@@ -408,6 +416,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
     guardBusySessionSwitch,
     newLiveSession,
     newSession,
+    releaseSession,
     resetSession,
     resetVisibleHistory,
     resumeById,

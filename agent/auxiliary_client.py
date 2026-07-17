@@ -41,9 +41,12 @@ Payment / credit exhaustion fallback:
 """
 
 import contextlib
+import hashlib
+import hmac
 import json
 import logging
 import os
+import secrets
 import threading
 import time
 from pathlib import Path  # noqa: F401 — used by test mocks
@@ -3383,6 +3386,7 @@ def _retry_same_provider_sync(
     messages: list,
     temperature: Optional[float],
     max_tokens: Optional[int],
+    bounded_output: bool,
     tools: Optional[list],
     effective_timeout: float,
     effective_extra_body: dict,
@@ -3416,6 +3420,7 @@ def _retry_same_provider_sync(
         messages,
         temperature=temperature,
         max_tokens=max_tokens,
+        bounded_output=bounded_output,
         tools=tools,
         timeout=effective_timeout,
         extra_body=effective_extra_body,
@@ -5508,6 +5513,58 @@ def auxiliary_max_tokens_param(value: int, *, model: Optional[str] = None) -> di
 _client_cache: Dict[tuple, tuple] = {}
 _client_cache_lock = threading.Lock()
 _CLIENT_CACHE_MAX_SIZE = 64  # safety belt — evict oldest when exceeded
+_ATLAS_AUX_PROVIDER_NAMES = frozenset({"altas", "altas-gateway", "altas-managed"})
+_ATLAS_CACHE_FINGERPRINT_KEY = secrets.token_bytes(32)
+
+
+def _atlas_client_cache_partition(
+    provider: str,
+    *,
+    explicit_api_key: Optional[str] = None,
+) -> str:
+    """Return an opaque per-profile/device partition for managed clients.
+
+    Atlas request claims stay request-local in ``extra_headers``, while the
+    cached OpenAI client owns the longer-lived device bearer.  A normal cache
+    key is built before provider credential resolution and would therefore
+    collapse every multiplexed Atlas profile onto the first client's bearer.
+    Partition those entries with a process-keyed digest of the active profile
+    and device credential.  Neither value, nor any claim header, is retained
+    in or recoverable from the cache key.
+    """
+    normalized = str(provider or "").strip().lower()
+    if normalized not in _ATLAS_AUX_PROVIDER_NAMES:
+        return ""
+
+    token = str(explicit_api_key or "").strip()
+    if not token:
+        from agent.secret_scope import (
+            current_secret_scope,
+            get_secret,
+            is_multiplex_active,
+        )
+
+        if is_multiplex_active():
+            scope = current_secret_scope()
+            if scope is None:
+                # Preserve secret_scope's fail-closed error instead of reading
+                # a different profile's process-global credential.
+                get_secret("ATLAS_DEVICE_TOKEN")
+            token = str((scope or {}).get("ATLAS_DEVICE_TOKEN") or "").strip()
+        else:
+            from hermes_cli.config import get_env_value_prefer_dotenv
+
+            token = str(
+                get_env_value_prefer_dotenv("ATLAS_DEVICE_TOKEN") or ""
+            ).strip()
+
+    profile_home = str(Path(get_hermes_home()).expanduser().resolve())
+    material = f"atlas-aux-client-v1\0{profile_home}\0{token}".encode("utf-8")
+    return hmac.new(
+        _ATLAS_CACHE_FINGERPRINT_KEY,
+        material,
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def _client_cache_key(
@@ -5523,6 +5580,14 @@ def _client_cache_key(
     model: Optional[str] = None,
 ) -> tuple:
     runtime = _normalize_main_runtime(main_runtime)
+    atlas_partition = _atlas_client_cache_partition(
+        provider,
+        explicit_api_key=api_key,
+    )
+    # Atlas credentials are represented only by the opaque partition. Keep the
+    # raw bearer out of the cache key even if an internal caller supplied it
+    # explicitly.
+    cache_api_key = "" if atlas_partition else (api_key or "")
     runtime_key = tuple(runtime.get(field, "") for field in _MAIN_RUNTIME_FIELDS) if provider == "auto" else ()
     # `auto` can now resolve through task-specific or main fallback policy,
     # so the task participates in the cache key. Non-auto providers keep the
@@ -5539,7 +5604,19 @@ def _client_cache_key(
     # double-advisor "Connection error" collapse). Keying on model gives each
     # model its own client, so concurrent fan-out calls never cross-close.
     model_key = model or ""
-    return (provider, async_mode, base_url or "", api_key or "", api_mode or "", runtime_key, is_vision, task_key, pool_hint, model_key)
+    return (
+        provider,
+        async_mode,
+        base_url or "",
+        cache_api_key,
+        api_mode or "",
+        runtime_key,
+        is_vision,
+        task_key,
+        pool_hint,
+        model_key,
+        atlas_partition,
+    )
 
 
 def _store_cached_client(cache_key: tuple, client: Any, default_model: Optional[str], *, bound_loop: Any = None) -> None:
@@ -6193,6 +6270,7 @@ def _build_call_kwargs(
     timeout: float = 30.0,
     extra_body: Optional[dict] = None,
     base_url: Optional[str] = None,
+    bounded_output: bool = False,
 ) -> dict:
     """Build kwargs for .chat.completions.create() with model/provider adjustments."""
     kwargs: Dict[str, Any] = {
@@ -6247,9 +6325,35 @@ def _build_call_kwargs(
             _provider_norm in {"nvidia", "nvidia-nim", "nim", "build-nvidia", "nemotron"}
             or base_url_host_matches(_effective_base, "integrate.api.nvidia.com")
         )
-        if (
+        _is_openrouter = (
+            _provider_norm == "openrouter"
+            or base_url_host_matches(_effective_base, "openrouter.ai")
+        )
+        if bounded_output:
+            # A few structured-output consumers (currently Atlas Cortex) must
+            # put an output limit on the wire.  Keep this opt-in so ordinary
+            # auxiliary calls retain the unbounded-by-default behavior above.
+            # OpenRouter accepts ``max_tokens`` even when the routed slug names
+            # a newer OpenAI model; Atlas's managed gateway validates that same
+            # field.  Direct newer OpenAI-family routes use their required
+            # ``max_completion_tokens`` spelling instead.
+            if (
+                not _is_openrouter
+                and _provider_norm not in _ATLAS_AUX_PROVIDER_NAMES
+                and model_forces_max_completion_tokens(model)
+            ):
+                kwargs["max_completion_tokens"] = max_tokens
+            else:
+                kwargs["max_tokens"] = max_tokens
+        elif (
             _is_anthropic_compat_endpoint(provider, _effective_base)
             or _is_nvidia_nim
+            # Atlas's control plane validates and budgets this field.  Cortex
+            # deliberately asks for up to 4,000 tokens for its bounded JSON
+            # operation batch; dropping the explicit cap here would make the
+            # gateway use its much smaller generic default and truncate valid
+            # dream-cycle output.
+            or _provider_norm in _ATLAS_AUX_PROVIDER_NAMES
         ):
             kwargs["max_tokens"] = max_tokens
 
@@ -6275,8 +6379,34 @@ def _build_call_kwargs(
             _deduped.append(_t)
         kwargs["tools"] = _deduped
 
-    # Provider-specific extra_body
-    merged_extra = dict(extra_body or {})
+    # Provider request hooks must run for auxiliary calls just as they do for
+    # the primary chat-completions transport.  In particular, the Atlas
+    # gateway profile produces short-lived lease/job/claim headers here.  Keep
+    # those values on this request-local kwargs mapping: putting them on the
+    # cached OpenAI client would retain one job's authorization across later
+    # calls (and, in a multiplex process, across customer profiles).
+    profile_extra_body: dict[str, Any] = {}
+    if provider:
+        from providers import get_provider_profile
+
+        profile = get_provider_profile(str(provider).strip().lower())
+        if profile is not None:
+            profile_extra_body, profile_top_level = (
+                profile.build_api_kwargs_extras(
+                    reasoning_config=None,
+                    supports_reasoning=False,
+                    model=model,
+                    base_url=base_url,
+                    session_id=None,
+                )
+            )
+            if profile_top_level:
+                kwargs.update(profile_top_level)
+
+    # Provider-specific extra_body.  Match the primary transport's precedence:
+    # explicit caller additions override profile defaults.
+    merged_extra = dict(profile_extra_body or {})
+    merged_extra.update(extra_body or {})
     if provider == "nous":
         merged_extra.setdefault("tags", []).extend(_nous_portal_tags())
     if merged_extra:
@@ -6388,12 +6518,14 @@ def call_llm(
     messages: list,
     temperature: Optional[float] = None,
     max_tokens: int = None,
+    bounded_output: bool = False,
     tools: list = None,
     timeout: float = None,
     extra_body: dict = None,
     api_mode: str = None,
     stream: bool = False,
     stream_options: dict = None,
+    fallback_policy: str = "standard",
 ) -> Any:
     """Centralized synchronous LLM call.
 
@@ -6410,7 +6542,12 @@ def call_llm(
               "anthropic_messages"). Takes precedence over task config.
         messages: Chat messages list.
         temperature: Sampling temperature (None = provider default).
-        max_tokens: Max output tokens (handles max_tokens vs max_completion_tokens).
+        max_tokens: Requested maximum output tokens. Ordinary auxiliary calls
+            omit this on most OpenAI-compatible transports; set
+            ``bounded_output=True`` when the limit must be put on the wire.
+        bounded_output: Require ``max_tokens`` to be sent using the resolved
+            transport's supported parameter spelling. This is intentionally
+            opt-in so generic auxiliary behavior remains unchanged.
         tools: Tool definitions (for function calling).
         timeout: Request timeout in seconds (None = read from auxiliary.{task}.timeout config).
         extra_body: Additional request body fields.
@@ -6420,6 +6557,12 @@ def call_llm(
             output can stream to the user.
         stream_options: Passed through to the request when stream is True
             (e.g. {"include_usage": True}).
+        fallback_policy: ``"standard"`` preserves the normal auxiliary
+            provider fallback chain. ``"none"`` permits same-provider
+            retries/credential refresh only and never sends the payload to a
+            different provider. Privacy-sensitive first-party subsystems such
+            as Atlas Cortex use ``"none"`` and perform any explicitly approved
+            route failover themselves so the actual processor stays auditable.
 
     Returns:
         Response object with .choices[0].message.content, OR — when stream=True —
@@ -6428,6 +6571,11 @@ def call_llm(
     Raises:
         RuntimeError: If no provider is configured.
     """
+    if fallback_policy not in {"standard", "none"}:
+        raise ValueError("fallback_policy must be 'standard' or 'none'")
+    if bounded_output and max_tokens is None:
+        raise ValueError("bounded_output=True requires max_tokens")
+
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
     if api_mode:
@@ -6475,7 +6623,11 @@ def call_llm(
             # tasks because fallback entries may use OAuth / credential-pool
             # auth (for example openai-codex).
             _explicit = (resolved_provider or "").strip().lower()
-            if _explicit and _explicit not in {"auto", "openrouter", "custom"}:
+            if (
+                fallback_policy == "standard"
+                and _explicit
+                and _explicit not in {"auto", "openrouter", "custom"}
+            ):
                 fb_client, fb_model, fb_label = _try_configured_fallback_for_unavailable_client(
                     task, _explicit,
                 )
@@ -6493,7 +6645,7 @@ def call_llm(
             # Pass model=None so each provider uses its own default —
             # resolved_model may be an OpenRouter-format slug that doesn't
             # work on other providers.
-            if client is None and not resolved_base_url:
+            if client is None and not resolved_base_url and fallback_policy == "standard":
                 logger.info("Auxiliary %s: provider %s unavailable, trying auto-detection chain",
                             task or "call", resolved_provider)
                 client, final_model = _get_cached_client("auto", main_runtime=main_runtime, task=task)
@@ -6517,6 +6669,7 @@ def call_llm(
     kwargs = _build_call_kwargs(
         resolved_provider, final_model, messages,
         temperature=temperature, max_tokens=max_tokens,
+        bounded_output=bounded_output,
         tools=tools, timeout=effective_timeout, extra_body=effective_extra_body,
         base_url=_base_info or resolved_base_url)
 
@@ -6637,7 +6790,7 @@ def call_llm(
             "1210" in err_str
             and "bigmodel" in str(getattr(client, "base_url", ""))
         )
-        if max_tokens is not None and (
+        if not bounded_output and max_tokens is not None and (
             "max_tokens" in err_str
             or "unsupported_parameter" in err_str
             or _is_unsupported_parameter_error(first_err, "max_tokens")
@@ -6767,6 +6920,7 @@ def call_llm(
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    bounded_output=bounded_output,
                     tools=tools,
                     effective_timeout=effective_timeout,
                     effective_extra_body=effective_extra_body,
@@ -6809,6 +6963,7 @@ def call_llm(
                         messages=messages,
                         temperature=temperature,
                         max_tokens=max_tokens,
+                        bounded_output=bounded_output,
                         tools=tools,
                         effective_timeout=effective_timeout,
                         effective_extra_body=effective_extra_body,
@@ -6882,7 +7037,7 @@ def call_llm(
             or _is_model_incompatible_error(first_err)
             or _is_invalid_aux_response_error(first_err)
         )
-        if should_fallback and (is_auto or is_capacity_error):
+        if fallback_policy == "standard" and should_fallback and (is_auto or is_capacity_error):
             if _is_auth_error(first_err):
                 reason = "auth error"
             elif _is_payment_error(first_err):

@@ -33,8 +33,33 @@ Substrate facts (verified May 2026):
 
 from __future__ import annotations
 
+import json
+import os
+import time
+import urllib.request
 from dataclasses import dataclass, replace
-from typing import Optional
+from typing import Any, Optional
+
+
+# Cortex intentionally has a smaller catalog than the conversational picker.
+# These utility models are reviewed for low-cost structured extraction; they do
+# not need to support agent tool calling. Keep the order stable so setup and
+# Settings recommend the same route on every installation.
+_CORTEX_OPENROUTER_MODELS: tuple[tuple[str, int], ...] = (
+    ("google/gemini-3.1-flash-lite", 1),
+    ("google/gemini-2.5-flash-lite", 2),
+)
+_CORTEX_STRUCTURED_JSON_PARAMETERS = frozenset({
+    "json_schema",
+    "response_format",
+    "structured_outputs",
+})
+_CORTEX_OPENROUTER_METADATA_TTL_SECONDS = 60 * 60
+_cortex_openrouter_metadata_cache: (
+    tuple[float, dict[str, dict[str, Any]], bool]
+    | tuple[float, dict[str, dict[str, Any]]]
+    | None
+) = None
 
 
 # ─── Public types ───────────────────────────────────────────────────────
@@ -103,6 +128,231 @@ def load_picker_context() -> ConfigContext:
         user_providers=raw if isinstance(raw, dict) else {},
         custom_providers=get_compatible_custom_providers(cfg),
     )
+
+
+def managed_cortex_binding_present() -> bool:
+    """Return True only for an actually bound managed Atlas profile.
+
+    Product branding is deliberately not a signal here. A local Atlas install
+    cannot route the managed ``altas/atlas-cortex-memory`` alias without the
+    deployment identity that authorizes Cortex maintenance jobs.
+    """
+    try:
+        from agent.secret_scope import (
+            build_profile_secret_scope,
+            current_secret_scope,
+            is_multiplex_active,
+        )
+        from hermes_constants import get_hermes_home
+
+        scoped = current_secret_scope()
+        values = dict(scoped) if scoped is not None else build_profile_secret_scope(get_hermes_home())
+        if not is_multiplex_active():
+            values.update(os.environ)
+    except Exception:
+        values = dict(os.environ)
+
+    # A mode flag only expresses intent. The catalog must not surface an
+    # unroutable managed alias until this profile has the stable identity and
+    # control-plane credentials from which request-scoped job claims are made.
+    return all(
+        str(values.get(name) or "").strip()
+        for name in (
+            "ATLAS_CONTROL_PLANE_URL",
+            "ATLAS_DEVICE_TOKEN",
+            "ATLAS_TENANT_ID",
+            "ATLAS_STORE_ID",
+            "ATLAS_AGENT_ID",
+        )
+    )
+
+
+def _fetch_cortex_openrouter_metadata(
+    *,
+    force_refresh: bool = False,
+    timeout: float = 5.0,
+) -> tuple[dict[str, dict[str, Any]], bool]:
+    """Fetch capability metadata for the fixed Cortex OpenRouter shortlist.
+
+    Normal picker opens are network-free until a cached live result exists.
+    An explicit refresh validates the shortlist against OpenRouter's current
+    ``supported_parameters``. Missing capability metadata remains governed by
+    the reviewed in-repo catalog; an explicit list that omits structured JSON
+    support disables that model.
+    """
+    global _cortex_openrouter_metadata_cache
+
+    now = time.monotonic()
+    cached = _cortex_openrouter_metadata_cache
+    if cached is not None and not force_refresh:
+        cached_at, rows = cached[:2]
+        validated = bool(cached[2]) if len(cached) > 2 else True
+        if now - cached_at < _CORTEX_OPENROUTER_METADATA_TTL_SECONDS:
+            return dict(rows), validated
+    if not force_refresh:
+        return {}, False
+
+    request = urllib.request.Request(
+        "https://openrouter.ai/api/v1/models",
+        headers={"Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode())
+    except Exception:
+        if cached is None:
+            return {}, False
+        validated = bool(cached[2]) if len(cached) > 2 else True
+        return dict(cached[1]), validated
+
+    wanted = {model for model, _rank in _CORTEX_OPENROUTER_MODELS}
+    rows: dict[str, dict[str, Any]] = {}
+    for item in payload.get("data", []) if isinstance(payload, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        model = str(item.get("id") or "").strip()
+        if model in wanted:
+            rows[model] = item
+    # ``validated=True`` is part of the cache contract: an omitted reviewed id
+    # stays unavailable for the full TTL on subsequent ordinary loads instead
+    # of being silently resurrected by the curated offline fallback.
+    _cortex_openrouter_metadata_cache = (now, rows, True)
+    return dict(rows), True
+
+
+def build_cortex_memory_models_payload(
+    ctx: ConfigContext,
+    *,
+    refresh: bool = False,
+    approved_model_providers: tuple[str, ...] | list[str] | None = None,
+) -> dict:
+    """Build the dedicated Cortex memory-model picker payload.
+
+    Unlike :func:`build_models_payload`, this inventory never filters on tool
+    calling. Cortex sends bounded JSON classification requests and therefore
+    cares about structured-output support, explicit routing, and separation
+    from the conversational model instead.
+    """
+    from altas.cortex.dream import (
+        cortex_model_routes_equal,
+        cortex_provider_is_approved,
+    )
+    from hermes_cli.auth import get_auth_status
+
+    managed = managed_cortex_binding_present()
+    live, live_was_checked = _fetch_cortex_openrouter_metadata(force_refresh=refresh)
+    providers: list[dict[str, Any]] = []
+
+    if managed:
+        model = "atlas-cortex-memory"
+        selectable = not cortex_model_routes_equal(
+            "altas", model, ctx.current_provider, ctx.current_model
+        )
+        providers.append({
+            "slug": "altas",
+            "name": "Atlas managed memory",
+            "models": [model] if selectable else [],
+            "total_models": 1 if selectable else 0,
+            "authenticated": True,
+            "source": "cortex-memory-managed",
+            "recommended_models": [model],
+            "memory_capabilities": {
+                model: {
+                    "structured_json": True,
+                    "structured_json_validation": "managed_gateway",
+                    "tool_calling_required": False,
+                    "recommended": True,
+                    "recommendation_rank": 1,
+                    "selectable": selectable,
+                    "unavailable_reason": (
+                        "matches the conversational model" if not selectable else ""
+                    ),
+                }
+            },
+        })
+    elif cortex_provider_is_approved("openrouter", approved_model_providers):
+        try:
+            authenticated = bool(get_auth_status("openrouter").get("logged_in"))
+        except Exception:
+            authenticated = False
+        selectable_models: list[str] = []
+        capabilities: dict[str, dict[str, Any]] = {}
+
+        for model, rank in _CORTEX_OPENROUTER_MODELS:
+            item = live.get(model)
+            params = item.get("supported_parameters") if isinstance(item, dict) else None
+            live_structured = (
+                bool(
+                    _CORTEX_STRUCTURED_JSON_PARAMETERS.intersection(
+                        str(value) for value in params if isinstance(value, str)
+                    )
+                )
+                if isinstance(params, list)
+                else None
+            )
+            listed = not live_was_checked or item is not None
+            structured_json = live_structured is not False
+            separate = not cortex_model_routes_equal(
+                "openrouter", model, ctx.current_provider, ctx.current_model
+            )
+            selectable = listed and structured_json and separate
+            if selectable:
+                selectable_models.append(model)
+
+            reasons: list[str] = []
+            if not listed:
+                reasons.append("not listed by OpenRouter")
+            if not structured_json:
+                reasons.append("structured JSON is not advertised")
+            if not separate:
+                reasons.append("matches the conversational model")
+
+            capabilities[model] = {
+                "structured_json": structured_json,
+                "structured_json_validation": (
+                    "openrouter" if live_structured is not None else "curated"
+                ),
+                "tool_calling_required": False,
+                "recommended": True,
+                "recommendation_rank": rank,
+                "selectable": selectable,
+                "unavailable_reason": "; ".join(reasons),
+            }
+
+        providers.append({
+            "slug": "openrouter",
+            "name": "OpenRouter",
+            "models": selectable_models,
+            "total_models": len(selectable_models),
+            "authenticated": authenticated,
+            "auth_type": "api_key",
+            "key_env": "OPENROUTER_API_KEY",
+            "warning": "paste OPENROUTER_API_KEY to activate" if not authenticated else "",
+            "source": "cortex-memory-curated",
+            "recommended_models": [model for model, _rank in _CORTEX_OPENROUTER_MODELS],
+            "memory_capabilities": capabilities,
+        })
+
+    recommended = {"provider": "", "model": ""}
+    for provider in providers:
+        if not provider.get("authenticated"):
+            continue
+        models = provider.get("models") or []
+        if models:
+            recommended = {"provider": provider["slug"], "model": models[0]}
+            break
+
+    return {
+        "recommended": recommended,
+        "providers": providers,
+        "tasks": ["cortex_triage", "cortex_reasoning"],
+        "constraints": {
+            "explicit_route_required": True,
+            "separate_from_main": True,
+            "structured_json_required": True,
+            "tool_calling_required": False,
+        },
+    }
 
 
 # ─── Public: payload builder ────────────────────────────────────────────

@@ -1,6 +1,4 @@
-"""Regression tests for #15165 (CLI sibling site) — CLI exit cleanup must
-forward the agent's conversation transcript to ``shutdown_memory_provider``
-so memory providers' ``on_session_end`` hooks see the real messages.
+"""CLI operational cleanup preserves transcripts without ending sessions.
 
 Before the fix, ``_run_cleanup`` called
 ``shutdown_memory_provider(getattr(agent, 'conversation_history', None) or [])``.
@@ -9,9 +7,10 @@ branch always fired and providers got an empty list on CLI exit. This
 mirrors the gateway bug fixed in the same commit (gateway/run.py uses
 ``_session_messages``, which IS set on ``AIAgent``).
 
-The fix reads ``_session_messages`` (same attribute the gateway path uses)
-with an ``isinstance(..., list)`` guard so MagicMock-based agents in
-other tests keep their existing no-arg behaviour.
+The cleanup safety net reads ``_session_messages`` with an
+``isinstance(..., list)`` guard, but always uses ``finalize=False``. A true
+interactive or one-shot close owns semantic finalization before cleanup;
+signals, atexit, broken stdin, and interpreter teardown do not.
 """
 
 from __future__ import annotations
@@ -41,7 +40,12 @@ def test_cleanup_forwards_session_messages(mock_invoke_hook):
         cli_mod._active_agent_ref = None
         cli_mod._cleanup_done = False
 
-    agent.shutdown_memory_provider.assert_called_once_with(transcript)
+    agent.shutdown_memory_provider.assert_called_once_with(
+        transcript,
+        finalize=False,
+        reason="shutdown",
+    )
+    mock_invoke_hook.assert_not_called()
 
 
 @patch("hermes_cli.plugins.invoke_hook")
@@ -63,7 +67,12 @@ def test_cleanup_empty_list_still_forwarded(mock_invoke_hook):
         cli_mod._active_agent_ref = None
         cli_mod._cleanup_done = False
 
-    agent.shutdown_memory_provider.assert_called_once_with([])
+    agent.shutdown_memory_provider.assert_called_once_with(
+        [],
+        finalize=False,
+        reason="shutdown",
+    )
+    mock_invoke_hook.assert_not_called()
 
 
 @patch("hermes_cli.plugins.invoke_hook")
@@ -87,7 +96,11 @@ def test_cleanup_non_list_attribute_falls_back_to_no_arg(mock_invoke_hook):
         cli_mod._active_agent_ref = None
         cli_mod._cleanup_done = False
 
-    agent.shutdown_memory_provider.assert_called_once_with()
+    agent.shutdown_memory_provider.assert_called_once_with(
+        finalize=False,
+        reason="shutdown",
+    )
+    mock_invoke_hook.assert_not_called()
 
 
 @patch("hermes_cli.plugins.invoke_hook")

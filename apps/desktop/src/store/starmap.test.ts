@@ -1,0 +1,146 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+import type { CortexGraphResponse, CortexHealthResponse, StarmapGraph } from '@/types/hermes'
+
+const getCortexGraph = vi.fn<() => Promise<CortexGraphResponse>>()
+const getCortexHealth = vi.fn<() => Promise<CortexHealthResponse>>()
+const getCortexDream = vi.fn()
+const getStarmapGraph = vi.fn<() => Promise<StarmapGraph>>()
+const runCortexDream = vi.fn()
+
+vi.mock('@/hermes', () => ({ getCortexDream, getCortexGraph, getCortexHealth, getStarmapGraph, runCortexDream }))
+
+const store = await import('./starmap')
+
+function cortex(label: string): CortexGraphResponse {
+  return {
+    communities: [],
+    edges: [],
+    facets: { domains: [], statuses: [], types: [] },
+    generated_at: '2026-07-14T00:00:00Z',
+    layout_seed: 'seed',
+    next_cursor: null,
+    nodes: [
+      {
+        badges: [],
+        community: null,
+        created_at: '2026-07-14T00:00:00Z',
+        degree: 0,
+        domain: 'personal',
+        id: label,
+        label,
+        metadata: {},
+        privacy: 'private',
+        status: 'active',
+        summary: label,
+        type: 'memory',
+        updated_at: '2026-07-14T00:00:00Z',
+        usage: 0
+      }
+    ],
+    projection: 'growth',
+    redaction_summary: { document_bodies_hidden: 0, nodes_omitted_by_limit: 0, raw_evidence_bodies_hidden: 0 },
+    retrieval_run_id: null,
+    timeline_window: { end: null, start: null },
+    version: 'atlas.cortex.graph.v1'
+  }
+}
+
+const legacy = (label: string): StarmapGraph => ({
+  clusters: [],
+  edges: [],
+  memory: [],
+  nodes: [
+    {
+      category: 'legacy',
+      createdBy: null,
+      id: label,
+      kind: 'skill',
+      label,
+      pinned: false,
+      state: 'active',
+      useCount: 0
+    }
+  ],
+  stats: {}
+})
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason: unknown) => void
+
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+
+  return { promise, reject, resolve }
+}
+
+beforeEach(() => {
+  store.resetStarmapGraph()
+  vi.clearAllMocks()
+  getCortexHealth.mockRejectedValue(new Error('health unavailable'))
+})
+
+describe('starmap Cortex loading', () => {
+  it('prefers the native Cortex projection', async () => {
+    getCortexGraph.mockResolvedValue(cortex('native'))
+
+    await store.loadStarmapGraph()
+
+    expect(store.$starmapGraph.get()?.source).toBe('cortex')
+    expect(store.$starmapGraph.get()?.nodes[0]?.label).toBe('native')
+    expect(getStarmapGraph).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the untouched learning graph for older backends', async () => {
+    getCortexGraph.mockRejectedValue(Object.assign(new Error('404: not found'), { statusCode: 404 }))
+    getStarmapGraph.mockResolvedValue(legacy('legacy'))
+
+    await store.loadStarmapGraph()
+
+    expect(store.$starmapGraph.get()?.source).toBe('legacy')
+    expect(store.$starmapGraph.get()?.nodes[0]?.label).toBe('legacy')
+  })
+
+  it('does not mask Cortex authorization or server failures with legacy data', async () => {
+    getCortexGraph.mockRejectedValue(Object.assign(new Error('500: failed'), { statusCode: 500 }))
+
+    await store.loadStarmapGraph()
+
+    expect(store.$starmapGraph.get()).toBeNull()
+    expect(store.$starmapError.get()).toContain('500')
+    expect(getStarmapGraph).not.toHaveBeenCalled()
+  })
+
+  it('reloads the graph when a maintenance job finishes', async () => {
+    getCortexGraph.mockResolvedValueOnce(cortex('before')).mockResolvedValueOnce(cortex('after'))
+    getCortexDream.mockResolvedValue({
+      job: { status: 'succeeded' },
+      version: 'atlas.cortex.job.v1'
+    })
+    getCortexHealth.mockResolvedValue({} as CortexHealthResponse)
+
+    await store.loadStarmapGraph()
+    await store.refreshCortexDreamStatus('job-1')
+
+    expect(store.$starmapGraph.get()?.nodes[0]?.label).toBe('after')
+    expect(getCortexGraph).toHaveBeenCalledTimes(2)
+  })
+
+  it('prevents a slow previous profile from overwriting the new profile', async () => {
+    const oldProfile = deferred<CortexGraphResponse>()
+    getCortexGraph.mockReturnValueOnce(oldProfile.promise)
+    const oldLoad = store.loadStarmapGraph()
+
+    store.resetStarmapGraph()
+    getCortexGraph.mockResolvedValueOnce(cortex('new-profile'))
+    await store.loadStarmapGraph()
+
+    oldProfile.resolve(cortex('old-profile'))
+    await oldLoad
+
+    expect(store.$starmapGraph.get()?.nodes[0]?.label).toBe('new-profile')
+  })
+})

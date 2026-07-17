@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  getCortexMemoryModelOptions,
   getCronJobs,
   getGlobalModelInfo,
   getGlobalModelOptions,
@@ -10,7 +11,8 @@ import {
   getSessionMessages,
   getStatus,
   listAllProfileSessions,
-  listSessions
+  listSessions,
+  setCortexMemoryModelAssignment
 } from './hermes'
 import { refreshActiveProfile } from './store/profile'
 
@@ -101,6 +103,7 @@ describe('Atlas REST session helpers', () => {
       [getHermesConfigDefaults, '/api/config/defaults'],
       [getGlobalModelInfo, '/api/model/info'],
       [() => getGlobalModelOptions(), '/api/model/options?explicit_only=1'],
+      [() => getCortexMemoryModelOptions(), '/api/model/cortex-memory/options'],
       [getCronJobs, '/api/cron/jobs']
     ]
 
@@ -151,6 +154,66 @@ describe('Atlas REST session helpers', () => {
     expect(api).toHaveBeenCalledWith(
       expect.objectContaining({
         path: '/api/model/options?refresh=1&include_unconfigured=1'
+      })
+    )
+  })
+
+  it('uses the dedicated Cortex catalog and atomic assignment contracts', async () => {
+    await getCortexMemoryModelOptions({ refresh: true })
+
+    expect(api).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        path: '/api/model/cortex-memory/options?refresh=1',
+        timeoutMs: 60_000
+      })
+    )
+
+    api.mockClear()
+    await setCortexMemoryModelAssignment({
+      provider: 'openrouter',
+      model: 'google/gemini-3.1-flash-lite'
+    })
+    expect(api).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: '/api/model/cortex-memory',
+        method: 'PUT',
+        body: {
+          provider: 'openrouter',
+          model: 'google/gemini-3.1-flash-lite'
+        }
+      })
+    )
+  })
+
+  it('lets onboarding pin model reads and memory writes to a captured profile', async () => {
+    await getGlobalModelOptions({
+      includeUnconfigured: true,
+      explicitOnly: false,
+      profile: 'customer-west'
+    })
+    expect(api).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        path: '/api/model/options?include_unconfigured=1',
+        profile: 'customer-west'
+      })
+    )
+
+    await getCortexMemoryModelOptions({ profile: 'customer-west', refresh: true })
+    expect(api).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        path: '/api/model/cortex-memory/options?refresh=1',
+        profile: 'customer-west'
+      })
+    )
+
+    await setCortexMemoryModelAssignment(
+      { provider: 'openrouter', model: 'google/gemini-3.1-flash-lite' },
+      { profile: 'customer-west' }
+    )
+    expect(api).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        path: '/api/model/cortex-memory',
+        profile: 'customer-west'
       })
     )
   })

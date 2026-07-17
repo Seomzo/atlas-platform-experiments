@@ -5,7 +5,8 @@ unbounded — every unique (platform, chat_id, thread_id, user_id) tuple
 ever seen was kept forever, regardless of how stale it became.  These
 tests pin the prune behaviour:
 
-  * Entries older than max_age_days (by updated_at) are removed
+  * Max-age-only routing entries are removed without semantic finalization
+  * Independently policy-expired entries are retained for Cortex boundary retry
   * Entries marked ``suspended`` are preserved (user-paused)
   * Entries with an active process attached are preserved
   * max_age_days <= 0 disables pruning entirely
@@ -14,20 +15,28 @@ tests pin the prune behaviour:
     (so a long-running-but-still-active session isn't pruned)
 """
 
+import asyncio
 import json
 import threading
 from datetime import datetime, timedelta
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
+import pytest
 
 from gateway.config import GatewayConfig, Platform, SessionResetPolicy
-from gateway.session import SessionEntry, SessionStore
+from gateway.session import SessionEntry, SessionSource, SessionStore
 
 
-def _make_store(tmp_path, max_age_days: int = 90, has_active_processes_fn=None):
+def _make_store(
+    tmp_path,
+    max_age_days: int = 90,
+    has_active_processes_fn=None,
+    reset_policy: SessionResetPolicy | None = None,
+):
     """Build a SessionStore bypassing SQLite/disk-load side effects."""
     config = GatewayConfig(
-        default_reset_policy=SessionResetPolicy(mode="none"),
+        default_reset_policy=reset_policy or SessionResetPolicy(mode="none"),
         session_store_max_age_days=max_age_days,
     )
     with patch("gateway.session.SessionStore._ensure_loaded"):
@@ -41,8 +50,14 @@ def _make_store(tmp_path, max_age_days: int = 90, has_active_processes_fn=None):
     return store
 
 
-def _entry(key: str, age_days: float, *, suspended: bool = False,
-           session_id: str | None = None) -> SessionEntry:
+def _entry(
+    key: str,
+    age_days: float,
+    *,
+    suspended: bool = False,
+    session_id: str | None = None,
+    finalized: bool = True,
+) -> SessionEntry:
     now = datetime.now()
     return SessionEntry(
         session_key=key,
@@ -52,10 +67,51 @@ def _entry(key: str, age_days: float, *, suspended: bool = False,
         platform=Platform.TELEGRAM,
         chat_type="dm",
         suspended=suspended,
+        expiry_finalized=finalized,
     )
 
 
 class TestPruneBasics:
+    def test_prune_removes_unfinalized_max_age_only_route(self, tmp_path):
+        """Age-only retention drops routing without inventing a boundary."""
+        store = _make_store(tmp_path)
+        store._entries["pending"] = _entry(
+            "pending", age_days=1000, finalized=False
+        )
+
+        removed = store.prune_old_entries(max_age_days=90)
+
+        assert removed == 1
+        assert "pending" not in store._entries
+
+    def test_prune_retains_unfinalized_policy_expiry_for_boundary_retry(
+        self, tmp_path
+    ):
+        store = _make_store(
+            tmp_path,
+            reset_policy=SessionResetPolicy(mode="idle", idle_minutes=1),
+        )
+        entry = _entry("pending", age_days=1000, finalized=False)
+        store._entries["pending"] = entry
+
+        assert store._is_session_expired(entry)
+        assert store.prune_old_entries(max_age_days=90) == 0
+        assert store._entries["pending"] is entry
+
+    def test_prune_removes_policy_expiry_after_boundary_acknowledgement(
+        self, tmp_path
+    ):
+        store = _make_store(
+            tmp_path,
+            reset_policy=SessionResetPolicy(mode="idle", idle_minutes=1),
+        )
+        store._entries["finalized"] = _entry(
+            "finalized", age_days=1000, finalized=True
+        )
+
+        assert store.prune_old_entries(max_age_days=90) == 1
+        assert "finalized" not in store._entries
+
     def test_prune_removes_entries_past_max_age(self, tmp_path):
         store = _make_store(tmp_path)
         store._entries["old"] = _entry("old", age_days=100)
@@ -143,6 +199,30 @@ class TestPruneBasics:
 
         assert removed == 1
         assert "active" in store._entries
+        assert "idle" not in store._entries
+
+    def test_prune_fails_closed_when_active_process_check_raises(self, tmp_path):
+        def _unavailable(_session_key: str) -> bool:
+            raise RuntimeError("process registry unavailable")
+
+        store = _make_store(tmp_path, has_active_processes_fn=_unavailable)
+        store._entries["old"] = _entry("old", age_days=1000, finalized=False)
+
+        assert store.prune_old_entries(max_age_days=90) == 0
+        assert "old" in store._entries
+
+    def test_prune_skips_exact_protected_route(self, tmp_path):
+        store = _make_store(tmp_path)
+        store._entries["live"] = _entry("live", age_days=1000, finalized=False)
+        store._entries["idle"] = _entry("idle", age_days=1000, finalized=False)
+
+        removed = store.prune_old_entries(
+            max_age_days=90,
+            protected_session_keys={"live"},
+        )
+
+        assert removed == 1
+        assert "live" in store._entries
         assert "idle" not in store._entries
 
     def test_prune_active_check_uses_session_key_not_session_id(self, tmp_path):
@@ -297,6 +377,173 @@ class TestGatewayWatcherCallsPrune:
 
         should_prune = (now - last_ts) > prune_interval
         assert should_prune is False
+
+
+def _age_prune_runner(session_store: SessionStore):
+    from gateway.run import GatewayRunner
+
+    runner = object.__new__(GatewayRunner)
+    runner._running = True
+    runner._running_agents = {}
+    runner._agent_cache = {}
+    # Production always guards the agent cache with a lock.  The expiry
+    # watcher deliberately refuses to read the cache without it, so use the
+    # real shape here instead of accidentally forcing the detached path.
+    runner._agent_cache_lock = threading.RLock()
+    runner._last_session_store_prune_ts = 0.0
+    runner._session_model_overrides = {}
+    runner._pending_model_notes = {}
+    runner._last_resolved_model = {}
+    runner._pending_approvals = {}
+    runner._update_prompt_pending = {}
+    runner.session_store = session_store
+    runner.config = session_store.config
+    runner._evict_cached_agent = MagicMock()
+    runner._set_session_reasoning_override = MagicMock()
+    runner._sweep_idle_cached_agents = MagicMock(return_value=0)
+    return runner
+
+
+async def _run_one_watcher_sweep(runner) -> None:
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(_seconds):
+        await real_sleep(0)
+
+    with patch("gateway.run.asyncio.sleep", side_effect=fast_sleep):
+        await runner._session_expiry_watcher(interval=0)
+
+
+@pytest.mark.asyncio
+async def test_policy_expiry_failure_keeps_predecessor_token_for_retry(tmp_path):
+    """Max-age cleanup cannot bypass a failed genuine policy boundary."""
+    store = _make_store(
+        tmp_path / "sessions",
+        reset_policy=SessionResetPolicy(mode="idle", idle_minutes=1),
+    )
+    key = "agent:dealer-a:telegram:dm:old"
+    entry = _entry(key, age_days=1000, finalized=False, session_id="old-session")
+    entry.origin = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="old",
+        chat_type="dm",
+        user_id="customer-a",
+        profile="dealer-a",
+    )
+    store._entries[key] = entry
+    runner = _age_prune_runner(store)
+
+    manager = MagicMock()
+
+    def fail_boundary(*_args, **_kwargs):
+        runner._running = False
+        raise OSError("simulated Cortex write failure")
+
+    manager.on_session_finalize.side_effect = fail_boundary
+    runner._agent_cache = {
+        key: SimpleNamespace(_memory_manager=manager, _session_messages=[])
+    }
+
+    async def run_inline(func, *args):
+        return func(*args)
+
+    runner._run_in_executor_with_context = run_inline
+
+    await _run_one_watcher_sweep(runner)
+
+    manager.on_session_finalize.assert_called_once_with(
+        [], reason="session_expired"
+    )
+    assert entry.expiry_finalized is False
+    replacement = store._entries[key]
+    assert replacement is not entry
+    assert replacement.previous_session_id == entry.session_id
+    assert replacement.previous_finalize_reason == "session_expired"
+
+
+@pytest.mark.asyncio
+async def test_max_age_only_prune_never_finalizes_detached_cortex(
+    tmp_path, monkeypatch
+):
+    """Routing retention removes the route without creating model authority."""
+    from altas.cortex.config import CortexConfig
+    from altas.cortex.models import EvidenceInput
+    from altas.cortex.store import CortexStore
+
+    profile_home = tmp_path / "dealer-a"
+    config = CortexConfig.from_mapping(
+        {
+            "cortex": {
+                "enabled": True,
+                "capture": {"enabled": True},
+                "dream": {"enabled": False},
+            }
+        },
+        profile_home,
+    )
+    cortex = CortexStore(
+        config.database_path,
+        owner_customer_id="customer-a",
+    )
+    cortex.initialize()
+    cortex.ensure_session("old-session")
+    cortex.append_evidence(
+        "old-session",
+        EvidenceInput(
+            source_type="user_message",
+            content="retain this customer decision",
+            source_locator="old-session:turn:1:user",
+        ),
+    )
+
+    store = _make_store(tmp_path / "sessions")
+    key = "agent:dealer-a:telegram:dm:old"
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="old",
+        chat_type="dm",
+        user_id="customer-a",
+        profile="dealer-a",
+    )
+    entry = _entry(key, age_days=1000, finalized=False, session_id="old-session")
+    entry.origin = source
+    store._entries[key] = entry
+    runner = _age_prune_runner(store)
+
+    monkeypatch.setattr(
+        "altas.cortex.lifecycle.CortexConfig.load", lambda _home: config
+    )
+    monkeypatch.setattr(
+        "altas.cortex.lifecycle.open_cortex_store",
+        lambda _home, _identity: (cortex, config),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.profiles.get_profile_dir", lambda _profile: profile_home
+    )
+
+    def stop_after_idle_sweep():
+        runner._running = False
+        return 0
+
+    runner._sweep_idle_cached_agents = MagicMock(side_effect=stop_after_idle_sweep)
+    with patch("hermes_cli.plugins.invoke_hook") as invoke_hook:
+        await _run_one_watcher_sweep(runner)
+
+    assert key not in store._entries
+    assert cortex.session_lineage("old-session")["state"] == "active"
+    invoke_hook.assert_not_called()
+    with cortex.connect() as connection:
+        admissions = connection.execute(
+            "SELECT COUNT(*) FROM session_distill_admissions WHERE brain_id=?",
+            (cortex.brain_id,),
+        ).fetchone()[0]
+        roots = connection.execute(
+            "SELECT COUNT(*) FROM cognitive_jobs WHERE brain_id=? "
+            "AND job_type='session_distill' AND parent_job_id IS NULL",
+            (cortex.brain_id,),
+        ).fetchone()[0]
+    assert admissions == 0
+    assert roots == 0
 
 
 class TestReadmeSentinel:

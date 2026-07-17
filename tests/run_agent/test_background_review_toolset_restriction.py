@@ -199,6 +199,36 @@ def test_background_review_excludes_memory_when_disabled():
     assert "memory" not in whitelist
 
 
+def test_skill_only_review_excludes_memory_even_when_memory_is_enabled():
+    """A skill cadence trigger cannot opportunistically rewrite MEMORY.md."""
+    import run_agent
+    from hermes_cli import plugins as _plugins
+
+    captured = {}
+
+    def _capture_whitelist(whitelist, deny_msg_fmt=None):
+        captured["whitelist"] = set(whitelist)
+        raise RuntimeError("stop after capturing whitelist")
+
+    agent = _make_agent_stub(run_agent.AIAgent)
+    agent._memory_enabled = True
+
+    def _no_init(self, *args, **kwargs):
+        return None
+
+    with patch.object(run_agent.AIAgent, "__init__", _no_init), \
+         patch.object(_plugins, "set_thread_tool_whitelist", _capture_whitelist), \
+         patch("threading.Thread", _SyncThread):
+        agent._spawn_background_review(
+            messages_snapshot=[],
+            review_memory=False,
+            review_skills=True,
+        )
+
+    assert "skill_manage" in captured["whitelist"]
+    assert "memory" not in captured["whitelist"]
+
+
 def test_background_review_includes_memory_when_user_profile_enabled():
     """user_profile_enabled alone (USER.md) still needs the memory tool."""
     import run_agent

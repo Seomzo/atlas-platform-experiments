@@ -27,6 +27,51 @@ import subprocess
 from hermes_cli.config import clear_model_endpoint_credentials
 
 
+def _main_model_choice_is_separate_from_cortex(provider: str, model: str) -> bool:
+    """Reject a chat route already assigned to either Cortex memory pass.
+
+    The web settings API applies this rule when saving the conversational
+    model. Native ``atlas model`` flows persist through different provider
+    helpers, so they must share the same bidirectional separation gate before
+    any model config is written.
+    """
+    from altas.cortex.dream import cortex_model_routes_equal
+    from hermes_cli.config import load_config
+
+    cfg = load_config()
+    auxiliary = cfg.get("auxiliary")
+    if not isinstance(auxiliary, dict):
+        return True
+    for task in ("cortex_triage", "cortex_reasoning"):
+        slot = auxiliary.get(task)
+        if not isinstance(slot, dict):
+            continue
+        cortex_provider = str(slot.get("provider") or "").strip()
+        cortex_model = str(slot.get("model") or "").strip()
+        if cortex_provider.lower() in {"", "auto", "main"} or not cortex_model:
+            continue
+        if not cortex_model_routes_equal(
+            provider,
+            model,
+            cortex_provider,
+            cortex_model,
+        ):
+            continue
+        print()
+        print(
+            "Cannot set the conversational model to "
+            f"{provider} · {model}: it is already assigned to auxiliary.{task}."
+        )
+        print("Chat and Cortex memory must use different provider/model routes.")
+        print(
+            "Choose a different chat model, or change the Cortex memory model "
+            "under Configure auxiliary models first."
+        )
+        print("The conversational model was not changed.")
+        return False
+    return True
+
+
 def _prune_replaced_custom_model_config_credentials(
     base_url: str,
     *,
@@ -165,6 +210,8 @@ def _model_flow_openrouter(config, current_model=""):
         confirm_api_key=_resolved or existing_key,
     )
     if selected:
+        if not _main_model_choice_is_separate_from_cortex("openrouter", selected):
+            return
         _save_model_choice(selected)
 
         # Update config provider and deactivate any OAuth provider
@@ -258,6 +305,9 @@ def _model_flow_moa(config, current_model=""):
 
     selected_name = names[idx]
     preset = presets[selected_name]
+
+    if not _main_model_choice_is_separate_from_cortex("moa", selected_name):
+        return
 
     cfg = load_config()
     model = cfg.get("model")
@@ -481,6 +531,8 @@ def _model_flow_nous(
         confirm_api_key=creds.get("api_key", ""),
     )
     if selected:
+        if not _main_model_choice_is_separate_from_cortex("nous", selected):
+            return
         _save_model_choice(selected)
         # Reactivate Nous as the provider and update config
         inference_url = creds.get("base_url", "")
@@ -596,6 +648,10 @@ def _model_flow_openai_codex(config, current_model=""):
         confirm_api_key=_codex_token or "",
     )
     if selected:
+        if not _main_model_choice_is_separate_from_cortex(
+            "openai-codex", selected
+        ):
+            return
         _save_model_choice(selected)
         _update_config_for_provider("openai-codex", DEFAULT_CODEX_BASE_URL)
         print(f"Default model set to: {selected} (via OpenAI Codex)")
@@ -677,6 +733,8 @@ def _model_flow_xai_oauth(_config, current_model="", *, args=None):
     models = list(_PROVIDER_MODELS.get("xai-oauth") or _PROVIDER_MODELS.get("xai") or [])
     selected = _prompt_model_selection(models, current_model=current_model or (models[0] if models else "grok-build-0.1"))
     if selected:
+        if not _main_model_choice_is_separate_from_cortex("xai-oauth", selected):
+            return
         _save_model_choice(selected)
         _update_config_for_provider("xai-oauth", base_url)
         print(f"Default model set to: {selected} (via xAI Grok OAuth — SuperGrok / Premium+)")
@@ -725,6 +783,8 @@ def _model_flow_qwen_oauth(_config, current_model=""):
         confirm_base_url=DEFAULT_QWEN_BASE_URL,
     )
     if selected:
+        if not _main_model_choice_is_separate_from_cortex("qwen-oauth", selected):
+            return
         _save_model_choice(selected)
         _update_config_for_provider("qwen-oauth", DEFAULT_QWEN_BASE_URL)
         print(f"Default model set to: {selected} (via Qwen OAuth)")
@@ -779,6 +839,8 @@ def _model_flow_minimax_oauth(config, current_model="", args=None):
         confirm_base_url=creds["base_url"],
     )
     if not selected:
+        return
+    if not _main_model_choice_is_separate_from_cortex("minimax-oauth", selected):
         return
     _save_model_choice(selected)
     _update_config_for_provider("minimax-oauth", creds["base_url"])
@@ -949,6 +1011,8 @@ def _model_flow_custom(config):
             context_length = None
 
     if model_name:
+        if not _main_model_choice_is_separate_from_cortex("custom", model_name):
+            return
         _save_model_choice(model_name)
 
         # Update config and deactivate any OAuth provider
@@ -1308,6 +1372,11 @@ def _model_flow_azure_foundry(config, current_model=""):
         print("No model name provided. Cancelled.")
         return
 
+    if not _main_model_choice_is_separate_from_cortex(
+        "azure-foundry", effective_model
+    ):
+        return
+
     # ── Step 6: context-length lookup ────────────────────────────────
     ctx_len = azure_detect.lookup_context_length(
         effective_model,
@@ -1504,6 +1573,15 @@ def _model_flow_named_custom(config, provider_info):
             return
 
     # Activate and save the model to the custom_providers entry
+    selected_provider = (
+        "custom:" + provider_key.strip().lower().replace(" ", "-")
+        if provider_key
+        else "custom"
+    )
+    if not _main_model_choice_is_separate_from_cortex(
+        selected_provider, model_name
+    ):
+        return
     _save_model_choice(model_name)
 
     cfg = load_config()
@@ -1512,7 +1590,7 @@ def _model_flow_named_custom(config, provider_info):
         model = {"default": model} if model else {}
         cfg["model"] = model
     if provider_key:
-        model["provider"] = "custom:" + provider_key.strip().lower().replace(" ", "-")
+        model["provider"] = selected_provider
         model.pop("base_url", None)
         model.pop("api_key", None)
     else:
@@ -1739,6 +1817,8 @@ def _model_flow_copilot(config, current_model=""):
                 reasoning_efforts, current_effort=current_effort
             )
 
+        if not _main_model_choice_is_separate_from_cortex(provider_id, selected):
+            return
         _save_model_choice(selected)
 
         cfg = load_config()
@@ -1869,6 +1949,8 @@ def _model_flow_copilot_acp(config, current_model=""):
         )
         or selected
     )
+    if not _main_model_choice_is_separate_from_cortex(provider_id, selected):
+        return
     _save_model_choice(selected)
 
     cfg = load_config()
@@ -1958,6 +2040,8 @@ def _model_flow_kimi(config, current_model=""):
             selected = None
 
     if selected:
+        if not _main_model_choice_is_separate_from_cortex(provider_id, selected):
+            return
         _save_model_choice(selected)
 
         # Update config with provider and base URL
@@ -2073,6 +2157,8 @@ def _model_flow_stepfun(config, current_model=""):
             selected = None
 
     if selected:
+        if not _main_model_choice_is_separate_from_cortex(provider_id, selected):
+            return
         _save_model_choice(selected)
 
         cfg = load_config()
@@ -2156,6 +2242,8 @@ def _model_flow_bedrock_api_key(config, region, current_model=""):
             selected = None
 
     if selected:
+        if not _main_model_choice_is_separate_from_cortex("custom", selected):
+            return
         _save_model_choice(selected)
 
         # Save as custom provider pointing to bedrock-mantle
@@ -2351,6 +2439,8 @@ def _model_flow_bedrock(config, current_model=""):
             selected = None
 
     if selected:
+        if not _main_model_choice_is_separate_from_cortex("bedrock", selected):
+            return
         _save_model_choice(selected)
 
         cfg = load_config()
@@ -2453,6 +2543,8 @@ def _model_flow_vertex(config, current_model=""):
     )
 
     if selected:
+        if not _main_model_choice_is_separate_from_cortex("vertex", selected):
+            return
         _save_model_choice(selected)
 
         cfg = load_config()
@@ -2817,6 +2909,8 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
         if provider_id in {"opencode-zen", "opencode-go"}:
             selected = normalize_opencode_model_id(provider_id, selected)
 
+        if not _main_model_choice_is_separate_from_cortex(provider_id, selected):
+            return
         _save_model_choice(selected)
 
         # Update config with provider, base URL, and provider-specific API mode
@@ -2969,6 +3063,8 @@ def _model_flow_anthropic(config, current_model=""):
             selected = None
 
     if selected:
+        if not _main_model_choice_is_separate_from_cortex("anthropic", selected):
+            return
         _save_model_choice(selected)
 
         # Update config with provider — clear base_url since

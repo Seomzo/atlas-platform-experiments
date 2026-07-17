@@ -253,7 +253,7 @@ export const sessionCommands: SlashCommand[] = [
             return
           }
 
-          void ctx.session.closeSession(prevSid)
+          void ctx.session.releaseSession(prevSid)
           patchUiState({ sid: r.session_id })
           ctx.session.setSessionStartedAt(Date.now())
           ctx.transcript.sys(`branched → ${r.title ?? ''}`)

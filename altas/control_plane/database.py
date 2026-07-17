@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from collections.abc import Iterator
@@ -106,6 +107,19 @@ CREATE TABLE IF NOT EXISTS jobs (
     UNIQUE (tenant_id, idempotency_key)
 );
 
+CREATE TABLE IF NOT EXISTS cortex_dispatch_admissions (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    store_id TEXT NOT NULL REFERENCES stores(id),
+    agent_id TEXT NOT NULL REFERENCES agents(id),
+    device_id TEXT NOT NULL REFERENCES devices(id),
+    job_id TEXT NOT NULL REFERENCES jobs(id),
+    admission_kind TEXT NOT NULL CHECK (
+        admission_kind IN ('created', 'requeued')
+    ),
+    admitted_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS usage_events (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES tenants(id),
@@ -149,6 +163,12 @@ CREATE INDEX IF NOT EXISTS idx_entitlements_lookup
     ON entitlements(tenant_id, store_id, capability, status);
 CREATE INDEX IF NOT EXISTS idx_jobs_worker_queue
     ON jobs(tenant_id, store_id, agent_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_cortex_admission
+    ON jobs(device_id, capability, created_at, status);
+CREATE INDEX IF NOT EXISTS idx_cortex_dispatch_admission_window
+    ON cortex_dispatch_admissions(
+        tenant_id, store_id, agent_id, device_id, admitted_at
+    );
 CREATE INDEX IF NOT EXISTS idx_usage_context
     ON usage_events(tenant_id, store_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_audit_context
@@ -213,6 +233,53 @@ class Database:
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_audit_job ON audit_logs(job_id, created_at)"
+            )
+            # Pre-provenance releases stored Cortex dispatches with an empty
+            # payload. They can never be matched to an owner-local admission;
+            # terminally quarantine active legacy/tampered rows so one poison
+            # job cannot monopolize the one-active-dispatch guard forever.
+            from altas.cortex.managed_dispatch import CortexDispatchAdmission
+
+            active_cortex_jobs = connection.execute(
+                "SELECT id, payload_json FROM jobs "
+                "WHERE capability='cortex.memory_maintenance' "
+                "AND status IN ('queued','running')"
+            ).fetchall()
+            for job in active_cortex_jobs:
+                try:
+                    payload = json.loads(str(job["payload_json"] or ""))
+                    if not isinstance(payload, dict) or set(payload) != {
+                        "dispatch_admission"
+                    }:
+                        raise ValueError("invalid Cortex dispatch payload")
+                    admission = CortexDispatchAdmission.from_mapping(
+                        payload["dispatch_admission"]
+                    )
+                    if not admission.is_canonical():
+                        raise ValueError("non-canonical Cortex dispatch admission")
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    connection.execute(
+                        "UPDATE jobs SET status='canceled', "
+                        "claimed_by_device_id=NULL, claim_token_hash=NULL, "
+                        "error='CortexDispatchAdmissionInvalid', started_at=NULL, "
+                        "completed_at=COALESCE(completed_at, updated_at) WHERE id=?",
+                        (job["id"],),
+                    )
+            # Existing databases predate the admission ledger. Count each
+            # historical Cortex job once so restarting after an upgrade cannot
+            # reset the rolling dispatch allowance. New jobs use the same
+            # deterministic event ID, making this backfill restart-safe.
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO cortex_dispatch_admissions
+                    (id, tenant_id, store_id, agent_id, device_id, job_id,
+                     admission_kind, admitted_at)
+                SELECT 'cortex-create:' || id, tenant_id, store_id, agent_id,
+                       device_id, id, 'created', created_at
+                FROM jobs
+                WHERE capability='cortex.memory_maintenance'
+                  AND device_id IS NOT NULL
+                """
             )
         for database_file in self.path.parent.glob(f"{self.path.name}*"):
             if database_file.is_file():

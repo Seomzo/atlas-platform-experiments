@@ -1,7 +1,7 @@
 import { darken, luminance, mixRgb, rgba } from './color'
 import {
   LIT_BAND_ALPHA,
-  NODE_SHAPE,
+  nodeShape,
   ORB_DARKEN,
   RING_INNER,
   RING_PARAMS,
@@ -9,6 +9,7 @@ import {
   WHITE,
   WHITEISH_SHEEN
 } from './constants'
+import { domainRgb } from './domain-color'
 import { clamp, fitScale, nodeRadius, recencyInk, shapePath } from './geometry'
 import { countLabel, ellipsize, metaBadges, nodeFooter, wrapText } from './text'
 import type {
@@ -203,6 +204,7 @@ export function drawScene(scene: Scene): DrawResult {
   const { h, w } = size
   const { bandInk, base, bg, c, chipBg, darkTheme, inkInv, memoryInk, skillInk } = palette
   const { bandAlpha, lightSize, ringAlpha, sheen } = RING_PARAMS[darkTheme ? 'dark' : 'light']
+  const cortexScene = nodes.some(node => node.cortexType)
 
   let animating = false
   const ringLabelRects: RingLabelRect[] = []
@@ -255,11 +257,15 @@ export function drawScene(scene: Scene): DrawResult {
   const projY = (wy: number) => wy * vp.k * TILT + vp.y
   // Baseline node scale: the rested fit, held stable while the playback camera
   // dives into the core — so t≈0 nodes don't balloon (see fitScale).
-  const nodeK = fitScale(w, h, rings)
+
+  const nodeK = cortexScene
+    ? Math.max(0.9, fitScale(w, h, rings, { contain: true, padding: 64 }))
+    : fitScale(w, h, rings)
 
   // Two composable layers: node highlight (selected ?? hovered) in full ink, and
   // a selection-only ring/date filter that only shifts alpha.
   const focusSet = focusId ? (adjacency.get(focusId) ?? new Set<string>()) : null
+  const denseFocus = cortexScene && (focusSet?.size ?? 0) > 12
   const ringIdx = selectedRing
   const ring = ringIdx != null ? (rings[ringIdx] ?? null) : null
   // A selected ring owns the band it caps: previous ring → this ring. Ring 0 is
@@ -437,7 +443,11 @@ export function drawScene(scene: Scene): DrawResult {
     const targetAlpha = !revealed
       ? 0
       : lit
-        ? 1
+        ? cortexScene
+          ? denseFocus
+            ? 0.1
+            : 0.42
+          : 1
         : key === hoverLink
           ? clamp(ambient * 2, 0, 0.7)
           : focusId || ring
@@ -451,12 +461,37 @@ export function drawScene(scene: Scene): DrawResult {
     }
 
     ctx.strokeStyle = shade(linkAlpha)
-    ctx.setLineDash(lit || !c.lineDashed ? [] : [c.lineDash, c.lineDash])
-    ctx.lineWidth = lit ? 1.5 : c.lineWidth
+    const inactive = Boolean(link.status && link.status !== 'active')
+    ctx.setLineDash(lit || (!c.lineDashed && !inactive) ? [] : [c.lineDash, c.lineDash])
+    ctx.lineWidth = lit ? (cortexScene ? (denseFocus ? 0.6 : 0.9) : 1.5) : c.lineWidth
     ctx.beginPath()
     ctx.moveTo(x1, y1)
     ctx.lineTo(x2, y2)
     ctx.stroke()
+
+    if (link.direction === 'directed') {
+      const dx = x2 - x1
+      const dy = y2 - y1
+      const length = Math.hypot(dx, dy) || 1
+      const ux = dx / length
+      const uy = dy / length
+      const pad = nodeRadius(t) * nodeK + 3
+      const tipX = projX(t.x) - ux * pad
+      const tipY = projY(t.y) - uy * pad
+      const arrow = lit ? 4 : 3
+      const backX = tipX - ux * arrow * 2
+      const backY = tipY - uy * arrow * 2
+      const px = -uy * arrow
+      const py = ux * arrow
+
+      ctx.fillStyle = shade(linkAlpha)
+      ctx.beginPath()
+      ctx.moveTo(tipX, tipY)
+      ctx.lineTo(backX + px, backY + py)
+      ctx.lineTo(backX - px, backY - py)
+      ctx.closePath()
+      ctx.fill()
+    }
   }
 
   ctx.setLineDash([])
@@ -478,7 +513,7 @@ export function drawScene(scene: Scene): DrawResult {
     }
 
     const isFocus = revealed && n.id === focusId
-    const isNeighbor = revealed && !!focusSet && focusSet.has(n.id)
+    const isNeighbor = revealed && !denseFocus && !!focusSet && focusSet.has(n.id)
     const inRing = !!ring && n.rec >= ringLo && n.rec < ringHi
     const nodeHigh = isFocus || isNeighbor
     const er = erec(n.rec)
@@ -508,8 +543,24 @@ export function drawScene(scene: Scene): DrawResult {
     const sy = projY(n.y * posScale)
 
     ctx.globalAlpha = vis
-    const nodeInk = nodeHigh ? base : n.kind === 'memory' ? memoryInk : skillInk
-    const shape = NODE_SHAPE[n.kind]
+
+    const cortexInk = n.cortexType
+      ? n.cortexType === 'memory'
+        ? { b: 91, g: 184, r: 245 }
+        : n.cortexType === 'evidence'
+          ? mixRgb(domainRgb(n.category), base, 0.3)
+          : n.cortexType === 'document'
+            ? mixRgb(domainRgb(n.category), base, 0.12)
+            : n.cortexType === 'community' || n.cortexType === 'session'
+              ? mixRgb(domainRgb(n.category), base, 0.2)
+              : domainRgb(n.category)
+      : null
+
+    const nodeInk = nodeHigh
+      ? mixRgb(cortexInk ?? base, base, 0.45)
+      : (cortexInk ?? (n.kind === 'memory' ? memoryInk : skillInk))
+
+    const shape = nodeShape(n)
 
     if (shape === 'circle') {
       // Highlighted orbs pop full bright; others darken so the sheen reads. The
@@ -682,7 +733,17 @@ export function drawScene(scene: Scene): DrawResult {
     placed.push(tipRect)
   }
 
-  for (const id of focusSet ?? []) {
+  const neighborLabelIds = [...(focusSet ?? [])]
+    .filter(id => id !== focusId)
+    .sort((left, right) => {
+      const a = byId.get(left)
+      const b = byId.get(right)
+
+      return (b?.useCount ?? 0) - (a?.useCount ?? 0) || (a?.label ?? left).localeCompare(b?.label ?? right)
+    })
+    .slice(0, cortexScene ? 8 : undefined)
+
+  for (const id of neighborLabelIds) {
     if (id === hoverId) {
       continue
     }

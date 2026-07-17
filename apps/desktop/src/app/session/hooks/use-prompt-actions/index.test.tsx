@@ -59,6 +59,7 @@ function Harness({
   requestGateway,
   resumeStoredSession,
   seedMessages,
+  startFreshSessionDraft,
   storedSessionId,
   activeSessionId,
   createBackendSessionForSend
@@ -71,6 +72,7 @@ function Harness({
   requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
   resumeStoredSession?: (storedSessionId: string) => Promise<void> | void
   seedMessages?: unknown[]
+  startFreshSessionDraft?: () => Promise<boolean>
   storedSessionId?: null | string
   activeSessionId?: null | string
   createBackendSessionForSend?: () => Promise<null | string>
@@ -104,7 +106,7 @@ function Harness({
     requestGateway,
     resumeStoredSession: resumeStoredSession ?? (() => undefined),
     selectedStoredSessionIdRef,
-    startFreshSessionDraft: () => undefined,
+    startFreshSessionDraft: startFreshSessionDraft ?? (async () => true),
     sttEnabled: false,
     updateSessionState: (_sessionId, updater) => {
       // Seed with interrupted:true so we can prove a fresh submit clears it.
@@ -226,6 +228,46 @@ describe('usePromptActions slash.exec dispatch payloads', () => {
     cleanup()
     $busy.set(false)
     vi.restoreAllMocks()
+  })
+
+  it('waits for semantic session finalization before /new completes', async () => {
+    let resolveFinalization: ((started: boolean) => void) | null = null
+
+    const startFreshSessionDraft = vi.fn(
+      () =>
+        new Promise<boolean>(resolve => {
+          resolveFinalization = resolve
+        })
+    )
+
+    const requestGateway = vi.fn(async () => ({}) as never)
+    let handle: HarnessHandle | null = null
+
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        startFreshSessionDraft={startFreshSessionDraft}
+      />
+    )
+    await waitFor(() => expect(handle).not.toBeNull())
+
+    let completed = false
+
+    const submit = handle!.submitText('/new').then(result => {
+      completed = true
+
+      return result
+    })
+
+    await waitFor(() => expect(startFreshSessionDraft).toHaveBeenCalledTimes(1))
+    expect(completed).toBe(false)
+    expect(requestGateway).not.toHaveBeenCalled()
+
+    resolveFinalization!(true)
+    await expect(submit).resolves.toBe(true)
+    expect(completed).toBe(true)
   })
 
   it('submits /goal send directives returned directly by slash.exec instead of rendering no output', async () => {
@@ -1239,7 +1281,7 @@ describe('usePromptActions sleep/wake session recovery', () => {
 
     expect(ok).toBe(true)
     expect(calls.map(c => c.method)).toEqual(['prompt.submit', 'session.resume', 'prompt.submit'])
-    expect(calls[1]?.params).toEqual({ session_id: STORED_SESSION_ID })
+    expect(calls[1]?.params).toEqual({ session_id: STORED_SESSION_ID, source: 'desktop' })
     expect(calls[2]?.params).toEqual({
       session_id: RECOVERED_SESSION_ID,
       text: 'message during starved loop'

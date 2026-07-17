@@ -12,7 +12,9 @@ import threading
 import time
 from typing import Any, Dict, List
 
-from agent.memory_manager import MemoryManager
+import pytest
+
+from agent.memory_manager import MemoryDurabilityError, MemoryManager
 from agent.memory_provider import MemoryProvider
 
 
@@ -98,7 +100,9 @@ def test_boundary_commit_serializes_against_turn_syncs():
     assert mm.flush_pending(timeout=5)
 
     kinds = [c[0] for c in provider.calls]
-    assert kinds == ["end", "switch", "sync_turn"], f"unexpected order: {provider.calls}"
+    assert kinds == ["end", "switch", "sync_turn"], (
+        f"unexpected order: {provider.calls}"
+    )
 
 
 def test_boundary_commit_switch_still_fires_when_end_raises():
@@ -111,14 +115,80 @@ def test_boundary_commit_switch_still_fires_when_end_raises():
     provider = _ExplodingEndProvider()
     mm = _make_manager(provider)
 
-    mm.commit_session_boundary_async([{"role": "user", "content": "x"}], new_session_id="new-sid")
+    mm.commit_session_boundary_async(
+        [{"role": "user", "content": "x"}], new_session_id="new-sid"
+    )
     assert mm.flush_pending(timeout=5)
 
     assert ("switch", "new-sid", True) in provider.calls
 
 
+def test_durable_boundary_failure_aborts_before_switch_and_reports_health():
+    class _DurableExplodingProvider(_RecordingProvider):
+        @property
+        def requires_synchronous_turn_durability(self) -> bool:
+            return True
+
+        def commit_session_boundary(self, messages, **kwargs):  # type: ignore[override]
+            self.calls.append(("atomic_commit", kwargs.get("reason")))
+            raise OSError("simulated full Cortex database")
+
+        def on_durability_failure(self, operation, error):  # type: ignore[override]
+            self.calls.append(("durability_failure", operation, type(error).__name__))
+
+    provider = _DurableExplodingProvider()
+    mm = _make_manager(provider)
+
+    with pytest.raises(MemoryDurabilityError, match="left unchanged"):
+        mm.commit_session_boundary_async(
+            [{"role": "user", "content": "must remain live"}],
+            new_session_id="new-sid",
+        )
+
+    assert [call[0] for call in provider.calls] == [
+        "atomic_commit",
+        "durability_failure",
+    ]
+    assert provider.calls[-1] == (
+        "durability_failure",
+        "session-boundary atomic commit",
+        "OSError",
+    )
+
+
+def test_durable_boundary_requires_one_atomic_provider_commit():
+    class _AtomicDurableProvider(_RecordingProvider):
+        @property
+        def requires_synchronous_turn_durability(self) -> bool:
+            return True
+
+        def commit_session_boundary(self, messages, **kwargs):  # type: ignore[override]
+            self.calls.append((
+                "atomic_commit",
+                kwargs["new_session_id"],
+                kwargs["reason"],
+                list(messages),
+            ))
+            return True
+
+    provider = _AtomicDurableProvider()
+    mm = _make_manager(provider)
+    messages = [{"role": "user", "content": "old epoch"}]
+
+    mm.commit_session_boundary_async(
+        messages,
+        new_session_id="new-sid",
+        parent_session_id="old-sid",
+        reason="new_session",
+    )
+
+    assert provider.calls == [("atomic_commit", "new-sid", "new_session", messages)]
+
+
 def test_boundary_commit_noop_without_providers():
     mm = MemoryManager()
     # Must not create the executor or raise.
-    mm.commit_session_boundary_async([{"role": "user", "content": "x"}], new_session_id="s")
+    mm.commit_session_boundary_async(
+        [{"role": "user", "content": "x"}], new_session_id="s"
+    )
     assert mm._sync_executor is None

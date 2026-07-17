@@ -40,6 +40,7 @@ def server():
         # via reload (which we don't do).
         mod._sessions.clear()
         mod._pending.clear()
+        mod._pending_prompt_payloads.clear()
         mod._answers.clear()
 
 
@@ -425,9 +426,13 @@ def test_enforce_session_cap_evicts_oldest_detached_only(server, monkeypatch):
     the limit, and never a live-transport / running / mid-build one."""
 
     monkeypatch.setattr(server, "_load_cfg", lambda: {"max_live_sessions": 2})
-    evicted: list[str] = []
+    evicted: list[tuple[str, str | None, bool]] = []
     monkeypatch.setattr(
-        server, "_close_session_by_id", lambda sid, end_reason=None: evicted.append(sid)
+        server,
+        "_close_session_by_id",
+        lambda sid, end_reason=None, finalize=True: evicted.append(
+            (sid, end_reason, finalize)
+        ),
     )
 
     def _ready() -> threading.Event:
@@ -457,14 +462,19 @@ def test_enforce_session_cap_evicts_oldest_detached_only(server, monkeypatch):
 
     # 4 sessions, cap 2 -> evict 2. Only detached+idle+built are eligible, oldest
     # first; the running one and the live-transport one are exempt.
-    assert evicted == ["old_detached", "new_detached"]
+    assert evicted == [
+        ("old_detached", "lru_evict", False),
+        ("new_detached", "lru_evict", False),
+    ]
 
 
 def test_enforce_session_cap_disabled_is_noop(server, monkeypatch):
     monkeypatch.setattr(server, "_load_cfg", lambda: {"max_live_sessions": 0})
     evicted: list[str] = []
     monkeypatch.setattr(
-        server, "_close_session_by_id", lambda sid, end_reason=None: evicted.append(sid)
+        server,
+        "_close_session_by_id",
+        lambda sid, end_reason=None, finalize=True: evicted.append(sid),
     )
     server._sessions.clear()
     server._sessions.update(
@@ -477,6 +487,978 @@ def test_enforce_session_cap_disabled_is_noop(server, monkeypatch):
     server._enforce_session_cap()
 
     assert evicted == []
+
+
+def test_shutdown_sessions_uses_nonsemantic_teardown(server, monkeypatch):
+    calls: list[tuple[str, str | None, bool]] = []
+    server._sessions.clear()
+    server._sessions["shutdown_sid"] = {"agent": None}
+    monkeypatch.setattr(
+        server,
+        "_close_session_by_id",
+        lambda sid, end_reason=None, finalize=True: calls.append(
+            (sid, end_reason, finalize)
+        ),
+    )
+
+    server._shutdown_sessions()
+
+    assert calls == [("shutdown_sid", "tui_shutdown", False)]
+
+
+def test_idle_reaper_uses_nonsemantic_teardown(server, monkeypatch):
+    calls: list[tuple[str, str | None, bool]] = []
+    server._sessions.clear()
+    server._sessions["idle_sid"] = {"agent": None}
+    monkeypatch.setattr(server, "_session_is_evictable", lambda *_args: True)
+    monkeypatch.setattr(server, "_enforce_session_cap", lambda: None)
+    monkeypatch.setattr(
+        server,
+        "_close_session_by_id",
+        lambda sid, end_reason=None, finalize=True: calls.append(
+            (sid, end_reason, finalize)
+        ),
+    )
+
+    server._reap_idle_sessions()
+
+    assert calls == [("idle_sid", "idle_timeout", False)]
+
+
+def test_ws_disconnect_close_uses_nonsemantic_teardown(server, monkeypatch):
+    calls: list[tuple[str, str | None, bool]] = []
+    transport = object()
+    server._sessions.clear()
+    server._sessions["ws_sid"] = {
+        "agent": None,
+        "close_on_disconnect": True,
+        "transport": transport,
+    }
+    monkeypatch.setattr(
+        server,
+        "_close_session_by_id",
+        lambda sid, end_reason=None, finalize=True: calls.append(
+            (sid, end_reason, finalize)
+        ),
+    )
+
+    assert server._close_sessions_for_transport(transport) == (1, 0)
+
+    assert calls == [("ws_sid", "ws_disconnect", False)]
+
+
+def test_ws_orphan_reaper_uses_nonsemantic_teardown(server, monkeypatch):
+    calls: list[tuple[str, str | None, bool]] = []
+    server._sessions.clear()
+    server._sessions["orphan_sid"] = {
+        "agent": None,
+        "running": False,
+        "transport": server._detached_ws_transport,
+    }
+    monkeypatch.setattr(server, "_WS_ORPHAN_REAP_GRACE_S", 1.0)
+    monkeypatch.setattr(
+        server,
+        "_close_session_by_id",
+        lambda sid, end_reason=None, finalize=True: calls.append(
+            (sid, end_reason, finalize)
+        ),
+    )
+
+    class _ImmediateTimer:
+        daemon = False
+
+        def __init__(self, _delay, callback):
+            self.callback = callback
+
+        def start(self):
+            self.callback()
+
+    monkeypatch.setattr(server.threading, "Timer", _ImmediateTimer)
+
+    server._schedule_ws_orphan_reap("orphan_sid")
+
+    assert calls == [("orphan_sid", "ws_orphan_reap", False)]
+
+
+def test_explicit_session_close_requests_semantic_teardown(server, monkeypatch):
+    calls: list[tuple[str, str | None, bool]] = []
+    monkeypatch.setattr(
+        server,
+        "_close_session_by_id",
+        lambda sid, end_reason=None, finalize=True: calls.append(
+            (sid, end_reason, finalize)
+        )
+        or True,
+    )
+
+    response = server.handle_request(
+        {
+            "id": "close",
+            "method": "session.close",
+            "params": {"session_id": "explicit_sid"},
+        }
+    )
+
+    assert response["result"]["closed"] is True
+    assert calls == [("explicit_sid", "tui_close", True)]
+
+
+def _idle_close_session(**overrides):
+    session = {
+        "agent": object(),
+        "history": [],
+        "history_lock": threading.Lock(),
+        "running": False,
+        "session_key": "stored-session",
+    }
+    session.update(overrides)
+    return session
+
+
+def test_session_close_require_idle_claims_before_semantic_teardown(
+    server, monkeypatch
+):
+    sid = "idle-semantic-close"
+    session = _idle_close_session()
+    server._sessions[sid] = session
+    teardown = MagicMock()
+    monkeypatch.setattr(server, "_teardown_session", teardown)
+
+    response = server.handle_request(
+        {
+            "id": "close",
+            "method": "session.close",
+            "params": {"session_id": sid, "require_idle": True},
+        }
+    )
+
+    assert response["result"]["closed"] is True
+    assert sid not in server._sessions
+    assert session["_close_claimed"] is True
+    teardown.assert_called_once_with(
+        session,
+        end_reason="tui_close",
+        finalize=True,
+        checkpoint=True,
+    )
+
+
+def test_session_close_require_idle_rejects_running_runtime(server, monkeypatch):
+    sid = "busy-semantic-close"
+    session = _idle_close_session(running=True)
+    server._sessions[sid] = session
+    teardown = MagicMock()
+    monkeypatch.setattr(server, "_teardown_session", teardown)
+
+    response = server.handle_request(
+        {
+            "id": "close",
+            "method": "session.close",
+            "params": {"session_id": sid, "require_idle": True},
+        }
+    )
+
+    assert response["error"]["code"] == 4023
+    assert "current turn is still running" in response["error"]["message"]
+    assert server._sessions[sid] is session
+    assert "_close_claimed" not in session
+    teardown.assert_not_called()
+
+
+def test_session_close_default_preserves_existing_force_close_semantics(
+    server, monkeypatch
+):
+    close = MagicMock(return_value=True)
+    monkeypatch.setattr(server, "_close_session_by_id", close)
+
+    response = server.handle_request(
+        {
+            "id": "close",
+            "method": "session.close",
+            "params": {"session_id": "legacy-caller"},
+        }
+    )
+
+    assert response["result"]["closed"] is True
+    close.assert_called_once_with("legacy-caller", end_reason="tui_close")
+
+
+def test_session_close_require_idle_checks_pending_prompt_under_prompt_lock(
+    server, monkeypatch
+):
+    sid = "prompting-semantic-close"
+    session = _idle_close_session()
+    server._sessions[sid] = session
+    teardown = MagicMock()
+    monkeypatch.setattr(server, "_teardown_session", teardown)
+    pending_event = threading.Event()
+    with server._prompt_lock:
+        server._pending["approval-1"] = (sid, pending_event)
+        server._pending_prompt_payloads["approval-1"] = ("secret.request", {})
+
+    response = server.handle_request(
+        {
+            "id": "close",
+            "method": "session.close",
+            "params": {"session_id": sid, "require_idle": True},
+        }
+    )
+
+    assert response["error"]["code"] == 4023
+    assert "waiting for secret input" in response["error"]["message"]
+    assert server._sessions[sid] is session
+    teardown.assert_not_called()
+
+
+def test_session_close_require_idle_check_is_atomic_with_running_transition(
+    server, monkeypatch
+):
+    sid = "racing-semantic-close"
+    history_lock = threading.Lock()
+    session = _idle_close_session(history_lock=history_lock)
+    server._sessions[sid] = session
+    teardown = MagicMock()
+    monkeypatch.setattr(server, "_teardown_session", teardown)
+    response = {}
+
+    history_lock.acquire()
+    try:
+        close_thread = threading.Thread(
+            target=lambda: response.update(
+                server.handle_request(
+                    {
+                        "id": "close",
+                        "method": "session.close",
+                        "params": {"session_id": sid, "require_idle": True},
+                    }
+                )
+            )
+        )
+        close_thread.start()
+        # The close is waiting to inspect the state under history_lock. A turn
+        # transition that wins this lock must therefore be observed, not popped.
+        time.sleep(0.02)
+        session["running"] = True
+    finally:
+        history_lock.release()
+
+    close_thread.join(timeout=1)
+    assert not close_thread.is_alive()
+    assert response["error"]["code"] == 4023
+    assert server._sessions[sid] is session
+    teardown.assert_not_called()
+
+
+def test_session_close_require_idle_will_not_finalize_unbuilt_transcript(
+    server, monkeypatch
+):
+    sid = "unbuilt-semantic-close"
+    session = _idle_close_session(
+        agent=None,
+        history=[{"role": "user", "content": "remember this"}],
+    )
+    server._sessions[sid] = session
+    teardown = MagicMock()
+    monkeypatch.setattr(server, "_teardown_session", teardown)
+
+    response = server.handle_request(
+        {
+            "id": "close",
+            "method": "session.close",
+            "params": {"session_id": sid, "require_idle": True},
+        }
+    )
+
+    assert response["error"]["code"] == 4023
+    assert "preparing its memory boundary" in response["error"]["message"]
+    assert server._sessions[sid] is session
+    teardown.assert_not_called()
+
+
+def test_recovery_resume_require_unended_refuses_finalized_row(server, monkeypatch):
+    class _DB:
+        def get_session(self, session_id):
+            assert session_id == "stored-ended"
+            return {
+                "cwd": None,
+                "ended_at": 123.0,
+                "id": session_id,
+            }
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def resolve_resume_session_id(self, session_id):
+            return session_id
+
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+
+    response = server.handle_request(
+        {
+            "id": "resume",
+            "method": "session.resume",
+            "params": {
+                "session_id": "stored-ended",
+                "eager_build": True,
+                "require_unended": True,
+            },
+        }
+    )
+
+    assert response["error"] == {
+        "code": 4091,
+        "message": "session already ended",
+    }
+    assert server._sessions == {}
+
+
+def test_eager_recovery_resume_rechecks_ended_row_at_publication(
+    server, monkeypatch
+):
+    state = {"ended": False, "reopened": False}
+
+    class _DB:
+        def get_session(self, session_id):
+            assert session_id == "stored-racing"
+            return {
+                "cwd": "/tmp/project",
+                "ended_at": 123.0 if state["ended"] else None,
+                "id": session_id,
+            }
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def get_messages_as_conversation(self, _session_id, **_kwargs):
+            return []
+
+        def reopen_session(self, _session_id):
+            state["reopened"] = True
+
+        def resolve_resume_session_id(self, session_id):
+            return session_id
+
+    class _Lease:
+        released = 0
+
+        def release(self):
+            self.released += 1
+
+    class _Agent:
+        def __init__(self):
+            self.closed = False
+            self.memory_shutdown = []
+
+        def close(self):
+            self.closed = True
+
+        def shutdown_memory_provider(self, history, *, finalize):
+            self.memory_shutdown.append((history, finalize))
+
+    db = _DB()
+    lease = _Lease()
+    agent = _Agent()
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(
+        server,
+        "_claim_active_session_slot",
+        lambda *_args, **_kwargs: (lease, None),
+    )
+    monkeypatch.setattr(server, "_profile_configured_cwd", lambda _home: "/tmp/project")
+    monkeypatch.setattr(server, "_stored_session_runtime_overrides", lambda _row: {})
+
+    def _build_agent(*_args, **_kwargs):
+        # Simulate another window completing semantic close while the eager
+        # recovery agent is outside _session_resume_lock being constructed.
+        state["ended"] = True
+        return agent
+
+    monkeypatch.setattr(server, "_make_agent", _build_agent)
+
+    response = server.handle_request(
+        {
+            "id": "resume",
+            "method": "session.resume",
+            "params": {
+                "session_id": "stored-racing",
+                "eager_build": True,
+                "require_unended": True,
+            },
+        }
+    )
+
+    assert response["error"] == {
+        "code": 4091,
+        "message": "session already ended",
+    }
+    assert state["reopened"] is False
+    assert server._sessions == {}
+    assert lease.released == 1
+    assert agent.memory_shutdown == [([], False)]
+    assert agent._end_session_on_close is False
+    assert agent.closed is True
+
+
+def test_deferred_recovery_claim_rechecks_ended_row_before_registration(server):
+    class _DB:
+        def get_session(self, session_id):
+            assert session_id == "stored-ended-late"
+            return {"ended_at": 321.0, "id": session_id}
+
+    class _Lease:
+        released = 0
+
+        def release(self):
+            self.released += 1
+
+    lease = _Lease()
+    record = {
+        "history": [],
+        "history_lock": threading.Lock(),
+        "running": False,
+        "session_key": "stored-ended-late",
+    }
+
+    with pytest.raises(server._ResumeSessionAlreadyEnded):
+        server._claim_or_reuse_live(
+            "runtime-loser",
+            "stored-ended-late",
+            record,
+            lease,
+            require_unended_db=_DB(),
+        )
+
+    assert lease.released == 1
+    assert "runtime-loser" not in server._sessions
+
+
+def test_session_release_is_nonsemantic_and_skips_checkpoint(server, monkeypatch):
+    calls: list[tuple[str, str | None, bool, bool]] = []
+    monkeypatch.setattr(
+        server,
+        "_close_session_by_id",
+        lambda sid, end_reason=None, finalize=True, checkpoint=True: calls.append(
+            (sid, end_reason, finalize, checkpoint)
+        )
+        or True,
+    )
+
+    response = server.handle_request(
+        {
+            "id": "release",
+            "method": "session.release",
+            "params": {"session_id": "switched-away"},
+        }
+    )
+
+    assert response["result"]["released"] is True
+    assert calls == [("switched-away", "tui_release", False, False)]
+
+
+def test_session_release_rejects_a_busy_runtime(server, monkeypatch):
+    sid = "busy-release"
+    server._sessions[sid] = {"running": True}
+    close = MagicMock()
+    monkeypatch.setattr(server, "_close_session_by_id", close)
+
+    response = server.handle_request(
+        {"id": "release", "method": "session.release", "params": {"session_id": sid}}
+    )
+
+    assert response["error"]["code"] == 4023
+    close.assert_not_called()
+
+
+def test_session_delete_reconciles_full_lineage_before_db_delete(
+    server, monkeypatch, tmp_path
+):
+    """Privacy delete tombstones roots, tips, and delegates before SessionDB."""
+    from altas.cortex.models import EvidenceInput
+    from altas.cortex.store import CortexStore
+
+    root_id = "delete-root"
+    tip_id = "delete-tip"
+    delegate_id = "delete-delegate"
+    branch_id = "independent-branch"
+    delete_ids = [root_id, tip_id, delegate_id]
+    row_ids = {root_id: 101, tip_id: 202, delegate_id: 303, branch_id: 404}
+    store = CortexStore(tmp_path / "cortex.db", owner_customer_id="customer-1")
+    store.initialize()
+    store.ensure_session(root_id)
+    store.ensure_session(
+        tip_id,
+        parent_session_id=root_id,
+        logical_conversation_id=root_id,
+    )
+    store.ensure_session(delegate_id, parent_session_id=root_id)
+    store.ensure_session(branch_id, parent_session_id=root_id)
+    for session_id, row_id in row_ids.items():
+        store.append_evidence(
+            session_id,
+            EvidenceInput(
+                source_type="user_message",
+                content=f"evidence for {session_id}",
+                source_locator=f"{session_id}:row:{row_id}:user",
+                metadata={"source_row_id": row_id},
+            ),
+        )
+
+    events: list[str] = []
+
+    class _DB:
+        def resolve_session_id(self, session_id):
+            return session_id if session_id == root_id else None
+
+        def resolve_resume_session_id(self, _session_id):
+            return tip_id
+
+        def get_session_delete_closure(self, session_ids):
+            assert session_ids == [root_id]
+            return list(delete_ids)
+
+        def get_messages(self, session_id, *, include_inactive=False):
+            assert include_inactive is True
+            events.append(f"rows:{session_id}")
+            return [{"id": row_ids[session_id]}]
+
+        def get_session(self, _session_id):
+            return {"source": "tui"}
+
+        def delete_sessions(self, session_ids, *, sessions_dir=None, **kwargs):
+            assert list(session_ids) == delete_ids
+            assert sessions_dir == tmp_path / "sessions"
+            kwargs["before_delete"](tuple(session_ids))
+            assert all(store.session_lineage(sid)["state"] == "deleted" for sid in delete_ids)
+            assert store.session_lineage(branch_id)["state"] == "active"
+            with store.connect() as connection:
+                live = connection.execute(
+                    "SELECT session_id FROM evidence_items WHERE brain_id=? "
+                    "AND tombstoned_at IS NULL",
+                    (store.brain_id,),
+                ).fetchall()
+            assert {row["session_id"] for row in live} == {branch_id}
+            events.append("sessiondb-delete")
+            return len(delete_ids)
+
+    db = _DB()
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_cortex_store_for_session_delete", lambda *_a, **_k: store)
+    monkeypatch.setattr(server, "get_hermes_home", lambda: tmp_path)
+
+    response = server.handle_request(
+        {
+            "id": "privacy-delete",
+            "method": "session.delete",
+            "params": {"session_id": root_id},
+        }
+    )
+
+    assert "error" not in response, response
+    assert response["result"]["deleted_session_ids"] == delete_ids
+    assert events == ["sessiondb-delete"]
+    with store.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM session_distill_admissions WHERE brain_id=?",
+            (store.brain_id,),
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM cognitive_jobs WHERE brain_id=?",
+            (store.brain_id,),
+        ).fetchone()[0] == 0
+
+
+def test_active_session_delete_releases_without_finalize_or_checkpoint(
+    server, monkeypatch, tmp_path
+):
+    from hermes_cli.active_sessions import try_acquire_active_session
+
+    target = "active-delete"
+    events: list[str] = []
+
+    class _DB:
+        def resolve_session_id(self, session_id):
+            return session_id
+
+        def resolve_resume_session_id(self, session_id):
+            return session_id
+
+        def get_session_delete_closure(self, _session_ids):
+            return [target]
+
+        def get_session(self, _session_id):
+            return {"source": "tui"}
+
+        def delete_sessions(self, session_ids, *, sessions_dir=None, **kwargs):
+            assert session_ids == [target]
+            kwargs["before_delete"](tuple(session_ids))
+            events.append("sessiondb-delete")
+            return 1
+
+    manager = MagicMock()
+    agent = types.SimpleNamespace(
+        session_id=target,
+        _session_messages=None,
+        _memory_manager=manager,
+        _persist_session=MagicMock(),
+        shutdown_memory_provider=MagicMock(),
+        close=MagicMock(side_effect=lambda: events.append("runtime-close")),
+    )
+    sid = "active-runtime"
+    lease, message = try_acquire_active_session(
+        session_id=target,
+        surface="tui",
+        config={},
+        hermes_home=tmp_path,
+    )
+    assert message is None
+    assert lease is not None
+    server._sessions[sid] = {
+        "agent": agent,
+        "history": [{"role": "user", "content": "private"}],
+        "history_lock": threading.Lock(),
+        "running": False,
+        "session_key": target,
+        "profile_home": str(tmp_path),
+        "source": "tui",
+        "active_session_lease": lease,
+    }
+    db = _DB()
+    reconcile = MagicMock(return_value={"evidence": 1, "sessions": 1})
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_session_db", lambda _session: server.contextlib.nullcontext(db))
+    monkeypatch.setattr(server, "_reconcile_cortex_session_delete", reconcile)
+
+    response = server.handle_request(
+        {
+            "id": "privacy-delete",
+            "method": "session.delete",
+            "params": {"session_id": target, "runtime_session_id": sid},
+        }
+    )
+
+    assert "error" not in response, response
+    assert sid not in server._sessions
+    assert events == ["sessiondb-delete", "runtime-close"]
+    reconcile.assert_called_once()
+    assert reconcile.call_args.args == (db, [target])
+    assert reconcile.call_args.kwargs["session"]["agent"] is agent
+    assert reconcile.call_args.kwargs["hermes_home"] == tmp_path
+    manager.on_session_finalize.assert_not_called()
+    manager.on_session_end.assert_not_called()
+    agent._persist_session.assert_not_called()
+    agent.shutdown_memory_provider.assert_called_once_with(
+        [],
+        finalize=False,
+        reason="privacy_delete",
+    )
+    assert lease.released is True
+
+
+def test_session_delete_refuses_another_process_lease(
+    server, monkeypatch, tmp_path
+):
+    from hermes_cli.active_sessions import try_acquire_active_session
+
+    target = "other-process-active"
+
+    class _DB:
+        def resolve_session_id(self, session_id):
+            return session_id
+
+        def get_session_delete_closure(self, _session_ids):
+            return [target]
+
+        def get_session(self, _session_id):
+            return {"id": target, "source": "cli"}
+
+        def delete_sessions(self, *_args, **_kwargs):
+            raise AssertionError("cross-process active session must survive")
+
+    lease, message = try_acquire_active_session(
+        session_id=target,
+        surface="cli",
+        config={},
+        hermes_home=tmp_path,
+    )
+    assert message is None
+    assert lease is not None
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "get_hermes_home", lambda: tmp_path)
+    try:
+        response = server.handle_request(
+            {
+                "id": "privacy-delete",
+                "method": "session.delete",
+                "params": {"session_id": target},
+            }
+        )
+    finally:
+        lease.release()
+
+    assert response["error"]["code"] == 4023
+
+
+def test_inactive_cross_profile_delete_uses_selected_profile_home(
+    server, monkeypatch, tmp_path
+):
+    target = "cross-profile-delete"
+    profile_home = tmp_path / "customer-profile"
+    observed = {}
+
+    class _DB:
+        def resolve_session_id(self, session_id):
+            return session_id
+
+        def get_session_delete_closure(self, _session_ids):
+            return [target]
+
+        def get_session(self, _session_id):
+            return {"id": target, "ended_at": 1}
+
+        def delete_sessions(self, session_ids, **kwargs):
+            kwargs["before_delete"](tuple(session_ids))
+            return len(session_ids)
+
+    db = _DB()
+    monkeypatch.setattr(server, "_profile_home", lambda profile: profile_home)
+
+    def session_db(session):
+        observed["db_home"] = session.get("profile_home")
+        return server.contextlib.nullcontext(db)
+
+    def reconcile(*_args, **kwargs):
+        observed["cortex_home"] = kwargs["hermes_home"]
+        return {"evidence": 0, "sessions": 1}
+
+    monkeypatch.setattr(server, "_session_db", session_db)
+    monkeypatch.setattr(server, "_reconcile_cortex_session_delete", reconcile)
+
+    response = server.handle_request(
+        {
+            "id": "privacy-delete",
+            "method": "session.delete",
+            "params": {"session_id": target, "profile": "customer"},
+        }
+    )
+
+    assert "error" not in response, response
+    assert observed["db_home"] == str(profile_home)
+    assert observed["cortex_home"] == profile_home
+    assert (profile_home / "runtime" / "deleted_sessions.json").exists()
+
+
+def test_session_delete_failure_restores_claimed_runtime(server, monkeypatch, tmp_path):
+    target = "retry-delete"
+    sid = "retry-runtime"
+    session = {
+        "agent": types.SimpleNamespace(session_id=target),
+        "history": [],
+        "history_lock": threading.Lock(),
+        "running": False,
+        "session_key": target,
+        "profile_home": str(tmp_path),
+    }
+    server._sessions[sid] = session
+    db = MagicMock()
+    db.resolve_session_id.return_value = target
+    db.resolve_resume_session_id.return_value = target
+    db.get_session_delete_closure.return_value = [target]
+    db.delete_sessions.side_effect = lambda session_ids, **kwargs: kwargs[
+        "before_delete"
+    ](tuple(session_ids))
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_session_db", lambda _session: server.contextlib.nullcontext(db))
+    monkeypatch.setattr(
+        server,
+        "_reconcile_cortex_session_delete",
+        MagicMock(side_effect=OSError("cortex locked")),
+    )
+
+    response = server.handle_request(
+        {
+            "id": "privacy-delete",
+            "method": "session.delete",
+            "params": {"session_id": target, "runtime_session_id": sid},
+        }
+    )
+
+    assert response["error"]["code"] == 5036
+    assert server._sessions[sid] is session
+    db.delete_sessions.assert_called_once()
+
+
+def test_prompt_claim_wins_atomically_over_privacy_delete(
+    server, monkeypatch, tmp_path
+):
+    """A turn claimed first stays live; delete must observe it as busy."""
+    target = "prompt-delete-race"
+    sid = "prompt-delete-runtime"
+    entered_claim = threading.Event()
+    release_claim = threading.Event()
+    release_run = threading.Event()
+    session = {
+        "agent": None,
+        "agent_ready": threading.Event(),
+        "history": [],
+        "history_lock": threading.Lock(),
+        "running": False,
+        "session_key": target,
+        "profile_home": str(tmp_path),
+        "transport": server._stdio_transport,
+    }
+    server._sessions[sid] = session
+
+    class _DB:
+        def resolve_session_id(self, session_id):
+            return session_id
+
+        def resolve_resume_session_id(self, session_id):
+            return session_id
+
+        def get_session_delete_closure(self, _session_ids):
+            return [target]
+
+    db = _DB()
+    monkeypatch.setattr(
+        server, "_session_db", lambda _session: server.contextlib.nullcontext(db)
+    )
+    monkeypatch.setattr(server, "_ensure_session_db_row", lambda _session: None)
+    monkeypatch.setattr(server, "_persist_branch_seed", lambda _session: None)
+    monkeypatch.setattr(server, "_start_agent_build", lambda *_args: None)
+    monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: None)
+
+    def _claim(_session, _text):
+        entered_claim.set()
+        assert release_claim.wait(2)
+
+    def _wait_agent(_session, _rid):
+        assert release_run.wait(2)
+        return server._err("prompt", 5000, "test turn stopped")
+
+    monkeypatch.setattr(server, "_start_inflight_turn", _claim)
+    monkeypatch.setattr(server, "_wait_agent", _wait_agent)
+
+    responses: dict[str, dict] = {}
+    prompt_thread = threading.Thread(
+        target=lambda: responses.setdefault(
+            "prompt",
+            server.handle_request(
+                {
+                    "id": "prompt",
+                    "method": "prompt.submit",
+                    "params": {"session_id": sid, "text": "keep this turn"},
+                }
+            ),
+        )
+    )
+    delete_thread = threading.Thread(
+        target=lambda: responses.setdefault(
+            "delete",
+            server.handle_request(
+                {
+                    "id": "delete",
+                    "method": "session.delete",
+                    "params": {
+                        "session_id": target,
+                        "runtime_session_id": sid,
+                    },
+                }
+            ),
+        )
+    )
+    prompt_thread.start()
+    assert entered_claim.wait(2)
+    delete_thread.start()
+    release_claim.set()
+    prompt_thread.join(2)
+    delete_thread.join(2)
+    release_run.set()
+
+    assert not prompt_thread.is_alive()
+    assert not delete_thread.is_alive()
+    assert responses["prompt"]["result"]["status"] == "streaming"
+    assert responses["delete"]["error"]["code"] == 4023
+    assert server._sessions[sid] is session
+
+
+def test_privacy_delete_claim_prevents_late_prompt_resurrection(
+    server, monkeypatch, tmp_path
+):
+    """Once deletion pops a runtime, a concurrent prompt sees not-found."""
+    target = "delete-prompt-race"
+    sid = "delete-prompt-runtime"
+    entered_reconcile = threading.Event()
+    release_reconcile = threading.Event()
+    session = {
+        "agent": None,
+        "history": [],
+        "history_lock": threading.Lock(),
+        "running": False,
+        "session_key": target,
+        "profile_home": str(tmp_path),
+        "transport": server._stdio_transport,
+    }
+    server._sessions[sid] = session
+
+    class _DB:
+        def resolve_session_id(self, session_id):
+            return session_id
+
+        def resolve_resume_session_id(self, session_id):
+            return session_id
+
+        def get_session_delete_closure(self, _session_ids):
+            return [target]
+
+        def delete_sessions(self, session_ids, *, sessions_dir=None, **kwargs):
+            assert session_ids == [target]
+            kwargs["before_delete"](tuple(session_ids))
+            return 1
+
+    db = _DB()
+    monkeypatch.setattr(
+        server, "_session_db", lambda _session: server.contextlib.nullcontext(db)
+    )
+
+    def _reconcile(*_args, **_kwargs):
+        entered_reconcile.set()
+        assert release_reconcile.wait(2)
+        return {"evidence": 0, "sessions": 1}
+
+    monkeypatch.setattr(server, "_reconcile_cortex_session_delete", _reconcile)
+    responses: dict[str, dict] = {}
+    delete_thread = threading.Thread(
+        target=lambda: responses.setdefault(
+            "delete",
+            server.handle_request(
+                {
+                    "id": "delete",
+                    "method": "session.delete",
+                    "params": {
+                        "session_id": target,
+                        "runtime_session_id": sid,
+                    },
+                }
+            ),
+        )
+    )
+    delete_thread.start()
+    assert entered_reconcile.wait(2)
+
+    prompt = server.handle_request(
+        {
+            "id": "prompt",
+            "method": "prompt.submit",
+            "params": {"session_id": sid, "text": "too late"},
+        }
+    )
+    release_reconcile.set()
+    delete_thread.join(2)
+
+    assert prompt["error"]["code"] == 4001
+    assert not delete_thread.is_alive()
+    assert responses["delete"]["result"]["deleted"] == target
+    assert sid not in server._sessions
 
 
 def test_session_resume_handles_multimodal_list_content(server, monkeypatch):
@@ -763,6 +1745,8 @@ def test_session_resume_reuses_existing_live_session(server, monkeypatch):
     target = "20260409_010101_abc123"
     created_sids: list[str] = []
     closed_sids: list[str] = []
+    shutdown_sids: list[str] = []
+    close_end_session_flags: list[bool] = []
     first_agent_started = threading.Event()
     agent_can_finish = threading.Event()
 
@@ -791,8 +1775,15 @@ def test_session_resume_reuses_existing_live_session(server, monkeypatch):
             self.sid = sid
             self.model = "test/model"
             self.session_id = session_id
+            self._end_session_on_close = True
+
+        def shutdown_memory_provider(self, messages, *, finalize=False):
+            assert messages == []
+            assert finalize is False
+            shutdown_sids.append(self.sid)
 
         def close(self):
+            close_end_session_flags.append(self._end_session_on_close)
             closed_sids.append(self.sid)
 
     def make_agent(sid, key, session_id=None, session_db=None, **_kwargs):
@@ -876,6 +1867,8 @@ def test_session_resume_reuses_existing_live_session(server, monkeypatch):
     assert winner in created_sids
     survivors = [sid for sid in created_sids if sid not in closed_sids]
     assert survivors == [winner]
+    assert shutdown_sids == closed_sids
+    assert close_end_session_flags == [False]
     assert all(sid == winner for sid in server._sessions)
 
 
@@ -1120,6 +2113,7 @@ def test_session_branch_persists_branched_from_marker(server, monkeypatch):
     thing that keeps a TUI branch visible.
     """
     create_calls = []
+    make_agent_calls = []
 
     class _DB:
         def get_session_title(self, _key):
@@ -1141,13 +2135,18 @@ def test_session_branch_persists_branched_from_marker(server, monkeypatch):
     monkeypatch.setattr(server, "_get_db", lambda: _DB())
     monkeypatch.setattr(server, "_resolve_model", lambda: "test/model")
     monkeypatch.setattr(server, "_new_session_key", lambda: "20260101_000001_child0")
-    monkeypatch.setattr(
-        server,
-        "_make_agent",
-        lambda _sid, key, session_id=None, session_db=None, **_kwargs: types.SimpleNamespace(
-            model="test/model", session_id=session_id or key
-        ),
-    )
+    def _make_agent(_sid, key, session_id=None, session_db=None, **kwargs):
+        make_agent_calls.append(
+            {
+                "key": key,
+                "session_id": session_id,
+                "session_db": session_db,
+                **kwargs,
+            }
+        )
+        return types.SimpleNamespace(model="test/model", session_id=session_id or key)
+
+    monkeypatch.setattr(server, "_make_agent", _make_agent)
     monkeypatch.setattr(server, "_init_session", lambda *_a, **_k: None)
     monkeypatch.setattr(server, "_set_session_context", lambda *_a, **_k: [])
     monkeypatch.setattr(server, "_clear_session_context", lambda *_a, **_k: None)
@@ -1155,7 +2154,14 @@ def test_session_branch_persists_branched_from_marker(server, monkeypatch):
 
     parent_sid = "parent01"
     parent_key = "20260101_000000_parent"
+    source_manager = MagicMock()
+    source_agent = types.SimpleNamespace(
+        model="test/model",
+        session_id=parent_key,
+        _memory_manager=source_manager,
+    )
     server._sessions[parent_sid] = {
+        "agent": source_agent,
         "session_key": parent_key,
         "history": [{"role": "user", "content": "hello"}],
         "history_lock": threading.Lock(),
@@ -1173,6 +2179,434 @@ def test_session_branch_persists_branched_from_marker(server, monkeypatch):
     assert kwargs["parent_session_id"] == parent_key
     # The marker — without it the branch is invisible in /resume and /sessions.
     assert kwargs["model_config"] == {"_branched_from": parent_key}
+    # The child provider bootstraps on the parent and is switched before the
+    # branch is published, preserving Cortex lineage without ending the source.
+    assert make_agent_calls == [
+        {
+            "key": "20260101_000001_child0",
+            "session_id": parent_key,
+            "session_db": None,
+            "parent_session_id": parent_key,
+            "platform_override": "tui",
+        }
+    ]
+    assert source_agent.session_id == parent_key
+    source_manager.on_session_switch.assert_not_called()
+    source_manager.on_session_finalize.assert_not_called()
+
+
+def test_session_branch_storage_failure_discards_partial_child(server, monkeypatch, tmp_path):
+    parent_sid = "branch-parent-runtime"
+    parent_key = "branch-parent"
+    child_key = "branch-child"
+    lease = MagicMock()
+    discard = MagicMock(return_value=True)
+
+    class _DB:
+        def get_session_title(self, _key):
+            return "parent"
+
+        def get_next_title_in_lineage(self, title):
+            return f"{title} 2"
+
+        def create_session(self, *_args, **_kwargs):
+            return child_key
+
+        def append_message(self, **_kwargs):
+            raise OSError("message insert failed")
+
+    db = _DB()
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_new_session_key", lambda: child_key)
+    monkeypatch.setattr(server, "_session_cwd", lambda _session: str(tmp_path))
+    monkeypatch.setattr(
+        server,
+        "_claim_active_session_slot",
+        lambda *_args, **_kwargs: (lease, None),
+    )
+    monkeypatch.setattr(server, "_discard_unpublished_branch", discard)
+    server._sessions[parent_sid] = {
+        "agent": types.SimpleNamespace(session_id=parent_key),
+        "history": [{"role": "user", "content": "copy me"}],
+        "history_lock": threading.Lock(),
+        "profile_home": str(tmp_path),
+        "session_key": parent_key,
+    }
+
+    response = server.handle_request(
+        {
+            "id": "branch",
+            "method": "session.branch",
+            "params": {"session_id": parent_sid},
+        }
+    )
+
+    assert response["error"]["code"] == 5008
+    discard.assert_called_once_with(
+        parent_session_id=parent_key,
+        new_session_id=child_key,
+        hermes_home=tmp_path,
+        db=db,
+        delete_created_row=True,
+    )
+    lease.release.assert_called_once_with()
+    assert server._sessions[parent_sid]["agent"].session_id == parent_key
+
+
+@pytest.mark.parametrize("delete_created_row", [False, True])
+def test_discard_unpublished_branch_removes_sessiondb_only_after_cortex(
+    server, monkeypatch, tmp_path, delete_created_row
+):
+    import altas.cortex.lifecycle as lifecycle
+
+    events: list[str] = []
+
+    def _discard(*_args, **_kwargs):
+        events.append("cortex")
+        return True
+
+    class _DB:
+        def get_session(self, session_id):
+            assert session_id == "child"
+            return {"id": session_id}
+
+        def delete_session(self, session_id, *, sessions_dir=None):
+            assert events == ["cortex"]
+            assert session_id == "child"
+            assert sessions_dir == tmp_path / "sessions"
+            events.append("sessiondb-full")
+            return True
+
+        def delete_session_if_empty(self, session_id, *, sessions_dir=None):
+            assert events == ["cortex"]
+            assert session_id == "child"
+            assert sessions_dir == tmp_path / "sessions"
+            events.append("sessiondb-empty")
+            return True
+
+    monkeypatch.setattr(lifecycle, "discard_detached_session_branch", _discard)
+
+    assert server._discard_unpublished_branch(
+        parent_session_id="parent",
+        new_session_id="child",
+        hermes_home=tmp_path,
+        db=_DB(),
+        delete_created_row=delete_created_row,
+    )
+    assert events == [
+        "cortex",
+        "sessiondb-full" if delete_created_row else "sessiondb-empty",
+    ]
+
+
+def test_session_branch_publish_failure_removes_runtime_and_both_durable_rows(
+    server, monkeypatch, tmp_path
+):
+    parent_sid = "branch-parent-runtime"
+    parent_key = "branch-parent"
+    child_key = "branch-child"
+    lease = MagicMock()
+    discard = MagicMock(return_value=True)
+    manager = MagicMock()
+    agent = types.SimpleNamespace(
+        model="test/model",
+        session_id=parent_key,
+        _memory_manager=manager,
+        _session_messages=None,
+        shutdown_memory_provider=MagicMock(),
+        close=MagicMock(),
+    )
+
+    class _DB:
+        def get_session_title(self, _key):
+            return "parent"
+
+        def get_next_title_in_lineage(self, title):
+            return f"{title} 2"
+
+        def create_session(self, *_args, **_kwargs):
+            return child_key
+
+        def append_message(self, **_kwargs):
+            return None
+
+        def set_session_title(self, *_args):
+            return True
+
+        def get_session(self, _session_id):
+            return {"source": "tui"}
+
+    db = _DB()
+
+    def _fail_after_publish(sid, key, child_agent, history, **_kwargs):
+        server._sessions[sid] = {
+            "agent": child_agent,
+            "history": history,
+            "history_lock": threading.Lock(),
+            "running": False,
+            "session_key": key,
+            "source": "tui",
+        }
+        raise OSError("worker publication failed")
+
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_new_session_key", lambda: child_key)
+    monkeypatch.setattr(server, "_session_cwd", lambda _session: str(tmp_path))
+    monkeypatch.setattr(server, "_resolve_model", lambda: "test/model")
+    monkeypatch.setattr(server, "_make_agent", lambda *_args, **_kwargs: agent)
+    monkeypatch.setattr(server, "_init_session", _fail_after_publish)
+    monkeypatch.setattr(server, "_set_session_context", lambda *_args: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda *_args: None)
+    monkeypatch.setattr(
+        server,
+        "_claim_active_session_slot",
+        lambda *_args, **_kwargs: (lease, None),
+    )
+    monkeypatch.setattr(server, "_discard_unpublished_branch", discard)
+    server._sessions[parent_sid] = {
+        "agent": types.SimpleNamespace(session_id=parent_key),
+        "history": [{"role": "user", "content": "copy me"}],
+        "history_lock": threading.Lock(),
+        "profile_home": str(tmp_path),
+        "session_key": parent_key,
+    }
+
+    response = server.handle_request(
+        {
+            "id": "branch",
+            "method": "session.branch",
+            "params": {"session_id": parent_sid},
+        }
+    )
+
+    assert response["error"]["code"] == 5000
+    assert set(server._sessions) == {parent_sid}
+    manager.on_session_switch.assert_called_once_with(
+        child_key,
+        parent_session_id=parent_key,
+        reset=True,
+        reason="branch",
+    )
+    manager.on_session_finalize.assert_not_called()
+    agent.shutdown_memory_provider.assert_called_once_with(
+        [],
+        finalize=False,
+        reason="branch_publish_failed",
+    )
+    discard.assert_called_once_with(
+        parent_session_id=parent_key,
+        new_session_id=child_key,
+        hermes_home=tmp_path,
+        db=db,
+        delete_created_row=True,
+    )
+    lease.release.assert_called_once_with()
+
+
+def test_deferred_parented_build_failure_discards_unpublished_branch(
+    server, monkeypatch, tmp_path
+):
+    parent_id = "deferred-parent"
+    child_id = "deferred-child"
+    lease = MagicMock()
+    manager = MagicMock()
+    manager.on_session_switch.side_effect = OSError("cortex switch failed")
+    agent = types.SimpleNamespace(
+        model="test/model",
+        session_id=parent_id,
+        _memory_manager=manager,
+        shutdown_memory_provider=MagicMock(),
+        close=MagicMock(),
+    )
+    discard = MagicMock(return_value=True)
+
+    monkeypatch.setattr(server, "_new_session_key", lambda: child_id)
+    monkeypatch.setattr(
+        server,
+        "_claim_active_session_slot",
+        lambda *_args, **_kwargs: (lease, None),
+    )
+    monkeypatch.setattr(server, "_schedule_agent_build", lambda _sid: None)
+    monkeypatch.setattr(server, "_schedule_session_cap_enforcement", lambda: None)
+    monkeypatch.setattr(server, "_register_session_cwd", lambda _session: None)
+    monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
+    monkeypatch.setattr(server, "_git_branch_for_cwd", lambda _cwd: "")
+    monkeypatch.setattr(server, "_profile_home", lambda _profile: tmp_path)
+    monkeypatch.setattr(server, "_make_agent", lambda *_args, **_kwargs: agent)
+    monkeypatch.setattr(server, "_set_session_context", lambda *_args: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda *_args: None)
+    monkeypatch.setattr(server, "_discard_unpublished_branch", discard)
+    monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: None)
+
+    response = server.handle_request(
+        {
+            "id": "create-child",
+            "method": "session.create",
+            "params": {
+                "cwd": str(tmp_path),
+                "messages": [{"role": "user", "content": "fork context"}],
+                "parent_session_id": parent_id,
+                "profile": "customer-profile",
+                "source": "tui",
+            },
+        }
+    )
+    sid = response["result"]["session_id"]
+    session = server._sessions[sid]
+
+    server._start_agent_build(sid, session)
+    assert session["agent_ready"].wait(timeout=2)
+
+    assert "cortex switch failed" in session["agent_error"]
+    discard.assert_called_once()
+    assert discard.call_args.kwargs["parent_session_id"] == parent_id
+    assert discard.call_args.kwargs["new_session_id"] == child_id
+    assert discard.call_args.kwargs["hermes_home"] == tmp_path
+    assert discard.call_args.kwargs["db"] is not None
+    assert discard.call_args.kwargs["delete_created_row"] is False
+    manager.on_session_finalize.assert_not_called()
+    agent.shutdown_memory_provider.assert_called_once_with([], finalize=False)
+    agent.close.assert_called_once_with()
+
+
+def test_parented_session_create_deferred_build_binds_cortex_topology(
+    server, monkeypatch, tmp_path
+):
+    """Desktop-created forks bind Cortex before the child becomes ready."""
+    from altas.cortex.provider import CortexMemoryProvider
+    from altas.cortex.store import CortexStore
+
+    parent_id = "desktop-parent"
+    child_id = "desktop-child"
+    store = CortexStore(
+        tmp_path / "cortex.db",
+        owner_customer_id="customer-1",
+    )
+    store.initialize()
+    store.ensure_session(parent_id)
+
+    source_provider = CortexMemoryProvider()
+    source_provider._store = store
+    source_provider._config = types.SimpleNamespace()
+    source_provider._session_id = parent_id
+
+    child_provider = CortexMemoryProvider()
+    child_provider._store = store
+    child_provider._config = types.SimpleNamespace()
+    child_provider._session_id = parent_id
+    manager = types.SimpleNamespace(
+        on_session_switch=MagicMock(side_effect=child_provider.on_session_switch),
+        on_session_finalize=MagicMock(),
+    )
+    agent = types.SimpleNamespace(
+        model="test/model",
+        session_id=parent_id,
+        _parent_session_id=parent_id,
+        _memory_manager=manager,
+    )
+    make_calls = []
+
+    def _make_agent(_sid, key, **kwargs):
+        make_calls.append((key, kwargs))
+        return agent
+
+    class _Worker:
+        def close(self):
+            return None
+
+    lease = MagicMock()
+    monkeypatch.setattr(server, "_new_session_key", lambda: child_id)
+    monkeypatch.setattr(
+        server,
+        "_claim_active_session_slot",
+        lambda *_args, **_kwargs: (lease, None),
+    )
+    monkeypatch.setattr(server, "_schedule_agent_build", lambda _sid: None)
+    monkeypatch.setattr(server, "_schedule_session_cap_enforcement", lambda: None)
+    monkeypatch.setattr(server, "_register_session_cwd", lambda _session: None)
+    monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
+    monkeypatch.setattr(server, "_git_branch_for_cwd", lambda _cwd: "")
+    monkeypatch.setattr(server, "_make_agent", _make_agent)
+    monkeypatch.setattr(server, "_SlashWorker", lambda *_args, **_kwargs: _Worker())
+    monkeypatch.setattr(server, "_set_session_context", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda *_args: None)
+    monkeypatch.setattr(server, "_config_model_target", lambda: "test/model")
+    monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
+    monkeypatch.setattr(
+        server,
+        "_start_notification_poller",
+        lambda _sid, _session: threading.Event(),
+    )
+    boundary = MagicMock()
+    monkeypatch.setattr(server, "_notify_session_boundary", boundary)
+    monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        server,
+        "_session_info",
+        lambda _agent, _session=None: {"model": "test/model"},
+    )
+    monkeypatch.setattr(server, "_probe_config_health", lambda _cfg: None)
+    monkeypatch.setattr(server, "_schedule_mcp_late_refresh", lambda *_args: None)
+
+    import tools.approval as approval
+
+    monkeypatch.setattr(approval, "register_gateway_notify", lambda *_args: None)
+    monkeypatch.setattr(approval, "load_permanent_allowlist", lambda: None)
+
+    response = server.handle_request(
+        {
+            "id": "create-child",
+            "method": "session.create",
+            "params": {
+                "parent_session_id": parent_id,
+                "messages": [{"role": "user", "content": "fork context"}],
+                "source": "tui",
+            },
+        }
+    )
+    sid = response["result"]["session_id"]
+    session = server._sessions[sid]
+    assert session["parent_session_id"] == parent_id
+
+    server._start_agent_build(sid, session)
+    assert session["agent_ready"].wait(timeout=2)
+    assert session.get("agent_error") is None
+
+    assert len(make_calls) == 1
+    key, kwargs = make_calls[0]
+    assert key == child_id
+    assert kwargs["session_id"] == parent_id
+    assert kwargs["parent_session_id"] == parent_id
+    assert agent.session_id == child_id
+    assert agent._parent_session_id == parent_id
+    manager.on_session_switch.assert_called_once_with(
+        child_id,
+        parent_session_id=parent_id,
+        reset=True,
+        reason="branch",
+    )
+    manager.on_session_finalize.assert_not_called()
+    assert source_provider._session_id == parent_id
+    assert child_provider._session_id == child_id
+    assert store.session_lineage(parent_id)["state"] == "active"
+    assert store.session_lineage(child_id) == {
+        "session_id": child_id,
+        "logical_conversation_id": child_id,
+        "parent_session_id": parent_id,
+        "state": "active",
+    }
+    with store.connect() as connection:
+        admissions = connection.execute(
+            "SELECT COUNT(*) FROM session_distill_admissions WHERE brain_id=?",
+            (store.brain_id,),
+        ).fetchone()[0]
+        jobs = connection.execute(
+            "SELECT COUNT(*) FROM cognitive_jobs WHERE brain_id=?",
+            (store.brain_id,),
+        ).fetchone()[0]
+    assert admissions == 0
+    assert jobs == 0
+    boundary.assert_called_once_with("on_session_reset", child_id, "tui")
 
 
 def test_make_agent_accepts_list_system_prompt(server, monkeypatch):

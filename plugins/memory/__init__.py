@@ -149,7 +149,15 @@ def discover_memory_providers() -> List[Tuple[str, str, bool]]:
     Returns list of (name, description, is_available) tuples.
     Bundled providers take precedence on name collisions.
     """
-    results = []
+    # Product-native providers are registered separately from third-party
+    # plugins so the plugin tree stays open for integrations without making
+    # first-party Atlas behavior look optional or externally owned.
+    try:
+        from agent.native_memory_providers import discover_native_memory_providers
+
+        results = discover_native_memory_providers()
+    except Exception:
+        results = []
 
     for name, child in _iter_provider_dirs():
         # Read description from plugin.yaml if available
@@ -189,6 +197,16 @@ def load_memory_provider(name: str) -> Optional["MemoryProvider"]:
 
     Returns None if the provider is not found or fails to load.
     """
+    try:
+        from agent.native_memory_providers import load_native_memory_provider
+
+        native = load_native_memory_provider(name)
+        if native is not None:
+            return native
+    except Exception as exc:
+        logger.warning("Failed to load native memory provider '%s': %s", name, exc)
+        return None
+
     provider_dir = find_provider_dir(name)
     if not provider_dir:
         logger.debug("Memory provider '%s' not found in bundled or user plugins", name)

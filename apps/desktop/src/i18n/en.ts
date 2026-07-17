@@ -664,7 +664,9 @@ export const en: Translations = {
       defaultsFailed: 'Failed to save model defaults',
       auxiliaryTitle: 'Auxiliary models',
       resetAllToMain: 'Reset all to main',
+      resetHelpersToMain: 'Reset helper models to main',
       auxiliaryDesc: 'Helper tasks run on the main model by default. Assign a dedicated model to any task to override.',
+      cortexDedicatedNote: 'Cortex memory models stay on their dedicated route.',
       setToMain: 'Set to main',
       change: 'Change',
       autoUseMain: 'auto · use main model',
@@ -677,7 +679,9 @@ export const en: Translations = {
         approval: { label: 'Approval', hint: 'Smart auto-approve' },
         mcp: { label: 'MCP', hint: 'MCP tool routing' },
         title_generation: { label: 'Title gen', hint: 'Session titles' },
-        curator: { label: 'Curator', hint: 'Skill-usage review' }
+        curator: { label: 'Curator', hint: 'Skill-usage review' },
+        cortex_triage: { label: 'Cortex triage', hint: 'Private memory consolidation' },
+        cortex_reasoning: { label: 'Cortex reasoning', hint: 'Ambiguous memory review' }
       }
     },
     providers: {
@@ -1952,7 +1956,32 @@ export const en: Translations = {
     price: (input, output) => `${input} in / ${output} out per Mtok`,
     change: 'Change',
     startChatting: 'Begin',
-    docs: provider => `${provider} docs`
+    docs: provider => `${provider} docs`,
+    memoryModel: {
+      title: 'Choose a memory model',
+      loading: 'Loading dedicated memory models…',
+      dedicatedModel: 'Memory model',
+      chatModel: 'Chat model',
+      routeLabel: 'Separate route · session-end only',
+      description:
+        'After a logical session ends, Atlas sends bounded session evidence to this dedicated model to organize long-term memory. It never runs in the live turn or falls back to your chat model.',
+      recommended: 'Recommended',
+      pickerTitle: 'Change memory model',
+      pickerDescription: 'Choose a connected model dedicated to session-end memory work.',
+      search: 'Filter providers and models…',
+      noModels: 'No eligible memory models found.',
+      notConnected: 'Not connected',
+      unavailable: 'Unavailable',
+      finishSetup: 'Finish setup',
+      errorTitle: 'Memory model setup needs attention',
+      connectProvider: provider => `Connect ${provider} for memory`,
+      connectDescription: provider =>
+        `Add ${provider} as the dedicated memory provider. Your selected chat model will stay exactly as it is.`,
+      chatModelUnchanged: '· chat model unchanged',
+      apiKeyPlaceholder: keyEnv => `Paste ${keyEnv}`,
+      connectAndContinue: 'Connect and choose memory model',
+      connectingProvider: 'Connecting memory provider…'
+    }
   },
 
   modelPicker: {

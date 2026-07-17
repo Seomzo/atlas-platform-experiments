@@ -1,7 +1,4 @@
-"""Regression tests for #15165 — gateway session shutdown must pass the
-agent's conversation transcript to ``shutdown_memory_provider`` so memory
-providers' ``on_session_end`` hooks see the real messages instead of an
-empty list.
+"""Gateway resource cleanup checkpoints without ending logical sessions.
 
 Before the fix, ``_cleanup_agent_resources`` called
 ``agent.shutdown_memory_provider()`` with no arguments, which in turn
@@ -10,11 +7,9 @@ an empty-guard (Holographic, Hindsight, etc.) exited early and never
 persisted the session's facts, so the next gateway start-up surfaced no
 memories from the prior conversation.
 
-The fix reads ``agent._session_messages`` (set on ``AIAgent.__init__``
-and refreshed every turn via ``_persist_session``) and forwards it to
-``shutdown_memory_provider``. Test stubs built via ``object.__new__``
-or plain ``MagicMock()`` still exercise the legacy no-arg path, so the
-change is backward-compatible with existing suites.
+The cleanup reads ``agent._session_messages`` and forwards it explicitly with
+``finalize=False``. Signals, restarts, cache cleanup, and process exit are not
+customer-owned session ends and therefore cannot admit Cortex semantic work.
 """
 
 from __future__ import annotations
@@ -73,7 +68,11 @@ class TestCleanupAgentResourcesPassesMessages:
 
         # The fix must call shutdown_memory_provider with the exact list
         # identity — providers iterate it to extract facts.
-        agent.shutdown_memory_provider.assert_called_once_with(transcript)
+        agent.shutdown_memory_provider.assert_called_once_with(
+            transcript,
+            finalize=False,
+            reason="resource_cleanup",
+        )
 
     def test_empty_list_still_forwarded(self):
         """An agent that initialised but ran no turns has an empty list
@@ -86,7 +85,11 @@ class TestCleanupAgentResourcesPassesMessages:
 
         runner._cleanup_agent_resources(agent)
 
-        agent.shutdown_memory_provider.assert_called_once_with([])
+        agent.shutdown_memory_provider.assert_called_once_with(
+            [],
+            finalize=False,
+            reason="resource_cleanup",
+        )
 
     def test_missing_attribute_falls_back_to_no_arg(self):
         """Test stubs built via ``object.__new__(AIAgent)`` skip
@@ -98,7 +101,10 @@ class TestCleanupAgentResourcesPassesMessages:
 
         runner._cleanup_agent_resources(agent)
 
-        agent.shutdown_memory_provider.assert_called_once_with()
+        agent.shutdown_memory_provider.assert_called_once_with(
+            finalize=False,
+            reason="resource_cleanup",
+        )
 
     def test_non_list_attribute_falls_back_to_no_arg(self):
         """A MagicMock-based agent auto-synthesises ``_session_messages``
@@ -112,7 +118,10 @@ class TestCleanupAgentResourcesPassesMessages:
 
         runner._cleanup_agent_resources(agent)
 
-        agent.shutdown_memory_provider.assert_called_once_with()
+        agent.shutdown_memory_provider.assert_called_once_with(
+            finalize=False,
+            reason="resource_cleanup",
+        )
 
     def test_provider_exception_is_swallowed(self):
         """Provider teardown must be best-effort — a raising

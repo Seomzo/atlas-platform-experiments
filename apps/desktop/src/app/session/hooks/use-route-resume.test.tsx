@@ -14,6 +14,7 @@ interface HarnessProps {
   freshDraftReady: boolean
   gatewayState: string
   locationPathname: string
+  onRoutedSessionIntent?: (sessionId: string) => boolean
   resumeSession: (sessionId: string, focus: boolean) => Promise<unknown>
   resumeFailedSessionId?: null | string
   resumeExhaustedSessionId?: null | string
@@ -86,6 +87,65 @@ describe('useRouteResume', () => {
     )
 
     expect(resumeSession).not.toHaveBeenCalled()
+  })
+
+  it('consults the destination guard before resuming a changed session route', () => {
+    const resumeSession = vi.fn(async () => undefined)
+    const onRoutedSessionIntent = vi.fn(() => false)
+    const startFreshSessionDraft = vi.fn()
+
+    render(
+      <RouteResumeHarness
+        activeSessionId={null}
+        activeSessionIdRef={{ current: null }}
+        creatingSessionRef={{ current: false }}
+        currentView="chat"
+        freshDraftReady={false}
+        gatewayState="open"
+        locationPathname="/session-blocked"
+        onRoutedSessionIntent={onRoutedSessionIntent}
+        resumeSession={resumeSession}
+        routedSessionId="session-blocked"
+        runtimeIdByStoredSessionIdRef={{ current: new Map() }}
+        selectedStoredSessionId={null}
+        selectedStoredSessionIdRef={{ current: null }}
+        startFreshSessionDraft={startFreshSessionDraft}
+      />
+    )
+
+    expect(onRoutedSessionIntent).toHaveBeenCalledOnce()
+    expect(onRoutedSessionIntent).toHaveBeenCalledWith('session-blocked')
+    expect(resumeSession).not.toHaveBeenCalled()
+    expect(startFreshSessionDraft).not.toHaveBeenCalled()
+  })
+
+  it('does not treat the /new side of a workspace handoff as a stored-session intent', () => {
+    const onRoutedSessionIntent = vi.fn(() => true)
+    const resumeSession = vi.fn(async () => undefined)
+    const startFreshSessionDraft = vi.fn()
+
+    render(
+      <RouteResumeHarness
+        activeSessionId={null}
+        activeSessionIdRef={{ current: null }}
+        creatingSessionRef={{ current: false }}
+        currentView="chat"
+        freshDraftReady
+        gatewayState="open"
+        locationPathname="/"
+        onRoutedSessionIntent={onRoutedSessionIntent}
+        resumeSession={resumeSession}
+        routedSessionId={null}
+        runtimeIdByStoredSessionIdRef={{ current: new Map() }}
+        selectedStoredSessionId={null}
+        selectedStoredSessionIdRef={{ current: null }}
+        startFreshSessionDraft={startFreshSessionDraft}
+      />
+    )
+
+    expect(onRoutedSessionIntent).not.toHaveBeenCalled()
+    expect(resumeSession).not.toHaveBeenCalled()
+    expect(startFreshSessionDraft).not.toHaveBeenCalled()
   })
 
   it('self-heals a stranded routed session (null selected/active, same pathname, not a fresh draft)', () => {

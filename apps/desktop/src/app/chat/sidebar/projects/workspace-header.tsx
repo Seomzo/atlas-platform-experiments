@@ -26,7 +26,7 @@ import { useI18n } from '@/i18n'
 import { gitRef } from '@/lib/sanitize'
 import { cn } from '@/lib/utils'
 import { notifyError } from '@/store/notifications'
-import { copyPath, listRepoBranches, revealPath, startWorkInRepo, switchBranchInRepo } from '@/store/projects'
+import { copyPath, listRepoBranches, revealPath, type WorkspaceSessionTarget } from '@/store/projects'
 
 import { SidebarCount, SidebarRowLead } from '../chrome'
 
@@ -142,7 +142,13 @@ export function WorkspaceMenu({ path, onRemove }: { path: null | string; onRemov
 // "New worktree": prompt for a branch name, then git spins up a fresh worktree
 // for that branch under the repo (the lightest way) and we open a new session
 // inside it. Naming is explicit — no auto-generated `hermes/work-<ts>` trees.
-export function StartWorkButton({ repoPath, onStarted }: { repoPath: string; onStarted: (path: string) => void }) {
+export function StartWorkButton({
+  repoPath,
+  onStarted
+}: {
+  repoPath: string
+  onStarted: (target: WorkspaceSessionTarget) => boolean | Promise<boolean> | void
+}) {
   const { t } = useI18n()
   const s = t.sidebar
   const p = s.projects
@@ -179,12 +185,15 @@ export function StartWorkButton({ repoPath, onStarted }: { repoPath: string; onS
     setPending(true)
 
     try {
-      // Pass the typed value as both the dir slug source and the branch, so the
-      // branch is exactly what the user named (the dir is slugified git-side).
-      const result = await startWorkInRepo(repoPath, { branch, name: branch })
+      // Carry Git mutation as intent. The controller executes it only after the
+      // current conversation's semantic close is confirmed.
+      const started = await onStarted({
+        kind: 'create-worktree',
+        options: { branch, name: branch },
+        repoPath
+      })
 
-      if (result) {
-        onStarted(result.path)
+      if (started !== false) {
         setOpen(false)
         setName('')
       }
@@ -203,19 +212,21 @@ export function StartWorkButton({ repoPath, onStarted }: { repoPath: string; onS
     setPending(true)
 
     try {
-      let result: null | { branch: string; path: string }
+      let target: WorkspaceSessionTarget
 
       if (branch.worktreePath) {
-        result = { branch: branch.name, path: branch.worktreePath }
+        target = branch.worktreePath
       } else if (branch.isDefault) {
-        await switchBranchInRepo(repoPath, branch.name)
-        result = { branch: branch.name, path: repoPath }
+        target = { branch: branch.name, kind: 'switch-branch', repoPath }
       } else {
-        result = await startWorkInRepo(repoPath, { existingBranch: branch.name })
+        target = {
+          kind: 'create-worktree',
+          options: { existingBranch: branch.name },
+          repoPath
+        }
       }
 
-      if (result) {
-        onStarted(result.path)
+      if ((await onStarted(target)) !== false) {
         setOpen(false)
       }
     } catch (err) {

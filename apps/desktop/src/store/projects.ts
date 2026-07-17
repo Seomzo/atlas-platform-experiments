@@ -720,17 +720,72 @@ export async function switchBranchInRepo(repoPath: string, branch: string): Prom
   bumpWorktrees()
 }
 
-// A composer-driven "branch off into a new worktree" hand-off. The composer
-// owns the typed draft; the chat controller owns session lifecycle. The composer
-// creates the worktree (startWorkInRepo), then fires this so the controller opens
-// a fresh session in that worktree and prefills the draft that kicked off the
-// task. A monotonic token lets a rapid second request re-fire the controller's
-// effect even if the path repeats.
+export type WorkspaceSessionTarget =
+  | null
+  | string
+  | {
+      kind: 'create-worktree'
+      options: { base?: string; branch?: string; existingBranch?: string; name?: string }
+      repoPath: string
+    }
+  | {
+      branch: string
+      kind: 'switch-branch'
+      repoPath: string
+    }
+
+// Resolve a workspace intent only after the owning session has crossed its
+// semantic close boundary. Plain paths are already prepared; Git mutations are
+// deliberately represented as data until the controller authorizes them.
+export async function resolveWorkspaceSessionTarget(
+  target: WorkspaceSessionTarget,
+  legacyBranch?: string
+): Promise<null | string> {
+  if (typeof target === 'string' || target === null) {
+    const path = target?.trim() || null
+
+    if (path && legacyBranch?.trim()) {
+      await switchBranchInRepo(path, legacyBranch.trim())
+    }
+
+    return path
+  }
+
+  if (target.kind === 'switch-branch') {
+    const repoPath = target.repoPath.trim()
+    const branch = target.branch.trim()
+
+    if (!repoPath || !branch) {
+      return null
+    }
+
+    await switchBranchInRepo(repoPath, branch)
+
+    return repoPath
+  }
+
+  const repoPath = target.repoPath.trim()
+
+  if (!repoPath) {
+    return null
+  }
+
+  return (await startWorkInRepo(repoPath, target.options))?.path ?? null
+}
+
+// A composer-driven worktree hand-off. The composer owns the typed draft; the
+// controller owns session lifecycle and deferred Git mutation. Source identity
+// prevents a late request from closing a newly selected chat. A monotonic token
+// lets a rapid second request supersede the first even when the target repeats.
 export interface StartWorkSessionRequest {
+  beforeReset?: () => void
   draft?: string
-  path: string
+  sourceSessionKey?: null | string
+  target: WorkspaceSessionTarget
   token: number
 }
+
+export type StartWorkSessionOptions = Omit<StartWorkSessionRequest, 'target' | 'token'>
 
 export const $startWorkSessionRequest = atom<StartWorkSessionRequest | null>(null)
 
@@ -747,15 +802,18 @@ export function requestNewWorktree(): void {
 
 let startWorkToken = 0
 
-export function requestStartWorkSession(path: string, draft?: string): void {
-  const target = path.trim()
-
-  if (!target) {
+export function requestStartWorkSession(target: WorkspaceSessionTarget, options: StartWorkSessionOptions = {}): void {
+  if (typeof target === 'string' && !target.trim()) {
     return
   }
 
   startWorkToken += 1
-  $startWorkSessionRequest.set({ draft: draft?.trim() || undefined, path: target, token: startWorkToken })
+  $startWorkSessionRequest.set({
+    ...options,
+    draft: options.draft?.trim() || undefined,
+    target: typeof target === 'string' ? target.trim() : target,
+    token: startWorkToken
+  })
 }
 
 export async function removeWorktreePath(

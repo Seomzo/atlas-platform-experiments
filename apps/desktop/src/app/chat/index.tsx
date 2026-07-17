@@ -52,6 +52,7 @@ import {
   sessionPinId
 } from '@/store/session'
 import { isSecondaryWindow, isWatchWindow } from '@/store/windows'
+import { $workspaceMutationActive } from '@/store/workspace-handoff'
 import type { ModelOptionsResponse } from '@/types/hermes'
 
 import { routeSessionId } from '../routes'
@@ -301,6 +302,7 @@ export function ChatView({
   const gatewayState = useStore($gatewayState)
   const gatewaySwapTarget = useStore($gatewaySwapTarget)
   const gatewayOpen = gatewayState === 'open'
+  const workspaceMutationActive = useStore($workspaceMutationActive)
   const introPersonality = useStore($introPersonality)
   const introSeed = useStore($introSeed)
   // PERF: ChatView must not subscribe to $messages — the atom is replaced on
@@ -527,6 +529,7 @@ export function ChatView({
               queueSessionKey={selectedSessionId}
               sessionId={activeSessionId}
               state={chatBarState}
+              submissionsDisabled={workspaceMutationActive}
             />
           </Suspense>
         )}

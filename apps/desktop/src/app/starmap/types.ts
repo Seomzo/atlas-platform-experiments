@@ -34,8 +34,12 @@ export interface SimNode extends StarmapNode, SimulationNodeDatum {
 }
 
 export interface SimLink extends SimulationLinkDatum<SimNode> {
+  direction?: 'directed'
+  id?: string
   source: SimNode | string
+  status?: string
   target: SimNode | string
+  type?: string
 }
 
 // Per-mode line/ring style.

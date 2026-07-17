@@ -315,7 +315,7 @@ _EXTRA_ENV_KEYS = frozenset({
 import yaml
 
 from hermes_cli.colors import Colors, color
-from hermes_cli.default_soul import DEFAULT_SOUL_MD, is_legacy_template_soul
+from hermes_cli.default_soul import get_default_soul_md, is_legacy_template_soul
 
 
 # =============================================================================
@@ -552,8 +552,6 @@ def recommended_update_command_for_method(method: str) -> str:
         if shutil.which("uv"):
             return "uv pip install --upgrade hermes-agent"
         return "pip install --upgrade hermes-agent"
-    from hermes_cli.brand import command_name
-
     return f"{command_name()} update"
 
 
@@ -915,7 +913,7 @@ def _ensure_default_soul_md(home: Path) -> None:
         if not is_legacy_template_soul(existing):
             return
         # Legacy empty template -> upgrade to the real default in place.
-    soul_path.write_text(DEFAULT_SOUL_MD, encoding="utf-8")
+    soul_path.write_text(get_default_soul_md(), encoding="utf-8")
     _secure_file(soul_path)
 
 
@@ -948,6 +946,7 @@ def ensure_hermes_home():
         for subdir in (
             "cron", "sessions", "logs", "logs/curator", "memories",
             "pairing", "hooks", "image_cache", "audio_cache", "skills",
+            "cortex", "cortex/graphrag",
         ):
             d = home / subdir
             d.mkdir(parents=True, exist_ok=True)
@@ -973,6 +972,7 @@ def _ensure_hermes_home_managed(home: Path):
     # In managed mode the activation script may not know about this subdir,
     # so we mkdir it ourselves (it's inside an already-secured logs/ dir).
     (home / "logs" / "curator").mkdir(parents=True, exist_ok=True)
+    (home / "cortex" / "graphrag").mkdir(parents=True, exist_ok=True)
     # Inside umask(0o007) scope — SOUL.md will be created as 0660
     _ensure_default_soul_md(home)
 
@@ -1727,7 +1727,9 @@ DEFAULT_CONFIG = {
         # the fork automatically replays a compact digest instead of the full
         # transcript when routed (minimises the cold-write). Same model = full
         # replay; different model = digest. Quality holds (memory capture
-        # identical, skill near-identical in benchmarks).
+        # identical, skill near-identical in benchmarks). This legacy fork is
+        # suppressed whenever Cortex is selected, including while Cortex is
+        # degraded; Cortex semantic judgment is session-end-only.
         "background_review": {
             "provider": "auto",
             "model": "",
@@ -1735,6 +1737,52 @@ DEFAULT_CONFIG = {
             "api_key": "",
             "timeout": 120,
             "extra_body": {},
+        },
+        # Atlas Cortex utility triage. The worker resolves this task to one
+        # explicit route and disables implicit cross-provider fallback before
+        # sending personal evidence. Atlas uses a dedicated centrally-routed
+        # utility alias so memory work never falls through to the chat model.
+        "cortex_triage": {
+            "provider": (
+                "altas"
+                if os.environ.get("HERMES_PUBLIC_BRAND", "").strip().lower()
+                == "atlas"
+                else "auto"
+            ),
+            "model": (
+                "atlas-cortex-memory"
+                if os.environ.get("HERMES_PUBLIC_BRAND", "").strip().lower()
+                == "atlas"
+                else ""
+            ),
+            "base_url": "",
+            "api_key": "",
+            "timeout": 120,
+            "extra_body": {},
+            "fallback_chain": [],
+        },
+        # Atlas Cortex deeper review for ambiguity, temporal conflicts, and
+        # compiled views. Invoked only for candidates escalated by triage. It
+        # stays on the same cheap Atlas utility route unless an operator
+        # explicitly configures a separately approved reasoning route.
+        "cortex_reasoning": {
+            "provider": (
+                "altas"
+                if os.environ.get("HERMES_PUBLIC_BRAND", "").strip().lower()
+                == "atlas"
+                else "auto"
+            ),
+            "model": (
+                "atlas-cortex-memory"
+                if os.environ.get("HERMES_PUBLIC_BRAND", "").strip().lower()
+                == "atlas"
+                else ""
+            ),
+            "base_url": "",
+            "api_key": "",
+            "timeout": 240,
+            "extra_body": {},
+            "fallback_chain": [],
         },
         "moa_reference": {
             "provider": "auto",
@@ -2180,6 +2228,60 @@ DEFAULT_CONFIG = {
         "engine": "compressor",
     },
 
+    # Atlas Cortex -- native evidence-backed memory and knowledge graph.
+    # Atlas-branded entrypoints enable it automatically; upstream Hermes keeps
+    # the existing opt-in provider behavior. All paths are profile-relative,
+    # and secrets remain in .env/provider storage rather than this section.
+    "cortex": {
+        "enabled": os.environ.get("HERMES_PUBLIC_BRAND", "").strip().lower() == "atlas",
+        "timezone": "",  # empty = inherit top-level timezone / machine local time
+        "storage": {
+            "backend": "sqlite",
+            "path": "cortex/cortex.db",
+            # Managed PostgreSQL is supplied through the Cortex service
+            # adapter; a DSN is never persisted here.
+            "postgres_dsn_env": "ATLAS_CORTEX_DATABASE_URL",
+        },
+        "capture": {
+            "enabled": True,
+            "assistant_evidence": True,
+            "tool_evidence": True,
+            "max_content_chars": 250000,
+            # 0 keeps raw evidence until the customer deletes it. Managed
+            # deployments can pin a bounded retention window by policy.
+            "raw_evidence_retention_days": 0,
+        },
+        "recall": {
+            "enabled": True,
+            "max_items": 8,
+            "max_chars": 6000,
+            "graph_hops": 1,
+        },
+        "dream": {
+            "enabled": True,
+            "local_time": "04:00",
+            "startup_catchup": True,
+            "poll_seconds": 300,
+            "lease_seconds": 1800,
+            "max_batch": 100,
+        },
+        "graphrag": {
+            "enabled": True,
+            "index_root": "cortex/graphrag",
+            "max_items": 6,
+            "require_signature": False,
+            "trusted_public_keys_env": "ATLAS_CORTEX_GRAPHRAG_PUBLIC_KEYS",
+        },
+        "security": {
+            "redact_secrets": True,
+            "sensitive_requires_review": True,
+            # Empty leaves a self-managed profile's explicit auxiliary route
+            # unrestricted. Managed mode always restricts Cortex LLM work to
+            # the Atlas gateway regardless of this value.
+            "approved_model_providers": [],
+        },
+    },
+
     # Persistent memory -- bounded curated memory injected into system prompt
     "memory": {
         "memory_enabled": True,
@@ -2199,11 +2301,15 @@ DEFAULT_CONFIG = {
         "write_approval": False,
         "memory_char_limit": 2200,   # ~800 tokens at 2.75 chars/token
         "user_char_limit": 1375,     # ~500 tokens at 2.75 chars/token
-        # External memory provider plugin (empty = built-in only).
+        # External/native memory provider (empty = built-in only).
         # Set to a provider name to activate: "openviking", "mem0",
         # "hindsight", "holographic", "retaindb", "byterover".
         # Only ONE external provider is allowed at a time.
-        "provider": "",
+        "provider": (
+            "cortex"
+            if os.environ.get("HERMES_PUBLIC_BRAND", "").strip().lower() == "atlas"
+            else ""
+        ),
     },
 
     # Subagent delegation — override the provider:model used by delegate_task
@@ -6952,6 +7058,23 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
 
         config = copy.deepcopy(DEFAULT_CONFIG)
 
+        # Product defaults must be resolved when the config is loaded, not
+        # when this module happened to be imported.  Atlas launchers set the
+        # public brand before loading config, but tests, embedded runtimes, and
+        # desktop profile switches may configure the brand later in the same
+        # process.  Keep upstream Hermes opt-in while making Cortex a real
+        # Atlas default.  An explicit user/managed value is merged below and
+        # therefore still wins.
+        from hermes_cli.brand import is_atlas_branded
+
+        _atlas_default = is_atlas_branded()
+        config["cortex"]["enabled"] = _atlas_default
+        config["memory"]["provider"] = "cortex" if _atlas_default else ""
+        if _atlas_default:
+            for _task in ("cortex_triage", "cortex_reasoning"):
+                config["auxiliary"][_task]["provider"] = "altas"
+                config["auxiliary"][_task]["model"] = "atlas-cortex-memory"
+
         if user_sig is not None:
             try:
                 with open(config_path, encoding="utf-8") as f:
@@ -7029,6 +7152,13 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
             # drift (late .env load, in-process rotation) — see cache hit above.
             cached_copy = copy.deepcopy(expanded)
             env_snapshot = _env_ref_snapshot(normalized)
+            # HERMES_PUBLIC_BRAND affects Atlas-only defaults even though it
+            # is not referenced through a ${VAR} template.  Include it in the
+            # normal environment cache guard so an in-process brand change
+            # cannot reuse a Hermes config (or vice versa).
+            env_snapshot["HERMES_PUBLIC_BRAND"] = os.environ.get(
+                "HERMES_PUBLIC_BRAND"
+            )
             if managed_config:
                 _env_ref_snapshot(managed_config, env_snapshot)
             _LOAD_CONFIG_CACHE[path_key] = (*cache_sig, cached_copy, env_snapshot)

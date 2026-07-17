@@ -11,6 +11,8 @@ interface RouteResumeOptions {
   freshDraftReady: boolean
   gatewayState: string | undefined
   locationPathname: string
+  /** Claim a changed stored-session route before it is allowed to resume. */
+  onRoutedSessionIntent?: (sessionId: string) => boolean
   resumeSession: (sessionId: string, focus: boolean) => Promise<unknown>
   // Stored-session id whose most recent resume failed terminally (set by
   // useSessionActions, mirrored from $resumeFailedSessionId). While this equals
@@ -73,6 +75,7 @@ export function useRouteResume({
   freshDraftReady,
   gatewayState,
   locationPathname,
+  onRoutedSessionIntent,
   resumeSession,
   resumeFailedSessionId,
   resumeExhaustedSessionId,
@@ -113,6 +116,14 @@ export function useRouteResume({
     }
 
     if (routedSessionId) {
+      // Explicit open actions already claim their destination before navigating,
+      // but history/deep-link producers can bypass them. Re-check only on a real
+      // route change (not reconnect/self-heal) so a rejected route cannot resume
+      // a chat while an irreversible workspace mutation is underway.
+      if (pathnameChanged && onRoutedSessionIntent && !onRoutedSessionIntent(routedSessionId)) {
+        return
+      }
+
       const cachedRuntime = runtimeIdByStoredSessionIdRef.current.get(routedSessionId)
 
       const alreadyActive =
@@ -169,6 +180,7 @@ export function useRouteResume({
     freshDraftReady,
     gatewayState,
     locationPathname,
+    onRoutedSessionIntent,
     resumeSession,
     routedSessionId,
     runtimeIdByStoredSessionIdRef,

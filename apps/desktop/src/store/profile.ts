@@ -12,8 +12,10 @@ import {
   storedStringRecord
 } from '@/lib/storage'
 import { $gateway, ensureGatewayForProfile } from '@/store/gateway'
+import { notify } from '@/store/notifications'
 import { setConnection } from '@/store/session'
 import { resetStarmapGraph } from '@/store/starmap'
+import { $workspaceMutationActive } from '@/store/workspace-handoff'
 import type { ProfileInfo } from '@/types/hermes'
 
 // Canonical key for a profile: trimmed, empty → "default". Used everywhere we
@@ -298,7 +300,18 @@ export const $profileScope = computed([$showAllProfiles, $activeGatewayProfile],
 // Switch the active context to `name`: leave "All profiles" mode, point new
 // chats at it, and swap the single live gateway onto its backend (which moves
 // $activeGatewayProfile → name, so $profileScope follows).
-export function selectProfile(name: string): void {
+export function selectProfile(name: string): boolean {
+  if ($workspaceMutationActive.get()) {
+    notify({
+      id: 'workspace-handoff-busy',
+      kind: 'info',
+      title: 'Workspace change in progress',
+      message: 'Wait for the current Git operation to finish, then switch profiles.'
+    })
+
+    return false
+  }
+
   const target = normalizeProfileKey(name)
   // Switching profiles (or coming back from the all-profiles browse view) starts
   // fresh; re-tapping the profile you're already in leaves your session be.
@@ -311,6 +324,8 @@ export function selectProfile(name: string): void {
   }
 
   void ensureGatewayProfile(target)
+
+  return true
 }
 
 // Start a fresh session in `name` WITHOUT collapsing the "All profiles" browse
@@ -319,11 +334,17 @@ export function selectProfile(name: string): void {
 // session list, where switching scope would throw away the browse state the user
 // is in. Points new chats at the profile and opens its backend so the next
 // message lands in the right place.
-export function newSessionInProfile(name: string): void {
+export function newSessionInProfile(name: string): boolean {
+  if ($workspaceMutationActive.get()) {
+    return false
+  }
+
   const target = normalizeProfileKey(name)
   $newChatProfile.set(target)
   requestFreshSession()
   void ensureGatewayProfile(target)
+
+  return true
 }
 
 export function setShowAllProfiles(value: boolean): void {

@@ -39,6 +39,29 @@ def managed_mode_enabled(env: Mapping[str, str] | None = None) -> bool:
     }
 
 
+def _effective_environment(
+    environ: Mapping[str, str] | None,
+) -> Mapping[str, str]:
+    """Resolve explicit, then request-local, then single-process credentials.
+
+    An explicit empty mapping is authoritative.  In a multiplexer, an absent
+    request scope is a scoping error rather than permission to read another
+    profile's process-global values.
+    """
+
+    if environ is not None:
+        return environ
+
+    from agent.secret_scope import current_secret_scope, is_multiplex_active
+
+    scoped = current_secret_scope()
+    if scoped is not None:
+        return scoped
+    if is_multiplex_active():
+        raise RuntimeError("managed policy requires an active profile secret scope")
+    return os.environ
+
+
 def _required(env: Mapping[str, str], key: str) -> str:
     value = env.get(key, "").strip()
     if not value:
@@ -112,11 +135,11 @@ def guard_tool_call(
     control-plane failure.
     """
 
-    env = environ or os.environ
-    if not managed_mode_enabled(env):
-        return GuardResult(True, "NOT_MANAGED", "Managed policy is not enabled")
-
     try:
+        env = _effective_environment(environ)
+        if not managed_mode_enabled(env):
+            return GuardResult(True, "NOT_MANAGED", "Managed policy is not enabled")
+
         context = _context(env)
         requested_store = _argument_store_id(arguments or {})
         if requested_store and requested_store != context.store_id:

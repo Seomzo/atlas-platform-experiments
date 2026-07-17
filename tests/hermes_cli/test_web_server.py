@@ -5781,6 +5781,7 @@ class TestDeleteSessionEndpoint:
         try:
             for sid in ids:
                 db.create_session(session_id=sid, source="cli")
+                db.end_session(sid, end_reason="done")
         finally:
             db.close()
 
@@ -5816,6 +5817,89 @@ class TestDeleteSessionEndpoint:
         assert resp.json().get("ok") is True
         assert not self._exists("20260618_abcdef_unique")
 
+    def test_delete_reconciles_and_removes_full_compression_lineage(
+        self, monkeypatch
+    ):
+        from hermes_state import SessionDB
+        import hermes_cli.web_server as web_server
+
+        db = SessionDB()
+        try:
+            db.create_session("delete-root", "cli")
+            db.end_session("delete-root", "compression")
+            db.create_session(
+                "delete-tip", "cli", parent_session_id="delete-root"
+            )
+            db.end_session("delete-tip", "done")
+        finally:
+            db.close()
+        observed = {}
+
+        def reconcile(_home, session_ids):
+            observed["ids"] = tuple(session_ids)
+            return tuple(session_ids)
+
+        monkeypatch.setattr(
+            web_server, "_reconcile_explicit_session_deletion", reconcile
+        )
+
+        resp = self.auth_client.delete("/api/sessions/delete-tip")
+
+        assert resp.status_code == 200
+        assert observed["ids"] == ("delete-root", "delete-tip")
+        assert not self._exists("delete-root")
+        assert not self._exists("delete-tip")
+
+    def test_delete_reconciliation_failure_leaves_transcript(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        self._seed(["must-survive"])
+
+        def fail(_home, _session_ids):
+            raise RuntimeError("cortex busy")
+
+        monkeypatch.setattr(
+            web_server, "_reconcile_explicit_session_deletion", fail
+        )
+
+        resp = self.auth_client.delete("/api/sessions/must-survive")
+
+        assert resp.status_code == 503
+        assert self._exists("must-survive")
+
+    def test_delete_refuses_cross_process_active_session(self):
+        from hermes_cli.active_sessions import try_acquire_active_session
+
+        self._seed(["live-owned"])
+        lease, message = try_acquire_active_session(
+            session_id="live-owned",
+            surface="cli",
+            config={},
+        )
+        assert message is None
+        assert lease is not None
+        try:
+            resp = self.auth_client.delete("/api/sessions/live-owned")
+        finally:
+            lease.release()
+
+        assert resp.status_code == 409
+        assert self._exists("live-owned")
+
+    def test_delete_refuses_unended_session_without_registry_lease(self):
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session("unregistered-live", "acp")
+        finally:
+            db.close()
+
+        resp = self.auth_client.delete("/api/sessions/unregistered-live")
+
+        assert resp.status_code == 409
+        assert self._exists("unregistered-live")
+
 
 class TestBulkDeleteSessionsEndpoint:
     """Tests for ``POST /api/sessions/bulk-delete`` — backs the
@@ -5826,9 +5910,8 @@ class TestBulkDeleteSessionsEndpoint:
     1. Route-ordering: ``/api/sessions/bulk-delete`` must shadow the
        templated ``/api/sessions/{session_id}`` route below it (see
        the block comment in ``hermes_cli/web_server.py``).
-    2. Behaviour parity with :meth:`SessionDB.delete_sessions` — real
-       deleted count, archive/active sessions deleted on explicit
-       selection.
+    2. Real deleted counts, with active SessionDB rows rejected unless a live
+       surface explicitly owns and coordinates its own deletion.
     3. The 500-ID payload cap is enforced.
     4. Auth gating (issue #19533 contract).
     """
@@ -5859,6 +5942,7 @@ class TestBulkDeleteSessionsEndpoint:
         try:
             for sid in ids:
                 db.create_session(session_id=sid, source="cli")
+                db.end_session(sid, end_reason="done")
         finally:
             db.close()
 
@@ -6054,6 +6138,58 @@ class TestDeleteEmptySessionsEndpoint:
             assert db.count_empty_sessions() == 0
         finally:
             db.close()
+
+    def test_empty_delete_reconciles_exact_ids_before_sessiondb(
+        self, monkeypatch
+    ):
+        import hermes_cli.web_server as web_server
+        from hermes_state import SessionDB
+
+        self._seed()
+        observed = []
+
+        def reconcile(_home, session_ids):
+            check = SessionDB(read_only=True)
+            try:
+                observed.append(
+                    (
+                        tuple(session_ids),
+                        all(check.get_session(sid) is not None for sid in session_ids),
+                    )
+                )
+            finally:
+                check.close()
+            return tuple(session_ids)
+
+        monkeypatch.setattr(
+            web_server, "_reconcile_explicit_session_deletion", reconcile
+        )
+
+        resp = self.auth_client.delete("/api/sessions/empty")
+
+        assert resp.status_code == 200
+        assert observed == [(("empty1", "empty2"), True)]
+
+    def test_empty_delete_cortex_failure_leaves_candidates(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+        from hermes_state import SessionDB
+
+        self._seed()
+        monkeypatch.setattr(
+            web_server,
+            "_reconcile_explicit_session_deletion",
+            lambda _home, _ids: (_ for _ in ()).throw(RuntimeError("busy")),
+        )
+
+        resp = self.auth_client.delete("/api/sessions/empty")
+
+        assert resp.status_code == 503
+        check = SessionDB()
+        try:
+            assert check.get_session("empty1") is not None
+            assert check.get_session("empty2") is not None
+        finally:
+            check.close()
 
     def test_delete_with_no_empties_returns_zero(self):
         """No empty sessions → endpoint returns ``deleted: 0`` (200,

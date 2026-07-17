@@ -379,6 +379,8 @@ describe('createSlashHandler', () => {
       expect(getUiState().sid).toBe('sid-branch')
       expect(ctx.transcript.sys).toHaveBeenCalledWith('branched → branch title')
     })
+    expect(ctx.session.releaseSession).toHaveBeenCalledWith('sid-parent')
+    expect(ctx.session.closeSession).not.toHaveBeenCalled()
     expect(ctx.transcript.setHistoryItems).not.toHaveBeenCalled()
   })
 
@@ -968,6 +970,7 @@ const buildSession = () => ({
   guardBusySessionSwitch: vi.fn(() => false),
   newLiveSession: vi.fn(),
   newSession: vi.fn(),
+  releaseSession: vi.fn(() => Promise.resolve(null)),
   resetVisibleHistory: vi.fn(),
   resumeById: vi.fn(),
   setSessionStartedAt: vi.fn()

@@ -40,6 +40,56 @@ class ImmediateThread:
         self._target()
 
 
+def test_cortex_profile_never_spawns_legacy_frontier_review(monkeypatch):
+    """Cortex semantic work belongs to the cheap session-end worker only."""
+    started = []
+
+    class RecordingThread:
+        def __init__(self, **_kwargs):
+            started.append(True)
+
+        def start(self):
+            started.append(True)
+
+    monkeypatch.setattr(run_agent_module.threading, "Thread", RecordingThread)
+    agent = _bare_agent()
+    agent._cortex_memory_active = True
+
+    AIAgent._spawn_background_review(
+        agent,
+        messages_snapshot=[{"role": "user", "content": "hello"}],
+        review_memory=True,
+        review_skills=True,
+    )
+
+    assert started == []
+
+
+def test_degraded_selected_cortex_never_spawns_frontier_review(monkeypatch):
+    started = []
+
+    class RecordingThread:
+        def __init__(self, **_kwargs):
+            started.append(True)
+
+        def start(self):
+            started.append(True)
+
+    monkeypatch.setattr(run_agent_module.threading, "Thread", RecordingThread)
+    agent = _bare_agent()
+    agent._cortex_memory_selected = True
+    agent._cortex_memory_active = False
+
+    AIAgent._spawn_background_review(
+        agent,
+        messages_snapshot=[{"role": "user", "content": "hello"}],
+        review_memory=True,
+        review_skills=True,
+    )
+
+    assert started == []
+
+
 def test_background_review_shuts_down_memory_provider_before_close(monkeypatch):
     events = []
 

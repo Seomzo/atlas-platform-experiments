@@ -142,6 +142,14 @@ def _apply_one(subsystem: str, rec, memory_store):
     payload = rec.get("payload", {})
     try:
         if subsystem == wa.MEMORY:
+            if payload.get("kind") == "atlas_cortex_memory_control":
+                from altas.cortex.provider import apply_approved_memory_control
+
+                result = apply_approved_memory_control(
+                    payload,
+                    approval_id=str(rec.get("id") or ""),
+                )
+                return bool(result.get("ok")), result.get("error", "")
             if memory_store is None:
                 return False, "memory store unavailable"
             from tools.memory_tool import apply_memory_pending

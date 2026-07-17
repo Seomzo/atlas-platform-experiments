@@ -355,6 +355,7 @@ export interface SlashHandlerContext {
     guardBusySessionSwitch: (what?: string) => boolean
     newLiveSession: (msg?: string, title?: string) => void
     newSession: (msg?: string, title?: string) => void
+    releaseSession: (targetSid?: null | string) => Promise<unknown>
     resetVisibleHistory: (info?: null | SessionInfo) => void
     resumeById: (id: string) => void
     setSessionStartedAt: StateSetter<number>

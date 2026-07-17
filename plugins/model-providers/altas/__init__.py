@@ -19,10 +19,10 @@ class AltasGatewayProfile(ProviderProfile):
     def prepare_messages(
         self, messages: list[dict[str, object]]
     ) -> list[dict[str, object]]:
-        # Provider plugins are discovered eagerly, so managed mode must not be
-        # enabled at import time. This hook only runs when the Atlas profile is
-        # actually selected and runs before a response can contain tool calls.
-        os.environ["ATLAS_MANAGED_MODE"] = "1"
+        # Request authorization is installed by the authenticated managed
+        # dispatcher in a context-local secret scope. Never turn managed mode
+        # on process-wide here: one multiplexed process can serve unrelated
+        # profiles and concurrent jobs.
         return messages
 
     def build_api_kwargs_extras(
@@ -62,6 +62,13 @@ def _gateway_url() -> str:
 def _managed_headers() -> dict[str, str]:
     """Build fresh, request-scoped headers for one managed engine process."""
 
+    # In a multiplex gateway the active profile's credentials live in a
+    # context-local mapping.  ``get_secret`` is intentionally fail-closed when
+    # multiplexing is active without that scope, preventing a fallback to a
+    # different customer's process-global environment.  Outside multiplex
+    # mode it preserves the legacy os.environ behavior.
+    from agent.secret_scope import get_secret
+
     mapping = {
         "ATLAS_LEASE_TOKEN": "X-Atlas-Lease",
         "ATLAS_TENANT_ID": "X-Atlas-Tenant-ID",
@@ -70,11 +77,13 @@ def _managed_headers() -> dict[str, str]:
         "ATLAS_JOB_ID": "X-Atlas-Job-ID",
         "ATLAS_CLAIM_TOKEN": "X-Atlas-Claim-Token",
         "ATLAS_CORRELATION_ID": "X-Atlas-Correlation-ID",
+        "ATLAS_CORTEX_DISPATCH_ADMISSION": "X-Atlas-Cortex-Dispatch-Admission",
+        "ATLAS_CORTEX_DISPATCH_KEY": "X-Atlas-Cortex-Dispatch-Key",
     }
     return {
         header: value
         for env_name, header in mapping.items()
-        if (value := os.getenv(env_name, "").strip())
+        if (value := str(get_secret(env_name, "") or "").strip())
     }
 
 
@@ -88,6 +97,8 @@ altas = AltasGatewayProfile(
     auth_type="api_key",
     supports_health_check=True,
     supports_vision=False,
+    # The Cortex alias is an internal maintenance route and must never appear
+    # in ordinary chat model discovery.
     fallback_models=("altas-fixed-ops",),
     # Request-scoped headers are supplied by build_api_kwargs_extras(); never
     # snapshot managed authorization in client-level default headers.

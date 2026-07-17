@@ -12,17 +12,21 @@ import { ExternalLink, Loader2 } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 import {
   cancelOnboardingFlow,
+  connectOnboardingMemoryProvider,
   copyDeviceCode,
   copyExternalCommand,
   type OnboardingContext,
   type OnboardingFlow,
   recheckExternalSignin,
+  retryOnboardingMemoryModel,
   setOnboardingCode,
+  setOnboardingMemoryModel,
   setOnboardingModel,
   submitOnboardingCode
 } from '@/store/onboarding'
 
 import { DecodedLabel, GlyphText, HackeryButton, useScramble } from './glyph'
+import { MemoryModelPickerDialog } from './memory-model-picker'
 import { providerTitle } from './providers'
 
 export function FlowPanel({
@@ -53,6 +57,18 @@ export function FlowPanel({
 
   if (flow.status === 'confirming_model') {
     return <ConfirmingModelPanel flow={flow} leaving={leaving} onBegin={onBegin} />
+  }
+
+  if (flow.status === 'loading_memory_model') {
+    return <Status>{t.onboarding.memoryModel.loading}</Status>
+  }
+
+  if (flow.status === 'confirming_memory_model') {
+    return <ConfirmingMemoryModelPanel flow={flow} leaving={leaving} onBegin={onBegin} />
+  }
+
+  if (flow.status === 'memory_model_error') {
+    return <MemoryModelErrorPanel flow={flow} />
   }
 
   if (flow.status === 'error') {
@@ -131,6 +147,86 @@ export function FlowPanel({
         <CancelBtn size="sm" />
       </FlowFooter>
     </Step>
+  )
+}
+
+function MemoryModelErrorPanel({ flow }: { flow: Extract<OnboardingFlow, { status: 'memory_model_error' }> }) {
+  const { t } = useI18n()
+  const copy = t.onboarding.memoryModel
+  const [apiKey, setApiKey] = useState('')
+  const connectable = flow.connectableProvider
+
+  const connect = async () => {
+    const connected = await connectOnboardingMemoryProvider(apiKey)
+
+    if (connected) {
+      setApiKey('')
+    }
+  }
+
+  return (
+    <div className="grid gap-4">
+      <div className="flex items-start gap-2 text-sm text-destructive" role="alert">
+        <ErrorIcon className="mt-0.5 shrink-0" size="0.875rem" />
+        <div className="grid gap-1">
+          <span className="font-medium">{copy.errorTitle}</span>
+          <span>{flow.message}</span>
+        </div>
+      </div>
+
+      {connectable ? (
+        <form
+          className="grid gap-3 rounded-xl border border-border bg-background/55 p-3 text-left"
+          onSubmit={event => {
+            event.preventDefault()
+            void connect()
+          }}
+        >
+          <div className="grid gap-1">
+            <span className="text-sm font-medium">{copy.connectProvider(connectable.name)}</span>
+            <span className="text-xs leading-relaxed text-muted-foreground">
+              {copy.connectDescription(connectable.name)}
+            </span>
+            <span className="font-mono text-[0.65rem] text-muted-foreground">
+              {flow.mainProvider} · {flow.mainModel} {copy.chatModelUnchanged}
+            </span>
+          </div>
+          <label className="grid gap-1.5 text-xs" htmlFor="atlas-memory-provider-key">
+            <span className="text-muted-foreground">{connectable.keyEnv}</span>
+            <Input
+              autoComplete="off"
+              className="font-mono"
+              disabled={flow.connecting}
+              id="atlas-memory-provider-key"
+              onChange={event => setApiKey(event.target.value)}
+              placeholder={copy.apiKeyPlaceholder(connectable.keyEnv)}
+              type="password"
+              value={apiKey}
+            />
+          </label>
+          {flow.credentialMessage ? (
+            <p className="text-xs text-destructive" role="alert">
+              {flow.credentialMessage}
+            </p>
+          ) : null}
+          <div className="flex justify-end">
+            <Button disabled={!apiKey.trim() || flow.connecting} type="submit">
+              {flow.connecting ? <Loader2 className="size-3.5 animate-spin" /> : null}
+              {flow.connecting ? copy.connectingProvider : copy.connectAndContinue}
+            </Button>
+          </div>
+        </form>
+      ) : null}
+
+      <div className="flex justify-end gap-2">
+        <Button onClick={cancelOnboardingFlow} variant="ghost">
+          {t.onboarding.pickDifferentProvider}
+        </Button>
+        <Button disabled={flow.connecting} onClick={() => void retryOnboardingMemoryModel()} variant="outline">
+          {t.common.retry}
+        </Button>
+      </div>
+    </div>
   )
 }
 
@@ -289,6 +385,12 @@ function ConfirmingModelPanel({
         >
           {t.onboarding.change}
         </Button>
+        {flow.message && (
+          <div className="mt-2 flex max-w-md items-start gap-1.5 text-left text-xs text-destructive" role="alert">
+            <ErrorIcon className="mt-0.5 shrink-0" size="0.75rem" />
+            <span>{flow.message}</span>
+          </div>
+        )}
       </div>
 
       <div
@@ -318,10 +420,108 @@ function ConfirmingModelPanel({
         currentModel={flow.currentModel}
         currentProvider={flow.providerSlug}
         onOpenChange={setPickerOpen}
-        onSelect={({ model }) => {
-          void setOnboardingModel(model)
+        onSelect={({ provider, model }) => {
+          void setOnboardingModel(provider, model)
           setPickerOpen(false)
         }}
+        open={pickerOpen}
+      />
+    </div>
+  )
+}
+
+function ConfirmingMemoryModelPanel({
+  flow,
+  leaving,
+  onBegin
+}: {
+  flow: Extract<OnboardingFlow, { status: 'confirming_memory_model' }>
+  leaving: boolean
+  onBegin: () => void
+}) {
+  const { t } = useI18n()
+  const copy = t.onboarding.memoryModel
+  const [pickerOpen, setPickerOpen] = useState(false)
+
+  const provider = flow.providers.find(
+    row => row.slug.trim().toLowerCase() === flow.currentProvider.trim().toLowerCase()
+  )
+
+  const providerName = provider?.name ?? flow.currentProvider
+
+  const recommended =
+    flow.currentProvider.trim().toLowerCase() === flow.recommendedProvider.trim().toLowerCase() &&
+    flow.currentModel === flow.recommendedModel
+
+  const scrambledModel = useScramble(flow.currentModel, leaving)
+  const scrambledFinish = useScramble(copy.finishSetup, leaving)
+
+  return (
+    <div className="grid place-items-center gap-6 py-6 text-center">
+      <DecodedLabel leaving={leaving} text={copy.title} />
+
+      <div
+        className={cn(
+          'grid max-w-xl justify-items-center gap-2 transition duration-[360ms] ease-out',
+          leaving ? 'opacity-0 saturate-0' : 'opacity-100 saturate-100'
+        )}
+      >
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-[0.625rem] uppercase tracking-[0.2em] text-muted-foreground">
+            {copy.dedicatedModel}
+          </span>
+          {recommended && (
+            <span className="rounded-sm bg-primary/15 px-1 py-0.5 text-[0.6rem] font-semibold uppercase tracking-wide text-primary">
+              {copy.recommended}
+            </span>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground">{providerName}</p>
+        <p className="font-mono text-base">
+          <GlyphText text={scrambledModel} />
+        </p>
+        <span className="rounded-full border border-(--stroke-nous) px-2 py-1 font-mono text-[0.62rem] uppercase tracking-[0.12em] text-muted-foreground">
+          {copy.routeLabel}
+        </span>
+        <p className="mt-1 max-w-lg text-sm leading-relaxed text-muted-foreground">{copy.description}</p>
+        <p className="font-mono text-[0.68rem] text-muted-foreground">
+          {copy.chatModel}: {flow.mainProvider} · {flow.mainModel}
+        </p>
+        <Button
+          className="mt-0.5 text-xs"
+          disabled={flow.saving}
+          onClick={() => setPickerOpen(true)}
+          size="inline"
+          variant="text"
+        >
+          {t.onboarding.change}
+        </Button>
+        {flow.message && (
+          <div className="mt-1 flex max-w-md items-start gap-1.5 text-left text-xs text-destructive" role="alert">
+            <ErrorIcon className="mt-0.5 shrink-0" size="0.75rem" />
+            <span>{flow.message}</span>
+          </div>
+        )}
+      </div>
+
+      <div
+        className={cn(
+          'transition duration-[360ms] ease-out',
+          leaving ? 'opacity-0 saturate-0' : 'opacity-100 saturate-100'
+        )}
+      >
+        <HackeryButton
+          disabled={flow.saving}
+          label={<GlyphText text={scrambledFinish} />}
+          loading={flow.saving}
+          onClick={onBegin}
+        />
+      </div>
+
+      <MemoryModelPickerDialog
+        flow={flow}
+        onOpenChange={setPickerOpen}
+        onSelect={setOnboardingMemoryModel}
         open={pickerOpen}
       />
     </div>

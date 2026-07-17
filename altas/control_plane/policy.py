@@ -62,6 +62,8 @@ class PolicyEngine:
         authenticated_device: dict[str, Any],
         store_id: str,
         agent_id: str,
+        ttl_seconds: int | None = None,
+        audit_action: str = "lease.issue",
     ) -> tuple[str, LeaseClaims]:
         decision = self._baseline(
             authenticated_device=authenticated_device,
@@ -69,7 +71,7 @@ class PolicyEngine:
             agent_id=agent_id,
         )
         if not decision.allowed:
-            self._audit(decision, action="lease.issue")
+            self._audit(decision, action=audit_action)
             raise PolicyDenied(decision)
         token, claims = self.lease_signer.issue(
             device_id=decision.device_id or "",
@@ -77,7 +79,7 @@ class PolicyEngine:
             store_id=decision.store_id or "",
             agent_id=decision.agent_id or "",
             capabilities=decision.capabilities,
-            ttl_seconds=self.lease_ttl_seconds,
+            ttl_seconds=ttl_seconds or self.lease_ttl_seconds,
             nonce=secrets.token_hex(16),
         )
         allowed = PolicyDecision(
@@ -91,7 +93,7 @@ class PolicyEngine:
             capabilities=decision.capabilities,
             lease_claims=claims,
         )
-        self._audit(allowed, action="lease.issue")
+        self._audit(allowed, action=audit_action)
         return token, claims
 
     def evaluate(

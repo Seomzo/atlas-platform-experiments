@@ -20,12 +20,18 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 
+from altas.cortex.managed_dispatch import (
+    CortexDispatchAdmission as CoreCortexDispatchAdmission,
+    dispatch_key_commitment,
+)
+
 from .config import ControlPlaneSettings
 from .database import Database
 from .model_gateway import ModelGateway, ModelGatewayError
 from .policy import PolicyDecision, PolicyDenied, PolicyEngine, not_expired
 from .repository import (
     ControlPlaneRepository,
+    CortexDispatchLimitExceeded,
     DemoSeed,
     IdempotencyConflict,
     InvalidJobClaim,
@@ -33,6 +39,7 @@ from .repository import (
 )
 from .schemas import (
     ChatCompletionRequest,
+    CortexMaintenanceRequest,
     HeartbeatRequest,
     JobCompletionRequest,
     PolicyEvaluationRequest,
@@ -61,6 +68,7 @@ ToggleResource = Literal["stores", "subscriptions", "devices", "agents", "entitl
 # that workflow; an arbitrary entitled capability is never enough.
 JOB_CAPABILITY_DEPENDENCIES: dict[str, frozenset[str]] = {
     "fixed_ops.daily_report": frozenset({"model.chat"}),
+    "cortex.memory_maintenance": frozenset({"model.chat"}),
 }
 
 
@@ -68,6 +76,27 @@ def _job_allows_capability(job_capability: str, requested_capability: str) -> bo
     return requested_capability == job_capability or requested_capability in (
         JOB_CAPABILITY_DEPENDENCIES.get(job_capability, frozenset())
     )
+
+
+def _require_cortex_dispatch_admission(
+    repository: ControlPlaneRepository,
+    job: dict[str, Any],
+) -> CoreCortexDispatchAdmission:
+    """Require the dedicated ledger row and exact persisted Cortex payload."""
+
+    if job.get("capability") != "cortex.memory_maintenance":
+        raise ValueError("job is not Cortex maintenance")
+    payload = job.get("payload")
+    if not isinstance(payload, dict) or set(payload) != {"dispatch_admission"}:
+        raise ValueError("invalid Cortex dispatch payload")
+    admission = CoreCortexDispatchAdmission.from_mapping(
+        payload["dispatch_admission"]
+    )
+    if not admission.is_canonical():
+        raise ValueError("non-canonical Cortex dispatch admission")
+    if not repository.has_cortex_dispatch_admission(str(job.get("id") or "")):
+        raise ValueError("missing Cortex dispatch admission")
+    return admission
 
 
 def _policy_error(decision: PolicyDecision) -> HTTPException:
@@ -433,9 +462,93 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
             "capability": request.capability,
         }
 
+    @worker.post("/jobs/cortex/ensure")
+    def ensure_cortex_maintenance(
+        request: CortexMaintenanceRequest,
+        device: dict[str, Any] = Depends(require_device),
+        lease_token: str = Header(..., alias="X-Atlas-Lease"),
+    ) -> dict[str, Any]:
+        """Queue one idempotent, claim-bound Cortex maintenance dispatch.
+
+        The worker derives ``dispatch_key`` from its private local Cortex job;
+        it is an opaque digest, not a brain ID or memory payload.  Authority
+        still comes exclusively from the authenticated device, current lease,
+        assignment, subscription, and Cortex entitlement.
+        """
+        if request.tenant_id != device["tenant_id"]:
+            audit_worker_denial(
+                action="cortex.maintenance.request",
+                device=device,
+                store_id=request.store_id,
+                agent_id=request.agent_id,
+                reason="tenant_context_mismatch",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "tenant_context_mismatch"},
+            )
+        authorize(
+            device=device,
+            store_id=request.store_id,
+            agent_id=request.agent_id,
+            capability="cortex.memory_maintenance",
+            lease_token=lease_token,
+            audit_action="cortex.maintenance.request",
+        )
+        try:
+            job, created, requeued = repository.ensure_cortex_maintenance_job(
+                tenant_id=device["tenant_id"],
+                store_id=request.store_id,
+                agent_id=request.agent_id,
+                device_id=device["id"],
+                dispatch_key=request.dispatch_key,
+                dispatch_admission=request.dispatch_admission.model_dump(mode="json"),
+                max_jobs_per_24h=settings.cortex_max_jobs_per_device_per_24h,
+            )
+        except CortexDispatchLimitExceeded as exc:
+            code = str(exc)
+            audit_worker_denial(
+                action="cortex.maintenance.request",
+                device=device,
+                store_id=request.store_id,
+                agent_id=request.agent_id,
+                reason=code,
+            )
+            response_status = (
+                status.HTTP_409_CONFLICT
+                if code == "cortex_dispatch_already_active"
+                else status.HTTP_429_TOO_MANY_REQUESTS
+            )
+            raise HTTPException(
+                status_code=response_status,
+                detail={"code": code},
+            ) from exc
+        except IdempotencyConflict as exc:
+            # The server owns every other field in this request, so a conflict
+            # would indicate corrupted state rather than caller variation.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "cortex_dispatch_conflict"},
+            ) from exc
+        repository.record_audit(
+            actor_type="worker",
+            action="cortex.maintenance.queue",
+            outcome="succeeded",
+            tenant_id=device["tenant_id"],
+            store_id=request.store_id,
+            agent_id=request.agent_id,
+            device_id=device["id"],
+            job_id=job["id"],
+            resource_type="job",
+            resource_id=job["id"],
+            details={"created": created, "requeued": requeued},
+        )
+        return {"job_id": job["id"], "created": created, "requeued": requeued}
+
     @worker.get("/jobs/next")
     def next_job(
         device: dict[str, Any] = Depends(require_device),
+        capability: str | None = Query(default=None, min_length=1, max_length=120),
         tenant_id: str = Header(..., alias="X-Atlas-Tenant-ID"),
         store_id: str = Header(..., alias="X-Atlas-Store-ID"),
         agent_id: str = Header(..., alias="X-Atlas-Agent-ID"),
@@ -463,6 +576,22 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
         )
         claims = poll_decision.lease_claims
         allowed_capabilities = claims.capabilities if claims else ()
+        if capability:
+            if capability not in allowed_capabilities:
+                audit_worker_denial(
+                    action="jobs.poll",
+                    device=device,
+                    store_id=store_id,
+                    agent_id=agent_id,
+                    reason="capability_not_leased",
+                    resource_type="capability",
+                    resource_id=capability,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={"code": "capability_not_leased"},
+                )
+            allowed_capabilities = (capability,)
         job = repository.claim_next_job(
             tenant_id=device["tenant_id"],
             store_id=store_id,
@@ -502,7 +631,41 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
             resource_id=job["id"],
             details={"capability": job["capability"]},
         )
-        return {"job": job}
+        authorization_lease = None
+        if job["capability"] == "cortex.memory_maintenance":
+            try:
+                _require_cortex_dispatch_admission(repository, job)
+            except (KeyError, TypeError, ValueError):
+                repository.quarantine_cortex_dispatch(
+                    job["id"], device_id=device["id"]
+                )
+                audit_worker_denial(
+                    action="jobs.dispatch",
+                    device=device,
+                    store_id=store_id,
+                    agent_id=agent_id,
+                    reason="cortex_dispatch_admission_invalid",
+                    resource_type="job",
+                    resource_id=job["id"],
+                    job_id=job["id"],
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={"code": "cortex_dispatch_admission_invalid"},
+                )
+            job_lease_token, job_lease_claims = policy.issue_lease(
+                authenticated_device=device,
+                store_id=store_id,
+                agent_id=agent_id,
+                ttl_seconds=settings.cortex_job_lease_ttl_seconds,
+                audit_action="lease.issue.cortex_job",
+            )
+            authorization_lease = {
+                "token": job_lease_token,
+                "expires_at": job_lease_claims.expires_at,
+                "capabilities": list(job_lease_claims.capabilities),
+            }
+        return {"job": job, "authorization_lease": authorization_lease}
 
     @worker.post("/jobs/{job_id}/complete")
     def complete_job(
@@ -615,6 +778,11 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
 
     @admin.post("/jobs", status_code=status.HTTP_201_CREATED)
     def queue_job(request: QueueJobRequest) -> dict[str, Any]:
+        if request.capability == "cortex.memory_maintenance":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "cortex_dispatch_requires_dedicated_admission"},
+            )
         tenant = repository.get_tenant(request.tenant_id)
         store = repository.get_store(request.store_id)
         agent = repository.get_agent(request.agent_id)
@@ -845,6 +1013,19 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
         claim_token: str = Header(
             ..., min_length=32, max_length=256, alias="X-Atlas-Claim-Token"
         ),
+        cortex_dispatch_key: str | None = Header(
+            default=None,
+            min_length=64,
+            max_length=64,
+            pattern=r"^[0-9a-f]{64}$",
+            alias="X-Atlas-Cortex-Dispatch-Key",
+        ),
+        cortex_dispatch_admission: str | None = Header(
+            default=None,
+            min_length=1,
+            max_length=2048,
+            alias="X-Atlas-Cortex-Dispatch-Admission",
+        ),
     ) -> dict[str, Any]:
         if tenant_id != device["tenant_id"]:
             audit_worker_denial(
@@ -927,7 +1108,56 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
             audit_action="model.chat",
             job_id=job_id,
         )
-        if request.model != settings.model_id:
+        is_cortex_job = job["capability"] == "cortex.memory_maintenance"
+        admitted_cortex_dispatch: CoreCortexDispatchAdmission | None = None
+        supplied_cortex_dispatch: CoreCortexDispatchAdmission | None = None
+        cortex_commitment: str | None = None
+        if is_cortex_job:
+            try:
+                admitted_cortex_dispatch = _require_cortex_dispatch_admission(
+                    repository, job
+                )
+                supplied_cortex_dispatch = CoreCortexDispatchAdmission.from_header(
+                    cortex_dispatch_admission or ""
+                )
+                cortex_commitment = dispatch_key_commitment(cortex_dispatch_key or "")
+            except (KeyError, TypeError, ValueError):
+                admitted_cortex_dispatch = None
+            if (
+                admitted_cortex_dispatch is None
+                or supplied_cortex_dispatch is None
+                or not hmac.compare_digest(
+                    supplied_cortex_dispatch.canonical_json(),
+                    admitted_cortex_dispatch.canonical_json(),
+                )
+                or not hmac.compare_digest(
+                    cortex_commitment,
+                    admitted_cortex_dispatch.dispatch_key_commitment,
+                )
+            ):
+                audit_worker_denial(
+                    action="model.chat",
+                    device=device,
+                    store_id=store_id,
+                    agent_id=agent_id,
+                    reason="cortex_dispatch_admission_invalid",
+                    resource_type="job",
+                    resource_id=job_id,
+                    job_id=job_id,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={"code": "cortex_dispatch_admission_invalid"},
+                )
+        elif cortex_dispatch_key is not None or cortex_dispatch_admission is not None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "cortex_dispatch_scope_invalid"},
+            )
+        expected_model = (
+            settings.cortex_model_id if is_cortex_job else settings.model_id
+        )
+        if request.model != expected_model:
             audit_worker_denial(
                 action="model.request",
                 device=device,
@@ -941,6 +1171,25 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"code": "model_not_allowed"},
+            )
+        if (
+            is_cortex_job
+            and not settings.mock_model
+            and not settings.cortex_upstream_model
+        ):
+            audit_worker_denial(
+                action="model.request",
+                device=device,
+                store_id=store_id,
+                agent_id=agent_id,
+                reason="cortex_model_not_configured",
+                resource_type="model",
+                resource_id=request.model,
+                job_id=job_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"code": "cortex_model_not_configured"},
             )
         requested_token_values = [
             value
@@ -958,6 +1207,16 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
                 update={"max_tokens": requested_tokens}
             )
         try:
+            request_limit = (
+                settings.cortex_max_model_requests_per_job
+                if is_cortex_job
+                else settings.max_model_requests_per_job
+            )
+            requested_token_limit = (
+                settings.cortex_max_requested_tokens_per_job
+                if is_cortex_job
+                else settings.max_requested_tokens_per_job
+            )
             reservation = repository.reserve_model_usage(
                 tenant_id=device["tenant_id"],
                 store_id=store_id,
@@ -967,8 +1226,14 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
                 claim_token=claim_token,
                 model=request.model,
                 requested_tokens=requested_tokens,
-                request_limit=settings.max_model_requests_per_job,
-                requested_token_limit=settings.max_requested_tokens_per_job,
+                request_limit=request_limit,
+                requested_token_limit=requested_token_limit,
+                cortex_dispatch_admission=(
+                    admitted_cortex_dispatch.to_mapping()
+                    if admitted_cortex_dispatch is not None
+                    else None
+                ),
+                cortex_dispatch_commitment=cortex_commitment,
             )
         except (InvalidJobClaim, ModelUsageLimitExceeded) as exc:
             audit_worker_denial(
@@ -989,8 +1254,13 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
             raise HTTPException(
                 status_code=error_status, detail={"code": str(exc)}
             ) from exc
+        gateway_request = effective_request
+        if is_cortex_job and settings.cortex_upstream_model:
+            gateway_request = effective_request.model_copy(
+                update={"model": settings.cortex_upstream_model}
+            )
         try:
-            result = await model_gateway.complete(effective_request)
+            result = await model_gateway.complete(gateway_request)
         except ModelGatewayError as exc:
             repository.fail_model_usage(reservation["id"])
             repository.record_audit(
@@ -1039,7 +1309,11 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
                 "output_tokens": result.output_tokens,
             },
         )
-        return result.response
+        # Keep centrally selected provider model IDs private and preserve the
+        # stable Atlas product alias on the OpenAI-compatible response.
+        response = dict(result.response)
+        response["model"] = request.model
+        return response
 
     app.include_router(model_api)
     app.mount(

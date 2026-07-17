@@ -6,6 +6,7 @@ import type { TimeAxis } from './time-axis'
 
 interface TimelineProps {
   axis: TimeAxis
+  immersive?: boolean
   // Colour for memory stars — matches the map's memory glyph.
   memoryColor?: string
   onScrub: (reveal: number) => void
@@ -102,6 +103,7 @@ function buildStars(axis: TimeAxis): Star[] {
 // in StarMap drives it with zero per-frame JS.
 export const Timeline = memo(function Timeline({
   axis,
+  immersive = false,
   memoryColor = 'var(--theme-secondary)',
   onScrub,
   onTogglePlay,
@@ -181,12 +183,18 @@ export const Timeline = memo(function Timeline({
   const colorFor = (kind: Star['kind']) => (kind === 'skill' ? 'var(--theme-primary)' : memoryColor)
 
   return (
-    <div className="pointer-events-auto flex w-[28rem] max-w-full items-center gap-3 [-webkit-app-region:no-drag]">
+    <div
+      className={`pointer-events-auto flex w-[30rem] max-w-full items-center gap-3 [-webkit-app-region:no-drag] ${
+        immersive
+          ? 'rounded-xl border border-white/10 bg-[#07121f]/88 px-4 py-2 shadow-[0_12px_35px_rgba(0,0,0,0.35)] backdrop-blur-xl'
+          : ''
+      }`}
+    >
       <style>{'@keyframes starmap-twinkle{0%,100%{opacity:var(--o,1)}50%{opacity:calc(var(--o,1) * 0.35)}}'}</style>
 
       <button
         aria-label={playing ? 'Pause' : 'Play timeline'}
-        className="flex size-5 shrink-0 items-center justify-center text-foreground/75 transition-colors hover:text-foreground"
+        className={`flex size-5 shrink-0 items-center justify-center transition-colors ${immersive ? 'text-[#89a5bd] hover:text-white' : 'text-foreground/75 hover:text-foreground'}`}
         onClick={onTogglePlay}
         type="button"
       >
@@ -210,7 +218,7 @@ export const Timeline = memo(function Timeline({
         {/* Dashed midline — a faint horizontal axis the stars ride over. */}
         <div
           aria-hidden
-          className="pointer-events-none absolute inset-x-0 top-1/2 -translate-y-1/2 border-t border-dashed border-foreground/5"
+          className={`pointer-events-none absolute inset-x-0 top-1/2 -translate-y-1/2 border-t border-dashed ${immersive ? 'border-white/10' : 'border-foreground/5'}`}
         />
 
         {/* Dim constellation — the unrevealed future. */}
@@ -280,7 +288,7 @@ export const Timeline = memo(function Timeline({
         {/* Playhead — a thin white sweep line. */}
         <div
           aria-hidden
-          className="pointer-events-none absolute inset-y-0 w-0.5 -translate-x-1/2 bg-foreground"
+          className={`pointer-events-none absolute inset-y-0 w-0.5 -translate-x-1/2 ${immersive ? 'bg-[#dff5ff]' : 'bg-foreground'}`}
           style={{ left: 'calc(var(--starmap-reveal, 1) * 100%)' }}
         />
       </div>

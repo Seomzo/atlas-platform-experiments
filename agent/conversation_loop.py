@@ -627,12 +627,32 @@ def run_conversation(
     # See agent/transports/codex_app_server_session.py for the adapter
     # and references/codex-app-server-runtime.md for the rationale.
     if agent.api_mode == "codex_app_server":
+        # Codex app-server is an early-return path, so it does not reach the
+        # normal api_messages loop below where prefetched memory and plugin
+        # context are injected into a copy of the current user row. Build one
+        # equivalent ephemeral block here. Both sources are fenced as
+        # non-authoritative reference data; the original row in ``messages``
+        # remains untouched for Atlas session persistence and memory-control
+        # authorization.
+        _codex_volatile_parts: list[str] = []
+        if isinstance(_ext_prefetch_cache, str) and _ext_prefetch_cache.strip():
+            _codex_volatile_parts.append(
+                "[Source: automatic memory recall]\n" + _ext_prefetch_cache
+            )
+        if isinstance(_plugin_user_context, str) and _plugin_user_context.strip():
+            _codex_volatile_parts.append(
+                "[Source: pre-LLM plugin context]\n" + _plugin_user_context
+            )
+        _codex_volatile_context = build_memory_context_block(
+            "\n\n".join(_codex_volatile_parts)
+        )
         return agent._run_codex_app_server_turn(
             user_message=user_message,
             original_user_message=original_user_message,
             messages=messages,
             effective_task_id=effective_task_id,
             should_review_memory=_should_review_memory,
+            volatile_user_context=_codex_volatile_context,
         )
 
     while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
@@ -5096,6 +5116,7 @@ def run_conversation(
                             "[System: Continue now. Execute the required tool calls and only "
                             "send your final answer after completing the task.]"
                         ),
+                        "_intent_ack_synthetic": True,
                     }
                     messages.append(continue_msg)
                     agent._session_messages = messages

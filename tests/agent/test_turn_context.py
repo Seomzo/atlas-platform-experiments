@@ -216,6 +216,33 @@ def test_memory_nudge_fires_at_interval():
     assert agent._turns_since_memory == 0  # reset after firing
 
 
+def test_cortex_suppresses_legacy_per_turn_memory_review():
+    agent = _FakeAgent()
+    agent._memory_nudge_interval = 1
+    agent.valid_tool_names = {"memory"}
+    agent._memory_store = object()
+    agent._cortex_memory_active = True
+
+    ctx = _build(agent)
+
+    assert ctx.should_review_memory is False
+    assert agent._turns_since_memory == 0
+
+
+def test_selected_but_degraded_cortex_still_suppresses_frontier_review():
+    agent = _FakeAgent()
+    agent._memory_nudge_interval = 1
+    agent.valid_tool_names = {"memory"}
+    agent._memory_store = object()
+    agent._cortex_memory_selected = True
+    agent._cortex_memory_active = False
+
+    ctx = _build(agent)
+
+    assert ctx.should_review_memory is False
+    assert agent._turns_since_memory == 0
+
+
 def test_no_review_when_memory_disabled():
     agent = _FakeAgent()
     ctx = _build(agent)
@@ -363,4 +390,3 @@ def test_expired_cooldown_allows_preflight(tmp_path):
     assert isinstance(ctx, TurnContext)
     agent._emit_status.assert_called_once()
     agent._compress_context.assert_called()
-

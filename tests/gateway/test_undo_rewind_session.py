@@ -80,3 +80,22 @@ def test_rewind_clamps_negative_count_to_one(store):
     res = store.rewind_session(sid, -5)
     assert res["turns_undone"] == 1
     assert res["target_text"] == "q3"
+
+
+def test_restore_rewind_compensates_only_the_exact_failed_receipt(store):
+    sid = _seed(store, "gw-compensate")
+    first = store.rewind_session(sid, 1)
+    store._db.append_message(sid, "user", "q4")
+    store._db.append_message(sid, "assistant", "a4")
+    second = store.rewind_session(sid, 1)
+
+    assert store.restore_rewind(sid, second["rewound_message_ids"]) is True
+
+    rows = store._db.get_messages(sid, include_inactive=True)
+    state = {row["content"]: row["active"] for row in rows}
+    assert state["q3"] == 0
+    assert state["a3"] == 0
+    assert state["q4"] == 1
+    assert state["a4"] == 1
+    assert set(first["rewound_message_ids"]).isdisjoint(second["rewound_message_ids"])
+    assert store._db.get_session(sid)["rewind_count"] == 1

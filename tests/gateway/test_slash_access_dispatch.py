@@ -148,6 +148,30 @@ async def test_whoami_non_admin_lists_runnable_commands():
     assert "/model" in result
 
 
+@pytest.mark.asyncio
+async def test_help_fails_closed_on_existing_pending_predecessor_boundary():
+    """Early-return commands must not bypass an auto-reset memory retry token."""
+    runner = _make_runner(platform_extra={})
+    source = _make_source()
+    session_key = build_session_key(source)
+    entry = runner.session_store.get_or_create_session.return_value
+    entry.session_key = session_key
+    entry.previous_session_id = "sess-previous"
+    runner.session_store._entries = {session_key: entry}
+    runner._finalize_previous_session_before_turn = AsyncMock(return_value=False)
+    runner._handle_help_command = AsyncMock(return_value="help should not render")
+
+    result = await runner._handle_message(_make_event("/help", source))
+
+    assert "couldn't safely finish saving the previous session's memory" in result
+    runner._finalize_previous_session_before_turn.assert_awaited_once_with(
+        source=source,
+        session_entry=entry,
+    )
+    runner._handle_help_command.assert_not_awaited()
+    runner.session_store.get_or_create_session.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Gate denial — admin-only command attempted by non-admin
 # ---------------------------------------------------------------------------

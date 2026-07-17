@@ -17,9 +17,13 @@ import pytest
 from hermes_cli.config import DEFAULT_CONFIG, load_config
 from hermes_cli.main import (
     _AUX_TASKS,
+    _CORTEX_AUX_TASKS,
+    _aux_select_for_task,
+    _cortex_memory_catalog_choices,
     _format_aux_current,
     _reset_aux_to_auto,
     _save_aux_choice,
+    _save_cortex_memory_choice,
 )
 
 
@@ -236,6 +240,355 @@ def test_reset_aux_to_auto_idempotent(tmp_path, monkeypatch):
     _save_aux_choice("vision", provider="nous", model="gemini-3-flash")
     assert _reset_aux_to_auto() == 1
     assert _reset_aux_to_auto() == 0
+
+
+def test_reset_aux_to_auto_preserves_dedicated_cortex_routes(tmp_path, monkeypatch):
+    """Generic reset must not disable session-end Cortex consolidation."""
+    from pathlib import Path
+
+    from hermes_cli.config import save_config
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".hermes").mkdir(exist_ok=True)
+
+    cfg = load_config()
+    for index, task in enumerate(_CORTEX_AUX_TASKS):
+        cfg["auxiliary"][task].update(
+            {
+                "provider": "openrouter",
+                "model": f"google/cortex-memory-{index}",
+                "base_url": "https://memory.example.test/v1",
+                "api_key": "private-memory-key",
+                "timeout": 321 + index,
+            }
+        )
+    cfg["auxiliary"]["vision"].update(
+        {"provider": "openrouter", "model": "google/gemini-2.5-flash"}
+    )
+    save_config(cfg)
+
+    assert _reset_aux_to_auto() == 1
+
+    saved = load_config()
+    assert saved["auxiliary"]["vision"]["provider"] == "auto"
+    assert saved["auxiliary"]["vision"]["model"] == ""
+    for index, task in enumerate(_CORTEX_AUX_TASKS):
+        slot = saved["auxiliary"][task]
+        assert slot["provider"] == "openrouter"
+        assert slot["model"] == f"google/cortex-memory-{index}"
+        assert slot["base_url"] == "https://memory.example.test/v1"
+        assert slot["api_key"] == "private-memory-key"
+        assert slot["timeout"] == 321 + index
+
+
+def _cortex_catalog(
+    *,
+    authenticated: bool = True,
+    selectable: bool = True,
+    structured_json: bool = True,
+) -> dict:
+    model = "google/gemini-3.1-flash-lite"
+    return {
+        "providers": [
+            {
+                "slug": "openrouter",
+                "name": "OpenRouter",
+                "authenticated": authenticated,
+                "models": [model],
+                "memory_capabilities": {
+                    model: {
+                        "selectable": selectable,
+                        "structured_json": structured_json,
+                    }
+                },
+            }
+        ]
+    }
+
+
+def test_save_cortex_memory_choice_atomically_updates_both_strict_slots(
+    tmp_path, monkeypatch
+):
+    """One validated choice updates both passes once and clears hidden routes."""
+    import copy
+    from pathlib import Path
+
+    from hermes_cli import config as config_mod
+    from hermes_cli import main as main_mod
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".hermes").mkdir(exist_ok=True)
+
+    cfg = load_config()
+    cfg["model"] = {
+        "provider": "anthropic",
+        "default": "claude-sonnet-4.6",
+        "base_url": "",
+    }
+    cfg.setdefault("cortex", {}).setdefault("security", {})[
+        "approved_model_providers"
+    ] = ["openrouter"]
+    for index, task in enumerate(_CORTEX_AUX_TASKS):
+        cfg["auxiliary"][task].update(
+            {
+                "provider": "custom",
+                "model": "old-model",
+                "base_url": "https://hidden.example.test/v1",
+                "api_key": "hidden-key",
+                "api": "legacy-key",
+                "api_mode": "legacy",
+                "fallback_chain": ["main"],
+                "timeout": 456 + index,
+                "extra_body": {"preserve": True},
+            }
+        )
+    config_mod.save_config(cfg)
+
+    monkeypatch.setattr(
+        main_mod,
+        "_build_cortex_memory_catalog",
+        lambda _cfg: _cortex_catalog(),
+    )
+    real_save_config = config_mod.save_config
+    writes: list[dict] = []
+
+    def tracking_save_config(value, *args, **kwargs):
+        writes.append(copy.deepcopy(value))
+        return real_save_config(value, *args, **kwargs)
+
+    monkeypatch.setattr(config_mod, "save_config", tracking_save_config)
+
+    result = _save_cortex_memory_choice(
+        provider="openrouter",
+        model="google/gemini-3.1-flash-lite",
+    )
+
+    assert result == ("openrouter", "google/gemini-3.1-flash-lite")
+    assert len(writes) == 1
+    saved = writes[0]
+    assert saved["model"]["provider"] == "anthropic"
+    assert saved["model"]["default"] == "claude-sonnet-4.6"
+    for index, task in enumerate(_CORTEX_AUX_TASKS):
+        slot = saved["auxiliary"][task]
+        assert slot["provider"] == "openrouter"
+        assert slot["model"] == "google/gemini-3.1-flash-lite"
+        assert slot["fallback_chain"] == []
+        assert slot["timeout"] == 456 + index
+        assert slot["extra_body"] == {"preserve": True}
+        for hidden_field in ("base_url", "api_key", "api", "api_mode"):
+            assert hidden_field not in slot
+
+
+@pytest.mark.parametrize(
+    ("catalog", "model", "expected_error"),
+    [
+        (
+            _cortex_catalog(authenticated=False),
+            "google/gemini-3.1-flash-lite",
+            "not authenticated",
+        ),
+        (
+            _cortex_catalog(),
+            "unreviewed/arbitrary-model",
+            "not selectable",
+        ),
+        (
+            _cortex_catalog(structured_json=False),
+            "google/gemini-3.1-flash-lite",
+            "not verified for structured",
+        ),
+    ],
+)
+def test_save_cortex_memory_choice_rejects_unsafe_catalog_routes_without_write(
+    tmp_path,
+    monkeypatch,
+    catalog,
+    model,
+    expected_error,
+):
+    from pathlib import Path
+
+    from hermes_cli import config as config_mod
+    from hermes_cli import main as main_mod
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".hermes").mkdir(exist_ok=True)
+
+    cfg = load_config()
+    cfg["model"] = {"provider": "anthropic", "default": "claude-sonnet-4.6"}
+    config_mod.save_config(cfg)
+
+    monkeypatch.setattr(
+        main_mod,
+        "_build_cortex_memory_catalog",
+        lambda _cfg: catalog,
+    )
+    writes: list[dict] = []
+    monkeypatch.setattr(config_mod, "save_config", lambda value: writes.append(value))
+
+    with pytest.raises(ValueError, match=expected_error):
+        _save_cortex_memory_choice(provider="openrouter", model=model)
+
+    assert writes == []
+
+
+def test_cortex_catalog_choices_hide_unverified_and_unauthenticated_routes():
+    """The native picker exposes no auto/custom escape hatch."""
+    model = "google/gemini-3.1-flash-lite"
+    catalog = _cortex_catalog()
+    catalog["providers"].extend(
+        [
+            {
+                "slug": "unauthenticated",
+                "authenticated": False,
+                "models": [model],
+                "memory_capabilities": {
+                    model: {"selectable": True, "structured_json": True}
+                },
+            },
+            {
+                "slug": "unstructured",
+                "authenticated": True,
+                "models": [model],
+                "memory_capabilities": {
+                    model: {"selectable": True, "structured_json": False}
+                },
+            },
+        ]
+    )
+
+    assert _cortex_memory_catalog_choices(catalog) == [
+        ("openrouter", model, f"OpenRouter · {model}")
+    ]
+
+
+def test_cortex_task_picker_uses_dedicated_both_slot_flow(monkeypatch):
+    """Selecting either Cortex row never enters the generic aux picker."""
+    from hermes_cli import main as main_mod
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        main_mod,
+        "_cortex_memory_model_flow",
+        lambda: calls.append("cortex"),
+    )
+
+    for task in _CORTEX_AUX_TASKS:
+        _aux_select_for_task(task)
+
+    assert calls == ["cortex", "cortex"]
+
+
+def test_generic_save_helper_routes_cortex_through_atomic_both_slot_save(
+    monkeypatch,
+):
+    """Direct helper callers cannot bypass the dedicated Cortex write path."""
+    from hermes_cli import main as main_mod
+
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        main_mod,
+        "_save_cortex_memory_choice",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    _save_aux_choice(
+        "cortex_triage",
+        provider="openrouter",
+        model="google/gemini-3.1-flash-lite",
+    )
+
+    assert calls == [
+        {
+            "provider": "openrouter",
+            "model": "google/gemini-3.1-flash-lite",
+        }
+    ]
+    with pytest.raises(ValueError, match="arbitrary task-local endpoint"):
+        _save_aux_choice(
+            "cortex_reasoning",
+            provider="custom",
+            model="local-model",
+            base_url="http://localhost:11434/v1",
+        )
+
+
+def test_openrouter_chat_picker_rejects_existing_cortex_pair_without_write(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    """Native ``atlas model`` enforces chat/memory separation bidirectionally."""
+    from pathlib import Path
+
+    from hermes_cli import auth as auth_mod
+    from hermes_cli import main as main_mod
+    from hermes_cli import models as models_mod
+    from hermes_cli.config import save_config
+    from hermes_cli.model_setup_flows import _model_flow_openrouter
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".hermes").mkdir(exist_ok=True)
+
+    memory_model = "google/gemini-3.1-flash-lite"
+    cfg = load_config()
+    cfg["model"] = {
+        "provider": "anthropic",
+        "default": "claude-sonnet-4.6",
+    }
+    for task in _CORTEX_AUX_TASKS:
+        cfg["auxiliary"][task]["provider"] = "openrouter"
+        cfg["auxiliary"][task]["model"] = memory_model
+    save_config(cfg)
+
+    monkeypatch.setattr(
+        main_mod,
+        "_prompt_api_key",
+        lambda *_args, **_kwargs: ("openrouter-key", False),
+    )
+    monkeypatch.setattr(
+        models_mod,
+        "model_ids",
+        lambda **_kwargs: [memory_model],
+    )
+    monkeypatch.setattr(
+        models_mod,
+        "get_pricing_for_provider",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        auth_mod,
+        "_prompt_model_selection",
+        lambda *_args, **_kwargs: memory_model,
+    )
+    model_writes: list[str] = []
+    monkeypatch.setattr(
+        auth_mod,
+        "_save_model_choice",
+        lambda model: model_writes.append(model),
+    )
+    provider_changes: list[str] = []
+    monkeypatch.setattr(
+        auth_mod,
+        "deactivate_provider",
+        lambda: provider_changes.append("deactivated"),
+    )
+
+    _model_flow_openrouter(cfg, current_model="claude-sonnet-4.6")
+
+    assert model_writes == []
+    assert provider_changes == []
+    saved = load_config()
+    assert saved["model"]["provider"] == "anthropic"
+    assert saved["model"]["default"] == "claude-sonnet-4.6"
+    output = capsys.readouterr().out
+    assert "Cannot set the conversational model" in output
+    assert "Chat and Cortex memory must use different" in output
+    assert "The conversational model was not changed" in output
 
 
 # ── Menu dispatch ───────────────────────────────────────────────────────────

@@ -140,6 +140,11 @@ The focused suite covers:
 - Credential-vault contract
 - Managed Hermes dispatch fail-closed behavior
 - Atlas provider registration
+- Cortex per-turn durability without foreground semantic/model work
+- Compression durability without a semantic enqueue
+- One idempotent session-end consolidation chain across the full compressed-session lineage
+- Bounded Cortex overflow continuations and deferred-candidate fairness
+- Scheduled recovery/integrity repair without an independent nightly semantic cycle
 
 ## Reset local demo state
 
@@ -158,9 +163,12 @@ The Make targets inject explicit prototype values; the application itself does
 not silently generate long-lived admin or signing credentials.
 
 Job safety defaults are a 900-second visibility timeout, eight model requests
-per job, 4,096 requested output tokens per job, and 400 output tokens when the
-caller omits a limit. These are guardrails for the prototype, not a replacement
-for production tenant billing and provider-side spend caps.
+per ordinary job, 4,096 requested output tokens per ordinary job, and 400
+output tokens when the caller omits a limit. Dedicated Cortex maintenance jobs
+are independently capped at 20 requests and 80,000 requested output tokens so
+the bounded session-end triage/review/repair path can finish without expanding
+conversational-job limits. These are guardrails for the prototype, not a
+replacement for production tenant billing and provider-side spend caps.
 
 ## Troubleshooting
 

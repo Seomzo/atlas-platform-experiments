@@ -25,6 +25,14 @@ class RecordingMemoryProvider:
         pass
 
 
+class FailingCortexProvider(RecordingMemoryProvider):
+    name = "cortex"
+
+    def initialize(self, session_id, **kwargs):
+        del session_id, kwargs
+        raise RuntimeError("cortex store unavailable")
+
+
 def test_blank_memory_provider_does_not_auto_enable_honcho():
     """Blank memory.provider should remain opt-out even if Honcho fallback looks configured."""
     cfg = {"memory": {"provider": ""}, "agent": {}}
@@ -54,9 +62,40 @@ def test_blank_memory_provider_does_not_auto_enable_honcho():
         )
 
     assert agent._memory_manager is None
+    assert agent._cortex_memory_selected is False
     from_global_config.assert_not_called()
     load_memory_provider.assert_not_called()
     save_config.assert_not_called()
+
+
+def test_failed_cortex_init_does_not_restore_frontier_review_ownership():
+    """Selecting Cortex remains authoritative while its store is degraded."""
+
+    cfg = {"memory": {"provider": "cortex"}, "agent": {}}
+    with (
+        patch("hermes_cli.config.load_config", return_value=cfg),
+        patch(
+            "plugins.memory.load_memory_provider",
+            return_value=FailingCortexProvider(),
+        ),
+        patch("agent.model_metadata.get_model_context_length", return_value=204_800),
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=False,
+        )
+
+    assert agent._memory_manager is None
+    assert agent._cortex_memory_selected is True
+    assert agent._cortex_memory_active is False
 
 
 def test_aiagent_forwards_user_id_alt_to_memory_provider():

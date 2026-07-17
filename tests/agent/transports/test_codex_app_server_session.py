@@ -550,6 +550,165 @@ class TestCompactThread:
 # ---- approval bridge ----
 
 class TestServerRequestRouting:
+    @staticmethod
+    def _dynamic_client() -> FakeClient:
+        """Return a client that completes the turn after a tool response."""
+
+        class DynamicClient(FakeClient):
+            def respond(self, request_id, result):
+                super().respond(request_id, result)
+                if isinstance(result, dict) and "success" in result:
+                    self.queue_notification(
+                        "turn/completed",
+                        threadId="thread-fake-001",
+                        turn={
+                            "id": "turn-fake-001",
+                            "status": "completed",
+                            "error": None,
+                        },
+                    )
+
+        return DynamicClient()
+
+    def test_dynamic_tool_is_advertised_and_dispatched(self):
+        client = self._dynamic_client()
+        client.queue_server_request(
+            "item/tool/call",
+            request_id="dyn-1",
+            callId="call-1",
+            threadId="thread-fake-001",
+            turnId="turn-fake-001",
+            tool="cortex_recall",
+            arguments={"query": "service history"},
+            namespace=None,
+        )
+        captured = {}
+
+        def handle(tool_name, arguments):
+            captured["tool"] = tool_name
+            captured["arguments"] = arguments
+            return '{"ok": true}'
+
+        spec = {
+            "type": "function",
+            "name": "cortex_recall",
+            "description": "Recall Cortex memory",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+            },
+        }
+        result = make_session(client).run_turn(
+            "recall it",
+            dynamic_tools=[spec],
+            dynamic_tool_handler=handle,
+            untrusted_context="<memory-context>recalled fact</memory-context>",
+            turn_timeout=1.0,
+        )
+
+        thread_params = next(
+            params for method, params in client.requests if method == "thread/start"
+        )
+        assert thread_params["dynamicTools"] == [spec]
+        turn_params = next(
+            params for method, params in client.requests if method == "turn/start"
+        )
+        assert "dynamicTools" not in turn_params
+        assert turn_params["input"] == [{"type": "text", "text": "recall it"}]
+        assert turn_params["additionalContext"] == {
+            "atlas-cortex": {
+                "kind": "untrusted",
+                "value": "<memory-context>recalled fact</memory-context>",
+            }
+        }
+        assert captured == {
+            "tool": "cortex_recall",
+            "arguments": {"query": "service history"},
+        }
+        assert (
+            "dyn-1",
+            {
+                "success": True,
+                "contentItems": [
+                    {"type": "inputText", "text": '{"ok": true}'}
+                ],
+            },
+        ) in client.responses
+        assert result.error is None
+
+    def test_dynamic_tool_rejects_unadvertised_name(self):
+        client = self._dynamic_client()
+        client.queue_server_request(
+            "item/tool/call",
+            request_id="dyn-2",
+            callId="call-2",
+            threadId="thread-fake-001",
+            turnId="turn-fake-001",
+            tool="not_cortex",
+            arguments={},
+            namespace=None,
+        )
+
+        def must_not_run(tool_name, arguments):
+            raise AssertionError("unadvertised handler ran")
+
+        make_session(client).run_turn(
+            "try it",
+            dynamic_tools=[{
+                "type": "function",
+                "name": "cortex_recall",
+                "description": "Recall Cortex memory",
+                "inputSchema": {"type": "object"},
+            }],
+            dynamic_tool_handler=must_not_run,
+            turn_timeout=1.0,
+        )
+
+        response = next(result for rid, result in client.responses if rid == "dyn-2")
+        assert response["success"] is False
+        assert response["contentItems"] == [{
+            "type": "inputText",
+            "text": "Atlas Cortex tool is unavailable for this turn.",
+        }]
+
+    def test_dynamic_tool_exception_is_not_reflected(self):
+        client = self._dynamic_client()
+        client.queue_server_request(
+            "item/tool/call",
+            request_id="dyn-3",
+            callId="call-3",
+            threadId="thread-fake-001",
+            turnId="turn-fake-001",
+            tool="cortex_recall",
+            arguments={"query": "x"},
+            namespace=None,
+        )
+
+        def fail_with_secret(tool_name, arguments):
+            raise RuntimeError("provider secret sk-do-not-reflect")
+
+        make_session(client).run_turn(
+            "try it",
+            dynamic_tools=[{
+                "type": "function",
+                "name": "cortex_recall",
+                "description": "Recall Cortex memory",
+                "inputSchema": {"type": "object"},
+            }],
+            dynamic_tool_handler=fail_with_secret,
+            turn_timeout=1.0,
+        )
+
+        response = next(result for rid, result in client.responses if rid == "dyn-3")
+        assert response == {
+            "success": False,
+            "contentItems": [{
+                "type": "inputText",
+                "text": "Atlas Cortex tool call failed safely.",
+            }],
+        }
+        assert "sk-do-not-reflect" not in str(response)
+
     def test_exec_approval_with_callback_approves_once(self):
         client = FakeClient()
         client.queue_server_request(

@@ -608,6 +608,9 @@ def _run_review_in_thread(
     agent: Any,
     messages_snapshot: List[Dict],
     prompt: str,
+    *,
+    review_memory: bool = True,
+    review_skills: bool = True,
 ) -> None:
     """Worker function executed in the background-review daemon thread.
 
@@ -615,6 +618,7 @@ def _run_review_in_thread(
     review prompt, and surfaces a compact action summary back to the user
     via ``agent._safe_print`` and ``agent.background_review_callback``.
     """
+    del review_skills  # Skill tools remain available to every legacy review.
     # Local import to avoid a hard circular dep at module load.
     from run_agent import AIAgent
     from tools.terminal_tool import set_approval_callback as _set_approval_callback
@@ -786,7 +790,9 @@ def _run_review_in_thread(
             # read/write tool even when a profile set memory_enabled: false,
             # contaminating a memory-disabled profile (#54937 layer 2).
             review_toolsets = ["skills"]
-            if review_agent._memory_enabled or review_agent._user_profile_enabled:
+            if review_memory and (
+                review_agent._memory_enabled or review_agent._user_profile_enabled
+            ):
                 review_toolsets.insert(0, "memory")
             review_whitelist = {
                 t["function"]["name"]
@@ -945,7 +951,13 @@ def spawn_background_review_thread(
         prompt = getattr(agent, "_SKILL_REVIEW_PROMPT", _SKILL_REVIEW_PROMPT)
 
     def _target() -> None:
-        _run_review_in_thread(agent, messages_snapshot, prompt)
+        _run_review_in_thread(
+            agent,
+            messages_snapshot,
+            prompt,
+            review_memory=review_memory,
+            review_skills=review_skills,
+        )
 
     return _target, prompt
 

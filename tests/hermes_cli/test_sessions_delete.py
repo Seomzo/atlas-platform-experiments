@@ -4,24 +4,42 @@ import pytest
 
 
 def test_sessions_delete_accepts_unique_id_prefix(monkeypatch, capsys):
+    import altas.cortex.lifecycle as cortex_lifecycle
     import hermes_cli.main as main_mod
     import hermes_state
 
     captured = {}
+    calls = []
 
     class FakeDB:
         def resolve_session_id(self, session_id):
             captured["resolved_from"] = session_id
             return "20260315_092437_c9a6ff"
 
-        def delete_session(self, session_id, **kwargs):
-            captured["deleted"] = session_id
-            return True
+        def get_session_delete_closure(self, session_ids):
+            calls.append(("closure", tuple(session_ids)))
+            return ["root", "20260315_092437_c9a6ff", "delegate"]
+
+        def delete_sessions(self, session_ids, **kwargs):
+            kwargs["before_delete"](tuple(session_ids))
+            calls.append(("delete", tuple(session_ids)))
+            captured["deleted"] = tuple(session_ids)
+            return len(session_ids)
 
         def close(self):
             captured["closed"] = True
 
     monkeypatch.setattr(hermes_state, "SessionDB", lambda: FakeDB())
+
+    def _reconcile(_home, session_ids):
+        calls.append(("reconcile", tuple(session_ids)))
+        return tuple(session_ids)
+
+    monkeypatch.setattr(
+        cortex_lifecycle,
+        "reconcile_detached_session_deletions",
+        _reconcile,
+    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -33,10 +51,104 @@ def test_sessions_delete_accepts_unique_id_prefix(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert captured == {
         "resolved_from": "20260315_092437_c9a6",
-        "deleted": "20260315_092437_c9a6ff",
+        "deleted": ("root", "20260315_092437_c9a6ff", "delegate"),
         "closed": True,
     }
+    assert calls == [
+        ("closure", ("20260315_092437_c9a6ff",)),
+        ("reconcile", ("root", "20260315_092437_c9a6ff", "delegate")),
+        ("delete", ("root", "20260315_092437_c9a6ff", "delegate")),
+    ]
     assert "Deleted session '20260315_092437_c9a6ff'." in output
+
+
+def test_sessions_delete_leaves_transcripts_when_cortex_reconciliation_fails(
+    monkeypatch, capsys
+):
+    import altas.cortex.lifecycle as cortex_lifecycle
+    import hermes_cli.main as main_mod
+    import hermes_state
+
+    captured = {"closed": False}
+
+    class FakeDB:
+        def resolve_session_id(self, _session_id):
+            return "s1"
+
+        def get_session_delete_closure(self, session_ids):
+            assert session_ids == ["s1"]
+            return ["s1", "delegate"]
+
+        def delete_sessions(self, session_ids, **kwargs):
+            kwargs["before_delete"](tuple(session_ids))
+            raise AssertionError("SessionDB must remain unchanged on Cortex failure")
+
+        def close(self):
+            captured["closed"] = True
+
+    def _fail_reconcile(_home, session_ids):
+        assert session_ids == ["s1", "delegate"]
+        raise RuntimeError("semantic job is still running")
+
+    monkeypatch.setattr(hermes_state, "SessionDB", lambda: FakeDB())
+    monkeypatch.setattr(
+        cortex_lifecycle,
+        "reconcile_detached_session_deletions",
+        _fail_reconcile,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["hermes", "sessions", "delete", "s1", "--yes"],
+    )
+
+    main_mod.main()
+
+    output = capsys.readouterr().out
+    assert "Delete aborted before transcript removal" in output
+    assert "semantic job is still running" in output
+    assert captured["closed"] is True
+
+
+def test_sessions_delete_refuses_cross_process_active_session(monkeypatch, capsys):
+    import hermes_cli.main as main_mod
+    import hermes_state
+    from hermes_cli.active_sessions import try_acquire_active_session
+
+    class FakeDB:
+        def resolve_session_id(self, _session_id):
+            return "s1"
+
+        def get_session_delete_closure(self, _session_ids):
+            return ["s1"]
+
+        def delete_sessions(self, *_args, **_kwargs):
+            raise AssertionError("active transcript must not be deleted")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(hermes_state, "SessionDB", lambda: FakeDB())
+    lease, message = try_acquire_active_session(
+        session_id="s1",
+        surface="tui",
+        config={},
+    )
+    assert message is None
+    assert lease is not None
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["hermes", "sessions", "delete", "s1", "--yes"],
+    )
+    try:
+        main_mod.main()
+    finally:
+        lease.release()
+
+    output = capsys.readouterr().out
+    assert "Delete aborted before transcript removal" in output
+    assert "session is active" in output
 
 
 def test_sessions_delete_reports_not_found_when_prefix_is_unknown(monkeypatch, capsys):

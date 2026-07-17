@@ -8,7 +8,16 @@ import type { StarmapGraph } from '@/types/hermes'
 
 import { computePalette, memoryInkFor, resolveRgb, rgba } from './color'
 import { RING_OUTER, TILT, ZOOM_MAX, ZOOM_MIN } from './constants'
-import { clamp, distToSegmentSq, fitScale, fitViewport, nodeRadius } from './geometry'
+import {
+  centerViewportOn,
+  clamp,
+  distToSegmentSq,
+  fitScale,
+  fitViewport,
+  nodeRadius,
+  stagedZoomOutViewport,
+  zoomViewportAt
+} from './geometry'
 import { NodeContextMenu, type NodeMenuTarget } from './node-context-menu'
 import { drawScene, drawScramble } from './render'
 import { decodeShareCode, encodeShareCode, ShareCodeError } from './share-code'
@@ -29,6 +38,12 @@ const SWEEP_MS = 15000
 // = 0.45) so playback glides instead of lurching, while still keeping a soft
 // ease-in / ease-out at the very start and end.
 const GENTLE = 0.45
+
+const CORTEX_FIT_PADDING = 64
+const CORTEX_FOCUS_MIN_ZOOM = 1.15
+const CORTEX_FOCUS_MULTIPLIER = 1.75
+const CORTEX_ZOOM_MAX = 3.2
+const CAMERA_EASE_MS = 420
 
 // Cinematic timing: cubic smoothstep (gentle ease-in / ease-out) relaxed toward
 // linear by GENTLE, so the middle never rushes. Monotonic on [0,1], so the
@@ -99,12 +114,16 @@ export function StarMap({
   graph,
   imported = false,
   onImport,
-  onResetMap
+  onNodeSelect,
+  onResetMap,
+  selectedNodeId
 }: {
   graph: StarmapGraph
   imported?: boolean
   onImport?: (graph: StarmapGraph) => void
+  onNodeSelect?: (id: null | string) => void
   onResetMap?: () => void
+  selectedNodeId?: null | string
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const wrapRef = useRef<HTMLDivElement | null>(null)
@@ -131,6 +150,9 @@ export function StarMap({
   const themeDirtyRef = useRef(true)
   const invalidateRef = useRef<() => void>(() => {})
   const viewportRef = useRef<Viewport>({ k: 1, x: 0, y: 0 })
+  const cameraRafRef = useRef(0)
+  const cameraAnimatingRef = useRef(false)
+  const cameraModeRef = useRef<'focus' | 'free' | 'overview'>('overview')
   const hoverRef = useRef<null | string>(null)
   const hoveredLinkRef = useRef<null | string>(null)
   const hoveredRingRef = useRef<null | number>(null)
@@ -180,10 +202,30 @@ export function StarMap({
   // constant creep. This ref is the camera's current (eased) fit radius.
   const camRadiusRef = useRef(RING_OUTER)
   const timeAxis = useMemo(() => buildTimeAxis(graph, 72), [graph])
+  const cortex = graph.source === 'cortex'
 
   // The current map as a WoW-style share code, recomputed only when the graph
   // changes (encode walks every node/edge/card, so don't redo it per render).
-  const shareCode = useMemo(() => encodeShareCode(graph), [graph])
+  // Native Cortex graphs are private and typed, so the lossy legacy share
+  // codec is deliberately unavailable for them.
+  const shareCode = useMemo(() => (cortex ? '' : encodeShareCode(graph)), [cortex, graph])
+
+  const selectNode = useCallback(
+    (id: null | string) => {
+      selectedIdRef.current = id
+      setSelectedId(id)
+      onNodeSelect?.(id)
+    },
+    [onNodeSelect]
+  )
+
+  useEffect(() => {
+    if (selectedNodeId !== undefined && selectedNodeId !== selectedIdRef.current) {
+      selectedIdRef.current = selectedNodeId
+      setSelectedId(selectedNodeId)
+      invalidateRef.current()
+    }
+  }, [selectedNodeId])
 
   // Decode a pasted code and hand the resulting graph up to the StarmapView,
   // which swaps it in for the live profile scan. Returns an error string for the
@@ -204,6 +246,84 @@ export function StarMap({
 
   // Mark the canvas dirty and wake the (otherwise-idle) render loop.
   const invalidate = useCallback(() => invalidateRef.current(), [])
+
+  const fitMapViewport = useCallback(
+    (outer = ringsRef.current.at(-1)?.r ?? RING_OUTER): Viewport => {
+      const { h, w } = sizeRef.current
+
+      return fitViewport(w, h, outer, cortex ? { contain: true, padding: CORTEX_FIT_PADDING } : undefined)
+    },
+    [cortex]
+  )
+
+  const viewportForSelection = useCallback(
+    (id: null | string): Viewport => {
+      const base = fitMapViewport()
+      const node = id ? byIdRef.current.get(id) : null
+
+      if (!cortex || !node) {
+        return base
+      }
+
+      const { h, w } = sizeRef.current
+      const k = clamp(Math.max(base.k * CORTEX_FOCUS_MULTIPLIER, CORTEX_FOCUS_MIN_ZOOM), base.k, CORTEX_ZOOM_MAX)
+
+      return centerViewportOn(w, h, node.x, node.y, k)
+    },
+    [cortex, fitMapViewport]
+  )
+
+  const cancelCameraAnimation = useCallback(() => {
+    if (cameraRafRef.current) {
+      cancelAnimationFrame(cameraRafRef.current)
+      cameraRafRef.current = 0
+    }
+
+    cameraAnimatingRef.current = false
+  }, [])
+
+  const animateViewport = useCallback(
+    (target: Viewport, duration = CAMERA_EASE_MS) => {
+      cancelCameraAnimation()
+
+      const from = { ...viewportRef.current }
+      const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+
+      if (reducedMotion || duration <= 0) {
+        viewportRef.current = target
+        invalidate()
+
+        return
+      }
+
+      cameraAnimatingRef.current = true
+      const startedAt = performance.now()
+
+      const step = (now: number) => {
+        const progress = clamp((now - startedAt) / duration, 0, 1)
+        const eased = 1 - (1 - progress) ** 3
+
+        viewportRef.current = {
+          k: from.k + (target.k - from.k) * eased,
+          x: from.x + (target.x - from.x) * eased,
+          y: from.y + (target.y - from.y) * eased
+        }
+        invalidate()
+
+        if (progress < 1) {
+          cameraRafRef.current = requestAnimationFrame(step)
+        } else {
+          cameraRafRef.current = 0
+          cameraAnimatingRef.current = false
+        }
+      }
+
+      cameraRafRef.current = requestAnimationFrame(step)
+    },
+    [cancelCameraAnimation, invalidate]
+  )
+
+  useEffect(() => cancelCameraAnimation, [cancelCameraAnimation])
 
   // Single writer for the scrubber position: feeds the canvas (ref), the
   // timeline + legend label (store subscribers), and wakes the paint loop —
@@ -271,7 +391,23 @@ export function StarMap({
       return
     }
 
-    const { byId, links, nodes, rings, sim } = buildSimulation(graph, invalidate)
+    const { byId, links, nodes, rings, sim } = buildSimulation(graph, () => {
+      // Cortex never drifts: while the simulation settles, keep either the graph
+      // origin or the selected node pinned to the visual center at the current
+      // zoom. Camera transitions own x/y only for their brief animation.
+      if (cortex && !cameraAnimatingRef.current && cameraModeRef.current !== 'free') {
+        const focus =
+          cameraModeRef.current === 'focus' && selectedIdRef.current ? byIdRef.current.get(selectedIdRef.current) : null
+
+        const { h, w } = sizeRef.current
+        const centered = centerViewportOn(w, h, focus?.x ?? 0, focus?.y ?? 0, viewportRef.current.k)
+
+        viewportRef.current = centered
+      }
+
+      invalidate()
+    })
+
     simRef.current = sim
     nodesRef.current = nodes
     linksRef.current = links
@@ -282,12 +418,11 @@ export function StarMap({
     resetFades()
     // Fit the actual disk (outermost ring), so a 3-ring map frames like a 12-ring
     // one — count changes the disk size, not the framing.
-    viewportRef.current = fitViewport(size.w, size.h, rings[rings.length - 1]?.r ?? RING_OUTER)
+    viewportRef.current = fitMapViewport(rings[rings.length - 1]?.r ?? RING_OUTER)
     invalidate()
 
     if (selectedIdRef.current && !byId.has(selectedIdRef.current)) {
-      selectedIdRef.current = null
-      setSelectedId(null)
+      selectNode(null)
     }
 
     return () => {
@@ -297,7 +432,20 @@ export function StarMap({
         simRef.current = null
       }
     }
-  }, [graph, invalidate, resetFades, size])
+  }, [cortex, fitMapViewport, graph, invalidate, resetFades, selectNode, size])
+
+  // Selecting a Cortex node becomes a deliberate camera transition: center the
+  // node and move into a closer neighborhood view. Clearing selection (Back,
+  // empty-canvas click, or Reset) eases back to the contained whole-brain view.
+  useEffect(() => {
+    if (!cortex || size.w <= 0 || size.h <= 0 || ringsRef.current.length === 0) {
+      return
+    }
+
+    setPlaying(false)
+    cameraModeRef.current = selectedId ? 'focus' : 'overview'
+    animateViewport(viewportForSelection(selectedId), selectedId ? CAMERA_EASE_MS : 340)
+  }, [animateViewport, cortex, graph, selectedId, size.h, size.w, viewportForSelection])
 
   useEffect(() => {
     adjacencyRef.current = adjacency
@@ -344,13 +492,16 @@ export function StarMap({
     return rings[i]!.r + band * 0.35
   }, [])
 
-  const applyFit = useCallback((radius: number) => {
-    const { h, w } = sizeRef.current
+  const applyFit = useCallback(
+    (radius: number) => {
+      const { h, w } = sizeRef.current
 
-    if (w > 0 && h > 0) {
-      viewportRef.current = fitViewport(w, h, radius)
-    }
-  }, [])
+      if (w > 0 && h > 0) {
+        viewportRef.current = fitMapViewport(radius)
+      }
+    },
+    [fitMapViewport]
+  )
 
   // Snap the camera to a reveal's stepped target (scrubbing / reset — no glide).
   const fitForReveal = useCallback(
@@ -412,7 +563,12 @@ export function StarMap({
     }
 
     // Leaving scrub: play eases (cinematic) rather than holding the snapped view.
+    cancelCameraAnimation()
     snapMotionRef.current = false
+
+    if (cortex && selectedIdRef.current) {
+      selectNode(null)
+    }
 
     // Replay from the start when parked at the end. Snap straight to the empty
     // state (no fade-out) before playing in.
@@ -423,19 +579,20 @@ export function StarMap({
     }
 
     setPlaying(true)
-  }, [fitForReveal, playing, resetFades, setRevealValue])
+  }, [cancelCameraAnimation, cortex, fitForReveal, playing, resetFades, selectNode, setRevealValue])
 
   const onScrub = useCallback(
     (value: number) => {
       const next = clamp(value, 0, 1)
       setPlaying(false)
+      cancelCameraAnimation()
       // Scrub is direct manipulation: snap fades + camera to the pointer so a
       // fast drag jumps there instead of replaying the birth-in from a stale spot.
       snapMotionRef.current = true
       fitForReveal(next)
       setRevealValue(next)
     },
-    [fitForReveal, setRevealValue]
+    [cancelCameraAnimation, fitForReveal, setRevealValue]
   )
 
   // Spacebar toggles playback (unless typing, or the play button itself is
@@ -693,7 +850,17 @@ export function StarMap({
   const pickNode = (cssX: number, cssY: number): null | SimNode => {
     const vp = viewportRef.current
     // Hit radius mirrors the billboarded draw: rested fit scale, screen space.
-    const nodeK = fitScale(sizeRef.current.w, sizeRef.current.h, ringsRef.current)
+
+    const nodeK = cortex
+      ? Math.max(
+          0.9,
+          fitScale(sizeRef.current.w, sizeRef.current.h, ringsRef.current, {
+            contain: true,
+            padding: CORTEX_FIT_PADDING
+          })
+        )
+      : fitScale(sizeRef.current.w, sizeRef.current.h, ringsRef.current)
+
     let best: null | SimNode = null
     let bestD = Infinity
 
@@ -762,14 +929,11 @@ export function StarMap({
 
   const resetView = () => {
     setPlaying(false)
-    viewportRef.current = fitViewport(
-      sizeRef.current.w,
-      sizeRef.current.h,
-      ringsRef.current[ringsRef.current.length - 1]?.r ?? RING_OUTER
-    )
+    cancelCameraAnimation()
+    cameraModeRef.current = 'overview'
     selectedRingRef.current = null
-    invalidate()
-    setSelectedId(null)
+    selectNode(null)
+    animateViewport(fitMapViewport(), 340)
   }
 
   const onMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -821,7 +985,7 @@ export function StarMap({
       drag.moved = true
     }
 
-    if (drag.mode === 'pan') {
+    if (drag.mode === 'pan' && !cortex) {
       // Taking manual control of the camera ends an auto-fit play-through.
       if (drag.moved) {
         setPlaying(false)
@@ -849,10 +1013,10 @@ export function StarMap({
       if (drag.ring != null) {
         selectedRingRef.current = selectedRingRef.current === drag.ring ? null : drag.ring
       } else if (drag.id) {
-        setSelectedId(prev => (prev === drag.id ? null : drag.id))
+        selectNode(selectedIdRef.current === drag.id ? null : drag.id)
       } else {
         selectedRingRef.current = null
-        setSelectedId(null)
+        selectNode(null)
       }
 
       invalidate()
@@ -878,7 +1042,14 @@ export function StarMap({
       return setMenuTarget(null)
     }
 
-    setSelectedId(node.id)
+    selectNode(node.id)
+
+    if (cortex) {
+      setMenuTarget(null)
+
+      return
+    }
+
     setMenuTarget({
       id: node.id,
       kind: node.kind === 'memory' ? 'memory' : 'skill',
@@ -895,6 +1066,8 @@ export function StarMap({
       return
     }
 
+    e.preventDefault()
+
     // macOS smart zoom (two-finger double-tap) → reset (see lib/trackpad-gestures).
     if (isSmartZoomWheel(e)) {
       resetView()
@@ -904,69 +1077,167 @@ export function StarMap({
 
     // Manual zoom takes over the camera from any auto-fit play-through.
     setPlaying(false)
+    cancelCameraAnimation()
 
     const px = e.clientX - rect.left
     const py = e.clientY - rect.top
     const vp = viewportRef.current
-    const k = clamp(vp.k * (e.deltaY > 0 ? 0.9 : 1.1), ZOOM_MIN, ZOOM_MAX)
-    viewportRef.current = { k, x: px - ((px - vp.x) / vp.k) * k, y: py - ((py - vp.y) / vp.k) * k }
+
+    if (cortex) {
+      const base = fitMapViewport()
+      const zoomingOut = e.deltaY > 0
+      // A mouse wheel arrives in large notches while a Mac trackpad streams
+      // tiny deltas. Exponential scaling makes both feel continuous without a
+      // single trackpad gesture exploding into a stack of 10% jumps.
+      const zoomFactor = Math.exp(-clamp(e.deltaY, -40, 40) * 0.00265)
+      const k = clamp(vp.k * zoomFactor, base.k, CORTEX_ZOOM_MAX)
+
+      if (zoomingOut) {
+        const result = stagedZoomOutViewport(vp, px, py, sizeRef.current.w, sizeRef.current.h, k, base.k)
+
+        // Keep the simulation out of the camera while detail/cluster framing is
+        // in flight. It may resume the center lock only at the overview floor.
+        cameraModeRef.current = result.stage === 'overview' ? 'overview' : 'free'
+        viewportRef.current = result.viewport
+      } else {
+        // Moving inward is exploratory: keep whatever the user is pointing at
+        // beneath the cursor so every peripheral node is directly reachable.
+        cameraModeRef.current = 'free'
+        viewportRef.current = zoomViewportAt(vp, px, py, k)
+      }
+    } else {
+      const k = clamp(vp.k * (e.deltaY > 0 ? 0.9 : 1.1), ZOOM_MIN, ZOOM_MAX)
+      viewportRef.current = { k, x: px - ((px - vp.x) / vp.k) * k, y: py - ((py - vp.y) / vp.k) * k }
+    }
+
     invalidate()
   }
 
   return (
-    <div className="relative min-h-0 flex-1 overflow-hidden" ref={wrapRef}>
-      <canvas
-        className="block touch-none select-none text-foreground"
-        onContextMenu={onContextMenu}
-        onDoubleClick={resetView}
-        onMouseDown={onMouseDown}
-        onMouseLeave={onMouseLeave}
-        onMouseMove={onMouseMove}
-        onMouseUp={endDrag}
-        onWheel={onWheel}
-        ref={canvasRef}
-      />
-
-      <NodeContextMenu
-        onClose={() => setMenuTarget(null)}
-        onNodeRemoved={() => {
-          setMenuTarget(null)
-          setSelectedId(null)
-        }}
-        target={menuTarget}
-      />
-
-      {/* Timeline scrubber — centered along the top, clear of the close button.
-          z-20 lifts it above the titlebar's app-region drag layer (z-10) so the
-          scrubber receives pointer events instead of dragging the window. */}
-      <div className="pointer-events-none absolute inset-x-0 top-6 z-20 flex justify-center px-12">
-        <Timeline
-          axis={timeAxis}
-          memoryColor={memoryColor}
-          onScrub={onScrub}
-          onTogglePlay={onTogglePlay}
-          playing={playing}
-          revealStore={revealStore}
-          ringStops={ringStops}
+    <div
+      className={
+        cortex
+          ? 'relative flex min-h-0 flex-1 flex-col overflow-hidden text-[#dcefff] [--background:#050b14] [--foreground:#dcefff] [--theme-primary:#56c8ff] [--theme-secondary:#f5b85b]'
+          : 'relative min-h-0 flex-1 overflow-hidden'
+      }
+    >
+      <div className={cortex ? 'relative min-h-0 flex-1 overflow-hidden' : 'absolute inset-0'} ref={wrapRef}>
+        <canvas
+          aria-label={
+            cortex
+              ? 'Interactive Atlas Cortex memory graph. Use the Explore graph list for keyboard access.'
+              : 'Interactive Atlas memory graph'
+          }
+          className={
+            cortex ? 'block touch-none select-none text-[#dcefff]' : 'block touch-none select-none text-foreground'
+          }
+          onContextMenu={onContextMenu}
+          onDoubleClick={resetView}
+          onMouseDown={onMouseDown}
+          onMouseLeave={onMouseLeave}
+          onMouseMove={onMouseMove}
+          onMouseUp={endDrag}
+          onWheel={onWheel}
+          ref={canvasRef}
+          role="img"
         />
+
+        {!cortex ? (
+          <NodeContextMenu
+            onClose={() => setMenuTarget(null)}
+            onNodeRemoved={() => {
+              setMenuTarget(null)
+              selectNode(null)
+            }}
+            target={menuTarget}
+          />
+        ) : null}
+
+        {/* Legacy maps keep their floating timeline. Cortex gives navigation its
+            own dock below the canvas so graph data is never hidden by chrome. */}
+        {!cortex ? (
+          <div className="pointer-events-none absolute inset-x-0 top-6 z-20 flex justify-center px-12">
+            <Timeline
+              axis={timeAxis}
+              immersive={false}
+              memoryColor={memoryColor}
+              onScrub={onScrub}
+              onTogglePlay={onTogglePlay}
+              playing={playing}
+              revealStore={revealStore}
+              ringStops={ringStops}
+            />
+          </div>
+        ) : null}
+
+        {/* Share / import (WoW-talent-style code) — bottom-right, mirroring the legend. */}
+        {!cortex ? (
+          <div className="pointer-events-auto absolute bottom-2 right-2 z-20 [-webkit-app-region:no-drag]">
+            <ShareControls imported={imported} onImport={importCode} onResetMap={onResetMap} shareCode={shareCode} />
+          </div>
+        ) : (
+          <button
+            className="pointer-events-auto absolute right-4 top-4 z-20 flex items-center gap-1.5 rounded-md border border-white/10 bg-[#07121f]/80 px-2.5 py-1.5 text-[0.62rem] text-[#7f96ad] shadow-lg backdrop-blur-md transition hover:border-white/20 hover:text-white [-webkit-app-region:no-drag]"
+            onClick={resetView}
+            type="button"
+          >
+            Reset view
+          </button>
+        )}
+
+        {/* Legacy legend remains in-canvas; Cortex's key lives in the reserved dock. */}
+        {!cortex ? (
+          <div className="pointer-events-none absolute bottom-2 left-2 flex flex-col gap-1 text-[0.62rem] text-muted-foreground">
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block size-2 rounded-full bg-[var(--theme-primary)]/80" /> skill
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block size-2 rotate-45" style={{ backgroundColor: memoryColor }} /> memory
+            </span>
+            <span className="text-[0.58rem] text-muted-foreground/65">core = oldest · outer = newer</span>
+            <RevealLabel axis={timeAxis} revealStore={revealStore} />
+          </div>
+        ) : null}
       </div>
 
-      {/* Share / import (WoW-talent-style code) — bottom-right, mirroring the legend. */}
-      <div className="pointer-events-auto absolute bottom-2 right-2 z-20 [-webkit-app-region:no-drag]">
-        <ShareControls imported={imported} onImport={importCode} onResetMap={onResetMap} shareCode={shareCode} />
-      </div>
+      {cortex ? (
+        <div className="relative z-20 shrink-0 border-t border-white/8 bg-[#07111d]/94 px-4 py-2.5 shadow-[0_-14px_40px_rgba(0,0,0,0.2)] backdrop-blur-xl">
+          <div className="flex min-w-0 flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[0.58rem] text-[#72899f]">
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block size-2 rounded-full bg-[#56c8ff]" /> entity
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block size-2 rotate-45" style={{ backgroundColor: memoryColor }} /> memory
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block size-0 border-x-4 border-b-[7px] border-x-transparent border-b-current" />{' '}
+              evidence
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block size-2 border border-current" /> document
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block size-2 rotate-45 rounded-[2px] border border-current" /> session / community
+            </span>
+            <span className="hidden h-3 w-px bg-white/10 sm:block" />
+            <span className="text-[#536b82]">oldest at core · newer outward</span>
+            <RevealLabel axis={timeAxis} revealStore={revealStore} />
+          </div>
 
-      {/* Legend — bottom-left, one entry per line like a conventional key. */}
-      <div className="pointer-events-none absolute bottom-2 left-2 flex flex-col gap-1 text-[0.62rem] text-muted-foreground">
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block size-2 rounded-full bg-[var(--theme-primary)]/80" /> skill
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block size-2 rotate-45" style={{ backgroundColor: memoryColor }} /> memory
-        </span>
-        <span className="text-[0.58rem] text-muted-foreground/65">core = oldest · outer = newer</span>
-        <RevealLabel axis={timeAxis} revealStore={revealStore} />
-      </div>
+          <div className="pointer-events-none mt-2 flex justify-center">
+            <Timeline
+              axis={timeAxis}
+              immersive
+              memoryColor={memoryColor}
+              onScrub={onScrub}
+              onTogglePlay={onTogglePlay}
+              playing={playing}
+              revealStore={revealStore}
+              ringStops={ringStops}
+            />
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }

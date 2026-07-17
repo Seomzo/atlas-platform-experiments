@@ -313,6 +313,19 @@ class TestResolveProvider:
 
 class TestApiKeyProviderStatus:
 
+    def test_openrouter_status_uses_preferred_dotenv_key(self, monkeypatch):
+        monkeypatch.setattr(
+            "hermes_cli.config.get_env_value_prefer_dotenv",
+            lambda name: "sk-or-current" if name == "OPENROUTER_API_KEY" else None,
+        )
+
+        status = get_auth_status("openrouter")
+
+        assert status["configured"] is True
+        assert status["logged_in"] is True
+        assert status["key_source"] == "OPENROUTER_API_KEY"
+        assert status["base_url"] == "https://openrouter.ai/api/v1"
+
     def test_unconfigured_provider(self):
         status = get_api_key_provider_status("zai")
         assert status["configured"] is False

@@ -1,4 +1,13 @@
-import { forceCollide, forceLink, forceManyBody, forceRadial, forceSimulation, type Simulation } from 'd3-force'
+import {
+  forceCollide,
+  forceLink,
+  forceManyBody,
+  forceRadial,
+  forceSimulation,
+  forceX,
+  forceY,
+  type Simulation
+} from 'd3-force'
 
 import type { StarmapGraph, StarmapNode } from '@/types/hermes'
 
@@ -260,10 +269,26 @@ export function buildSimulation(graph: StarmapGraph, onTick: () => void): BuiltS
   const { maxTs, minTs, rec: recById, timed } = computeRecency(graph.nodes)
   const { index, rec: recOf, rings, tr: trOf } = buildLayout(graph, recById, minTs, maxTs, timed)
 
+  // Cortex domains occupy stable angular neighborhoods. Time still controls a
+  // node's distance from the core, while domain controls the direction it grows
+  // toward. That keeps the temporal story without collapsing a 400-node graph
+  // into a random hairball.
+  const domains = [...new Set(graph.nodes.map(node => node.category || 'general'))].sort()
+
+  const domainAngle = new Map(
+    domains.map((domain, index) => [domain, (index / Math.max(1, domains.length)) * Math.PI * 2 - Math.PI / 2])
+  )
+
+  const targetAngle = new Map<string, number>()
+
   const nodes: SimNode[] = graph.nodes.map(n => {
     const rec = recOf(n)
     const tr = trOf(n)
-    const angle = ((hash(n.id) % 3600) / 3600) * Math.PI * 2
+    const center = domainAngle.get(n.category || 'general') ?? 0
+    const sector = domains.length > 1 ? Math.min(1.25, (Math.PI * 2 * 0.68) / domains.length) : Math.PI * 2
+    const jitter = ((hash(`${n.id}:domain`) % 10_000) / 10_000 - 0.5) * sector
+    const angle = center + jitter
+    targetAngle.set(n.id, angle)
 
     return { ...n, outerRingIndex: index(n), rec, tr, vx: 0, vy: 0, x: Math.cos(angle) * tr, y: Math.sin(angle) * tr }
   })
@@ -272,26 +297,34 @@ export function buildSimulation(graph: StarmapGraph, onTick: () => void): BuiltS
 
   const links: SimLink[] = graph.edges
     .filter(e => byId.has(e.source) && byId.has(e.target))
-    .map(e => ({ source: e.source, target: e.target }))
+    .map(e => ({ ...e, source: e.source, target: e.target }))
 
   const sim = forceSimulation(nodes)
     .alphaDecay(0.05)
     .velocityDecay(0.62)
-    .force('charge', forceManyBody<SimNode>().strength(-12))
+    .force('charge', forceManyBody<SimNode>().strength(-18))
     .force(
       'link',
       forceLink<SimNode, SimLink>(links)
         .id(n => n.id)
         .distance(26)
-        .strength(0.06)
+        .strength(0.025)
     )
     .force(
       'collide',
       forceCollide<SimNode>()
-        .radius(n => nodeRadius(n) + 2)
+        .radius(n => nodeRadius(n) + 4)
         .iterations(2)
     )
     .force('radial', forceRadial<SimNode>(n => (n as SimNode).tr, 0, 0).strength(0.92))
+    .force(
+      'domain-x',
+      forceX<SimNode>(n => Math.cos(targetAngle.get(n.id) ?? 0) * n.tr).strength(graph.source === 'cortex' ? 0.09 : 0)
+    )
+    .force(
+      'domain-y',
+      forceY<SimNode>(n => Math.sin(targetAngle.get(n.id) ?? 0) * n.tr).strength(graph.source === 'cortex' ? 0.09 : 0)
+    )
     .on('tick', onTick)
 
   return { byId, links, nodes, rings, sim }

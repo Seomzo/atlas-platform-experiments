@@ -56,7 +56,7 @@ import {
 } from '@/store/command-palette'
 import { $bindings } from '@/store/keybinds'
 import { openPetGenerate } from '@/store/pet-generate'
-import { requestStartWorkSession } from '@/store/projects'
+import type { WorkspaceSessionTarget } from '@/store/projects'
 import { runGatewayRestart } from '@/store/system-actions'
 import { applyBackendUpdate } from '@/store/updates'
 import { luminance } from '@/themes/color'
@@ -69,9 +69,7 @@ import {
   COMMAND_CENTER_ROUTE,
   CRON_ROUTE,
   MESSAGING_ROUTE,
-  NEW_CHAT_ROUTE,
   PROFILES_ROUTE,
-  sessionRoute,
   SETTINGS_ROUTE,
   SKILLS_ROUTE,
   STARMAP_ROUTE
@@ -288,7 +286,15 @@ function themeSupportsMode(name: string, target: 'light' | 'dark'): boolean {
   return target === 'dark' ? luminance(background) <= 0.5 : luminance(background) > 0.5
 }
 
-export function CommandPalette() {
+export function CommandPalette({
+  openStoredSession,
+  startFreshSession,
+  startSessionInWorkspace
+}: {
+  openStoredSession: (sessionId: string) => boolean
+  startFreshSession: () => Promise<boolean>
+  startSessionInWorkspace: (target: WorkspaceSessionTarget) => Promise<boolean>
+}) {
   const { t } = useI18n()
   const open = useStore($commandPaletteOpen)
   const pendingPage = useStore($commandPalettePage)
@@ -374,7 +380,7 @@ export function CommandPalette() {
 
     // The active repo's worktrees → "new conversation in <branch>". This is the
     // ⌘K-typed "I want to work on <branch>" reflex: each entry seeds a fresh
-    // session anchored to that worktree's checkout (requestStartWorkSession),
+    // session anchored to that worktree's checkout after semantic close,
     // so git is the source of truth and edits land in the right tree.
     const branchGroup: PaletteGroup[] =
       worktrees.length > 0
@@ -389,7 +395,15 @@ export function CommandPalette() {
                   id: `worktree-${wt.path}`,
                   keywords: ['branch', 'worktree', 'switch', name, wt.path],
                   label: cc.startInBranch(name),
-                  run: () => requestStartWorkSession(wt.path)
+                  run: () => {
+                    void startSessionInWorkspace(wt.path)
+                      .then(started => {
+                        if (started) {
+                          closeCommandPalette()
+                        }
+                      })
+                      .catch(() => undefined)
+                  }
                 }
               })
             }
@@ -404,9 +418,18 @@ export function CommandPalette() {
             action: 'session.new',
             icon: Plus,
             id: 'nav-new',
+            keepOpen: true,
             keywords: ['chat', 'create'],
             label: cc.nav.newChat.title,
-            run: go(NEW_CHAT_ROUTE)
+            run: () => {
+              void startFreshSession()
+                .then(started => {
+                  if (started) {
+                    closeCommandPalette()
+                  }
+                })
+                .catch(() => undefined)
+            }
           },
           {
             action: 'view.showTerminal',
@@ -561,7 +584,7 @@ export function CommandPalette() {
         ]
       }
     ]
-  }, [go, settingsSectionLabel, t, worktrees])
+  }, [go, settingsSectionLabel, startFreshSession, startSessionInWorkspace, t, worktrees])
 
   // The long, granular lists (settings fields, API keys, MCP servers, archived
   // chats) only surface once the user types — otherwise they'd bury the
@@ -585,7 +608,7 @@ export function CommandPalette() {
             id: `goto-${directId}`,
             keywords: ['session', 'id', 'go to', directId],
             label: `${t.commandCenter.goToSession} ${directId}`,
-            run: go(sessionRoute(directId))
+            run: () => openStoredSession(directId)
           }
         ]
       })
@@ -666,7 +689,7 @@ export function CommandPalette() {
           id: `session-${session.id}`,
           keywords: ['chat', 'session', ...(session.preview ? [session.preview] : [])],
           label: session.title,
-          run: go(sessionRoute(session.id))
+          run: () => openStoredSession(session.id)
         }))
       })
     }
@@ -716,6 +739,7 @@ export function CommandPalette() {
     configFieldLabel,
     go,
     mcpServers,
+    openStoredSession,
     resolvedMode,
     search,
     sessions,

@@ -6,6 +6,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
+
 from hermes_cli import active_sessions
 
 
@@ -74,6 +76,163 @@ def test_active_session_lease_blocks_until_release(tmp_path, monkeypatch):
     assert next_lease is not None
     next_lease.release()
     assert active_sessions.active_session_registry_snapshot() == []
+
+
+def test_disabled_cap_still_registers_privacy_lease(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    lease, message = active_sessions.try_acquire_active_session(
+        session_id="session-private",
+        surface="cli",
+        config={},
+    )
+
+    assert message is None
+    assert lease is not None
+    assert lease.enabled is True
+    assert [
+        entry["session_id"]
+        for entry in active_sessions.active_session_registry_snapshot()
+    ] == ["session-private"]
+    lease.release()
+
+
+def test_session_deletion_refuses_live_lease_and_never_seals(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / ".hermes"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    lease, message = active_sessions.try_acquire_active_session(
+        session_id="live-session",
+        surface="cli",
+        config={},
+    )
+    assert message is None
+    assert lease is not None
+
+    with pytest.raises(active_sessions.ActiveSessionConflict):
+        with active_sessions.claim_session_deletion(["live-session"]):
+            raise AssertionError("active deletion claim must not enter")
+
+    lease.release()
+    resumed, resume_message = active_sessions.try_acquire_active_session(
+        session_id="live-session",
+        surface="cli",
+        config={},
+    )
+    assert resume_message is None
+    assert resumed is not None
+    resumed.release()
+
+
+def test_sealed_session_deletion_blocks_stale_acquire_and_transfer(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / ".hermes"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    route_lease, message = active_sessions.try_acquire_active_session(
+        session_id="gateway-route",
+        surface="gateway:telegram",
+        config={},
+    )
+    assert message is None
+    assert route_lease is not None
+
+    with active_sessions.claim_session_deletion(
+        ["deleted-session"],
+        active_aliases=["some-other-route"],
+    ) as deletion:
+        deletion.seal()
+
+    stale, stale_message = active_sessions.try_acquire_active_session(
+        session_id="deleted-session",
+        surface="tui",
+        config={},
+    )
+    assert stale is None
+    assert stale_message == "This session was deleted and cannot be resumed."
+    assert not active_sessions.transfer_active_session(
+        route_lease,
+        session_id="deleted-session",
+    )
+    assert route_lease.session_id == "gateway-route"
+    route_lease.release()
+
+
+def test_gateway_route_alias_counts_as_active_for_durable_session_delete(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / ".hermes"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    lease, message = active_sessions.try_acquire_active_session(
+        session_id="telegram:chat:42",
+        surface="gateway:telegram",
+        config={},
+    )
+    assert message is None
+    assert lease is not None
+
+    with pytest.raises(active_sessions.ActiveSessionConflict):
+        with active_sessions.claim_session_deletion(
+            ["durable-session-id"],
+            active_aliases=["telegram:chat:42"],
+        ):
+            raise AssertionError("gateway alias must protect durable session")
+    lease.release()
+
+
+def test_corrupt_active_registry_blocks_acquire_and_privacy_delete(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / ".hermes"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    runtime = home / "runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "active_sessions.json").write_text("not-json", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="registry is unreadable"):
+        active_sessions.try_acquire_active_session(
+            session_id="new",
+            surface="cli",
+            config={},
+        )
+    with pytest.raises(RuntimeError, match="registry is unreadable"):
+        with active_sessions.claim_session_deletion(["old"]):
+            raise AssertionError("corrupt ownership state must fail closed")
+
+
+def test_registry_files_are_private_and_symlinks_are_rejected(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    lease, message = active_sessions.try_acquire_active_session(
+        session_id="private",
+        surface="cli",
+        config={},
+    )
+    assert message is None
+    assert lease is not None
+    runtime = home / "runtime"
+    if os.name != "nt":
+        assert runtime.stat().st_mode & 0o777 == 0o700
+        assert (runtime / "active_sessions.json").stat().st_mode & 0o777 == 0o600
+        assert (runtime / "active_sessions.lock").stat().st_mode & 0o777 == 0o600
+    lease.release()
+
+    target = tmp_path / "attacker.json"
+    target.write_text('{"entries": []}', encoding="utf-8")
+    registry = runtime / "active_sessions.json"
+    registry.unlink()
+    try:
+        registry.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    with pytest.raises(RuntimeError, match="cannot be a symlink"):
+        active_sessions.try_acquire_active_session(
+            session_id="unsafe",
+            surface="cli",
+            config={},
+        )
 
 
 def test_active_session_registry_prunes_dead_pids(tmp_path, monkeypatch):

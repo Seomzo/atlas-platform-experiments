@@ -2,9 +2,9 @@
 
 When a gateway crashes (exit code 1) the graceful shutdown path is skipped and
 sessions.json is left pointing at sessions already ended in state.db. On the
-next startup _ensure_loaded_locked calls _prune_stale_sessions_locked to detect
-and remove those stale routing entries before get_or_create_session() can reuse
-them and silently route incoming messages into a closed session (#52804).
+next startup _ensure_loaded_locked calls _prune_stale_sessions_locked to recover
+continuations and remove only entries whose Cortex boundary is durably complete.
+Unfinalized terminal entries remain addressable for retry (#52804).
 """
 
 import json
@@ -65,10 +65,21 @@ def _db_returning(rows: dict) -> MagicMock:
 # ---------------------------------------------------------------------------
 
 class TestPruneStaleSessionsLocked:
-    def test_prunes_ended_session(self, tmp_path):
+    def test_retains_unfinalized_ended_session_for_boundary_retry(self, tmp_path):
         db = _db_returning({"sid_dm": {"end_reason": "agent_close", "id": "sid_dm"}})
         store = _make_store_with_db(tmp_path, db)
         store._entries["dm_key"] = _make_entry("dm_key", "sid_dm")
+
+        store._prune_stale_sessions_locked()
+
+        assert "dm_key" in store._entries
+
+    def test_prunes_ended_session_after_boundary_acknowledgement(self, tmp_path):
+        db = _db_returning({"sid_dm": {"end_reason": "session_reset", "id": "sid_dm"}})
+        store = _make_store_with_db(tmp_path, db)
+        entry = _make_entry("dm_key", "sid_dm")
+        entry.expiry_finalized = True
+        store._entries["dm_key"] = entry
 
         store._prune_stale_sessions_locked()
 
@@ -103,6 +114,8 @@ class TestPruneStaleSessionsLocked:
         store._entries["key_a"] = _make_entry("key_a", "sid_a")
         store._entries["key_b"] = _make_entry("key_b", "sid_b")
         store._entries["key_c"] = _make_entry("key_c", "sid_c")
+        store._entries["key_a"].expiry_finalized = True
+        store._entries["key_b"].expiry_finalized = True
 
         store._prune_stale_sessions_locked()
 
@@ -137,7 +150,7 @@ class TestPruneStaleSessionsLocked:
         db.find_latest_gateway_session_for_peer.assert_called_once()
         db.reopen_session.assert_called_once_with("sid_child")
 
-    def test_prunes_stale_entry_when_recovery_only_finds_same_ended_session(self, tmp_path):
+    def test_reopens_recoverable_agent_close_session_with_same_id(self, tmp_path):
         key = "agent:main:telegram:dm:5140768830"
         db = _db_returning({"sid_parent": {"end_reason": "agent_close", "id": "sid_parent"}})
         db.find_latest_gateway_session_for_peer.return_value = {
@@ -149,7 +162,9 @@ class TestPruneStaleSessionsLocked:
 
         store._prune_stale_sessions_locked()
 
-        assert key not in store._entries
+        assert key in store._entries
+        assert store._entries[key].session_id == "sid_parent"
+        db.reopen_session.assert_called_once_with("sid_parent")
 
     def test_noop_when_db_is_none(self, tmp_path):
         config = GatewayConfig(default_reset_policy=SessionResetPolicy(mode="none"))
@@ -184,7 +199,9 @@ class TestPruneStaleSessionsLocked:
     def test_sessions_json_rewritten_after_pruning(self, tmp_path):
         db = _db_returning({"sid_stale": {"end_reason": "agent_close", "id": "sid_stale"}})
         store = _make_store_with_db(tmp_path, db)
-        store._entries["stale_key"] = _make_entry("stale_key", "sid_stale")
+        entry = _make_entry("stale_key", "sid_stale")
+        entry.expiry_finalized = True
+        store._entries["stale_key"] = entry
 
         with patch.object(store, "_save") as mock_save:
             store._prune_stale_sessions_locked()
@@ -207,6 +224,7 @@ class TestPruneStaleSessionsLocked:
 class TestEnsureLoadedCallsPrune:
     def test_stale_entry_pruned_during_load(self, tmp_path):
         entry = _make_entry("dm_key", "sid_stale")
+        entry.expiry_finalized = True
         (tmp_path / "sessions.json").write_text(
             json.dumps({"dm_key": entry.to_dict()}, indent=2), encoding="utf-8"
         )

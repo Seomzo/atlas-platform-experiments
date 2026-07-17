@@ -803,43 +803,46 @@ class WebhookAdapter(BasePlatformAdapter):
     async def on_processing_complete(
         self, event: "MessageEvent", outcome: Any
     ) -> None:
-        """Close the per-delivery webhook session once its run finishes.
+        """Finalize the per-delivery webhook session once its run finishes.
 
         A webhook delivery is one-shot: the ``delivery_id`` is baked into the
-        session key, so the session will never receive a second turn.  Mirror
-        the cron completion path (``cron/scheduler.py`` →
-        ``end_session(..., "cron_complete")``) by marking the session ended
-        when the run completes.  Without this, webhook sessions keep
-        ``ended_at`` NULL forever; ``SessionDB.prune_sessions`` only reaps
-        rows with ``ended_at`` set, so unclosed webhook sessions accumulate
-        unbounded and drive state.db bloat (the ghost-session leak).
+        session key, so the session will never receive a second turn. Commit
+        its exact synchronous Cortex boundary before ending the SessionDB row;
+        the cheap-model distillation admitted by that boundary continues in
+        the Cortex worker. Without the DB end, webhook sessions keep
+        ``ended_at`` NULL forever and cannot be pruned (the ghost-session leak).
 
         This hook is the one seam that runs at the TRUE end of the run:
         ``BasePlatformAdapter._process_message_background`` fires it after the
         message handler returns, on the success, failure, and cancellation
         paths alike — so error runs are reaped too.  (``handle_message`` is
         fire-and-forget; wrapping IT closes before the run even starts.)
-        ``end_session()`` is first-reason-wins and no-ops on an already-ended
-        row, so this never clobbers a ``compression``/``agent_close`` reason.
+        The runner writes a durable retry intent first and fails closed: a
+        Cortex/DB failure leaves the row live and retries independently of the
+        normal session reset/age policy after restart or on the next sweep.
         """
         await self._end_webhook_session(event, event.source.chat_id)
 
     async def _end_webhook_session(
         self, event: "MessageEvent", session_chat_id: str
     ) -> None:
-        """Mark the per-delivery webhook session ended in state.db.
+        """Commit and end the exact per-delivery webhook session.
 
         Resolves the persisted ``session_id`` from the gateway session store
-        using the SAME source the run was keyed on (so profile multiplexing
-        and key construction match exactly), then closes it via the existing
-        ``SessionDB.end_session`` API — never a hand-written UPDATE.
+        using the SAME source the run was keyed on, then delegates the durable
+        Cortex-admission/SessionDB-end protocol to ``GatewayRunner``.
         """
         runner = self.gateway_runner
         if runner is None:
             return
-        session_db = getattr(runner, "_session_db", None)
         store = getattr(runner, "session_store", None)
-        if session_db is None or store is None:
+        finalize = getattr(runner, "finalize_one_shot_session", None)
+        if store is None or not callable(finalize):
+            logger.warning(
+                "[webhook] Cannot finalize delivery %s: runner has no durable "
+                "one-shot finalizer",
+                session_chat_id,
+            )
             return
         try:
             key_fn = getattr(runner, "_session_key_for_source", None)
@@ -870,20 +873,30 @@ class WebhookAdapter(BasePlatformAdapter):
                     session_key,
                 )
                 return
-            # AsyncSessionDB forwards end_session via asyncio.to_thread; a
-            # plain SessionDB exposes it synchronously.  Handle both.
-            _end = session_db.end_session
-            result = _end(session_id, "webhook_complete")
-            if asyncio.iscoroutine(result):
-                await result
-            logger.debug(
-                "[webhook] Closed session %s for delivery %s",
-                session_id,
-                session_chat_id,
+            completed = finalize(
+                source=event.source,
+                session_key=session_key,
+                session_id=session_id,
+                reason="webhook_complete",
             )
+            if asyncio.iscoroutine(completed):
+                completed = await completed
+            if completed:
+                logger.debug(
+                    "[webhook] Finalized session %s for delivery %s",
+                    session_id,
+                    session_chat_id,
+                )
+            else:
+                logger.warning(
+                    "[webhook] Session %s for delivery %s remains live with "
+                    "a durable finalization retry",
+                    session_id,
+                    session_chat_id,
+                )
         except Exception as e:
-            logger.debug(
-                "[webhook] Failed to close session for %s: %s",
+            logger.warning(
+                "[webhook] Failed to finalize session for %s: %s",
                 session_chat_id,
                 e,
             )

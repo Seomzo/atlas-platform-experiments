@@ -60,6 +60,7 @@ def auto_continue_freshness_window() -> float:
 # PII redaction helpers
 # ---------------------------------------------------------------------------
 
+
 def _hash_id(value: str) -> str:
     """Deterministic 12-char hex hash of an identifier."""
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
@@ -79,7 +80,7 @@ def _hash_chat_id(value: str) -> str:
     colon = value.find(":")
     if colon > 0:
         prefix = value[:colon]
-        return f"{prefix}:{_hash_id(value[colon + 1:])}"
+        return f"{prefix}:{_hash_id(value[colon + 1 :])}"
     return _hash_id(value)
 
 
@@ -94,6 +95,7 @@ from .whatsapp_identity import (
     normalize_whatsapp_identifier,  # noqa: F401 - re-exported for gateway.session callers
 )
 from utils import atomic_replace
+
 
 # Session keys/ids flow into filesystem paths downstream (e.g.
 # ``sessions_dir / f"{session_id}.json"`` in hermes_state, request-dump
@@ -147,12 +149,13 @@ def _is_session_key_unsafe(value: object) -> bool:
 class SessionSource:
     """
     Describes where a message originated from.
-    
+
     This information is used to:
     1. Route responses back to the right place
     2. Inject context into the system prompt
     3. Track origin for cron job delivery
     """
+
     platform: Platform
     chat_id: str
     chat_name: Optional[str] = None
@@ -161,7 +164,9 @@ class SessionSource:
     user_name: Optional[str] = None
     thread_id: Optional[str] = None  # For forum topics, Discord threads, etc.
     chat_topic: Optional[str] = None  # Channel topic/description (Discord, Slack)
-    user_id_alt: Optional[str] = None  # Platform-specific stable alt ID (Signal UUID, Feishu union_id)
+    user_id_alt: Optional[str] = (
+        None  # Platform-specific stable alt ID (Signal UUID, Feishu union_id)
+    )
     chat_id_alt: Optional[str] = None  # Signal group internal ID
     is_bot: bool = False  # True when the message author is a bot/webhook (Discord)
     # Platform-neutral SCOPE discriminator (Discord guild / Slack workspace /
@@ -172,9 +177,15 @@ class SessionSource:
     # the `guild_id` alias is dropped in a follow-up once both repos deploy.
     scope_id: Optional[str] = None
     guild_id: Optional[str] = None  # @deprecated legacy alias for scope_id (D-Q2.5)
-    parent_chat_id: Optional[str] = None  # Parent channel when chat_id refers to a thread
-    message_id: Optional[str] = None  # ID of the triggering message (for pin/reply/react)
-    role_authorized: bool = False  # True when adapter granted access via role (not user ID)
+    parent_chat_id: Optional[str] = (
+        None  # Parent channel when chat_id refers to a thread
+    )
+    message_id: Optional[str] = (
+        None  # ID of the triggering message (for pin/reply/react)
+    )
+    role_authorized: bool = (
+        False  # True when adapter granted access via role (not user ID)
+    )
     # Profile this inbound message is routed to in a multiplexing gateway
     # (from the /p/<profile>/ URL prefix or per-credential adapter ownership).
     # None => the gateway's active/default profile. Drives both session-key
@@ -217,7 +228,7 @@ class SessionSource:
         """Human-readable description of the source."""
         if self.platform == Platform.LOCAL:
             return "CLI terminal"
-        
+
         parts = []
         if self.chat_type == "dm":
             parts.append(f"DM with {self.user_name or self.user_id or 'user'}")
@@ -227,12 +238,12 @@ class SessionSource:
             parts.append(f"channel: {self.chat_name or self.chat_id}")
         else:
             parts.append(self.chat_name or self.chat_id)
-        
+
         if self.thread_id:
             parts.append(f"thread: {self.thread_id}")
-        
+
         return ", ".join(parts)
-    
+
     def to_dict(self) -> Dict[str, Any]:
         d = {
             "platform": self.platform.value,
@@ -290,30 +301,30 @@ class SessionSource:
             auto_thread_created=bool(data.get("auto_thread_created", False)),
             auto_thread_initial_name=data.get("auto_thread_initial_name"),
         )
-    
 
 
 @dataclass
 class SessionContext:
     """
     Full context for a session, used for dynamic system prompt injection.
-    
+
     The agent receives this information to understand:
     - Where messages are coming from
     - What platforms are available
     - Where it can deliver scheduled task outputs
     """
+
     source: SessionSource
     connected_platforms: List[Platform]
     home_channels: Dict[Platform, HomeChannel]
     shared_multi_user_session: bool = False
-    
+
     # Session metadata
     session_key: str = ""
     session_id: str = ""
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "source": self.source.to_dict(),
@@ -358,6 +369,7 @@ def _discord_tools_loaded() -> bool:
     try:
         from hermes_cli.config import load_config
         from hermes_cli.tools_config import _get_platform_tools
+
         cfg = load_config()
         enabled = _get_platform_tools(cfg, "discord", include_default_mcp_servers=False)
         return "discord" in enabled or "discord_admin" in enabled
@@ -368,7 +380,9 @@ def _discord_tools_loaded() -> bool:
 _MAX_PROMPT_METADATA_CHARS = 240
 
 
-def _format_untrusted_prompt_value(value: Any, *, max_chars: int = _MAX_PROMPT_METADATA_CHARS) -> str:
+def _format_untrusted_prompt_value(
+    value: Any, *, max_chars: int = _MAX_PROMPT_METADATA_CHARS
+) -> str:
     """Render untrusted gateway metadata as an inert quoted string."""
     text = str(value).replace("\r\n", "\n").replace("\r", "\n").strip()
     text = "".join(ch if ch >= " " or ch in "\n\t" else " " for ch in text)
@@ -402,6 +416,7 @@ def build_session_context_prompt(
     if not _is_pii_safe:
         try:
             from gateway.platform_registry import platform_registry
+
             entry = platform_registry.get(context.source.platform.value)
             if entry and entry.pii_safe:
                 _is_pii_safe = True
@@ -476,7 +491,9 @@ def build_session_context_prompt(
     # this is a multi-user session; individual sender names are prefixed on
     # each user message by the gateway.
     if context.shared_multi_user_session:
-        session_label = "Multi-user thread" if context.source.thread_id else "Multi-user session"
+        session_label = (
+            "Multi-user thread" if context.source.thread_id else "Multi-user session"
+        )
         lines.append(
             f"**Session type:** {session_label} — messages are prefixed "
             "with [sender name]. Multiple users may participate."
@@ -510,12 +527,17 @@ def build_session_context_prompt(
         # honest so we never promise tools the agent lacks.
         if _discord_tools_loaded():
             src = context.source
-            id_lines = ["", "**Discord IDs (for the `discord` / `discord_admin` tools):**"]
+            id_lines = [
+                "",
+                "**Discord IDs (for the `discord` / `discord_admin` tools):**",
+            ]
             if src.guild_id:
                 id_lines.append(f"  - Guild: `{src.guild_id}`")
             if src.thread_id and src.parent_chat_id:
                 id_lines.append(f"  - Parent channel: `{src.parent_chat_id}`")
-                id_lines.append(f"  - Thread: `{src.thread_id}` (use as `channel_id` for fetch_messages etc.)")
+                id_lines.append(
+                    f"  - Thread: `{src.thread_id}` (use as `channel_id` for fetch_messages etc.)"
+                )
             else:
                 id_lines.append(f"  - Channel: `{src.chat_id}`")
             if src.message_id:
@@ -588,27 +610,31 @@ def build_session_context_prompt(
 
     # Origin delivery
     if context.source.platform == Platform.LOCAL:
-        lines.append("- `\"origin\"` → Local output (saved to files)")
+        lines.append('- `"origin"` → Local output (saved to files)')
     else:
         _origin_label = context.source.chat_name or (
-            _hash_chat_id(context.source.chat_id) if redact_pii else context.source.chat_id
+            _hash_chat_id(context.source.chat_id)
+            if redact_pii
+            else context.source.chat_id
         )
         _origin_label = _format_untrusted_prompt_value(_origin_label)
-        lines.append(f"- `\"origin\"` → Back to this chat ({_origin_label})")
+        lines.append(f'- `"origin"` → Back to this chat ({_origin_label})')
 
     # Local always available
     lines.append(
-        f"- `\"local\"` → Save to local files only ({display_hermes_home()}/cron/output/)"
+        f'- `"local"` → Save to local files only ({display_hermes_home()}/cron/output/)'
     )
 
     # Platform home channels
     for platform, home in context.home_channels.items():
         home_name = _format_untrusted_prompt_value(home.name)
-        lines.append(f"- `\"{platform.value}\"` → Home channel ({home_name})")
+        lines.append(f'- `"{platform.value}"` → Home channel ({home_name})')
 
     # Note about explicit targeting
     lines.append("")
-    lines.append("*For explicit targeting, use `\"platform:chat_id\"` format if the user provides a specific chat ID.*")
+    lines.append(
+        '*For explicit targeting, use `"platform:chat_id"` format if the user provides a specific chat ID.*'
+    )
 
     return "\n".join(lines)
 
@@ -620,8 +646,39 @@ def build_session_context_prompt(
 # runner re-resolves credentials via the normal runtime provider resolution.
 PERSISTABLE_MODEL_OVERRIDE_KEYS = ("model", "provider", "base_url")
 
+# A pending terminal boundary is executable lifecycle state: the gateway will
+# retry it after a restart and end the matching SessionDB row once Cortex has
+# durably admitted the boundary.  Keep the persisted vocabulary closed so a
+# hand-edited/corrupt routing entry cannot turn an arbitrary string into a
+# lifecycle action.
+PERSISTABLE_PENDING_FINALIZE_REASONS = frozenset({"webhook_complete"})
 
-def sanitize_model_override(override: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:
+# A predecessor token is attached to a newly-published route.  Unlike a
+# one-shot pending-finalize token, its old route has already been replaced, so
+# the values here describe which already-proven logical end Cortex is allowed
+# to consolidate before the fresh route accepts a turn.
+PERSISTABLE_PREVIOUS_FINALIZE_REASONS = frozenset(
+    {"session_expired", "new_session", "compression_exhausted"}
+)
+
+
+def sanitize_pending_finalize_reason(reason: Any) -> Optional[str]:
+    """Return a supported durable terminal-boundary reason, or ``None``."""
+    if isinstance(reason, str) and reason in PERSISTABLE_PENDING_FINALIZE_REASONS:
+        return reason
+    return None
+
+
+def sanitize_previous_finalize_reason(reason: Any) -> Optional[str]:
+    """Return a supported predecessor-boundary reason, or ``None``."""
+    if isinstance(reason, str) and reason in PERSISTABLE_PREVIOUS_FINALIZE_REASONS:
+        return reason
+    return None
+
+
+def sanitize_model_override(
+    override: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, str]]:
     """Return a copy of *override* containing only persistable, non-secret keys.
 
     Returns ``None`` when the input is empty/not a dict or no persistable
@@ -642,22 +699,23 @@ def sanitize_model_override(override: Optional[Dict[str, Any]]) -> Optional[Dict
 class SessionEntry:
     """
     Entry in the session store.
-    
+
     Maps a session key to its current session ID and metadata.
     """
+
     session_key: str
     session_id: str
     created_at: datetime
     updated_at: datetime
-    
+
     # Origin metadata for delivery routing
     origin: Optional[SessionSource] = None
-    
+
     # Display metadata
     display_name: Optional[str] = None
     platform: Optional[Platform] = None
     chat_type: str = "dm"
-    
+
     # Token tracking
     input_tokens: int = 0
     output_tokens: int = 0
@@ -666,15 +724,23 @@ class SessionEntry:
     total_tokens: int = 0
     estimated_cost_usd: float = 0.0
     cost_status: str = "unknown"
-    
+
     # Last API-reported prompt tokens (for accurate compression pre-check)
     last_prompt_tokens: int = 0
-    
+
     # Set when a session was created because the previous one expired;
     # consumed once by the message handler to inject a notice into context
     was_auto_reset: bool = False
     auto_reset_reason: Optional[str] = None  # "idle" or "daily"
     reset_had_activity: bool = False  # whether the expired session had any messages
+
+    # Durable retry token for a routing boundary. Automatic, explicit, and
+    # context-exhaustion reset paths rotate the routing entry before finalizing
+    # the predecessor's Cortex state. Keep the prior identity and exact reason
+    # on the fresh entry until finalization succeeds so a restart or transient
+    # write failure cannot silently lose (or invent) the boundary.
+    previous_session_id: Optional[str] = None
+    previous_finalize_reason: Optional[str] = None
 
     # Set by reset_session() when the user explicitly sends /new or /reset.
     # Consumed once by _handle_message_with_agent to trigger topic/channel
@@ -684,12 +750,19 @@ class SessionEntry:
     # context-note prepend — both wrong for an explicit manual reset.
     # See issue #6508.
     is_fresh_reset: bool = False
-    
+
     # Set by the background expiry watcher after it finalizes an expired
     # session (invoking on_session_finalize hooks and evicting the cached
     # agent).  Persisted to sessions.json so the flag survives gateway
     # restarts — prevents redundant finalization runs.
     expiry_finalized: bool = False
+
+    # Write-ahead retry token for one-shot session endings.  The gateway sets
+    # this before committing the synchronous Cortex boundary, and clears it
+    # only after both Cortex admission and SessionDB.end_session succeed.  It
+    # therefore survives a process crash at either side of the DB end and lets
+    # the expiry watcher retry immediately regardless of reset/age policy.
+    pending_finalize_reason: Optional[str] = None
 
     # When True the next call to get_or_create_session() will auto-reset
     # this session (create a new session_id) so the user starts fresh.
@@ -735,6 +808,9 @@ class SessionEntry:
             "estimated_cost_usd": self.estimated_cost_usd,
             "cost_status": self.cost_status,
             "expiry_finalized": self.expiry_finalized,
+            "pending_finalize_reason": sanitize_pending_finalize_reason(
+                self.pending_finalize_reason
+            ),
             "suspended": self.suspended,
             "resume_pending": self.resume_pending,
             "resume_reason": self.resume_reason,
@@ -747,6 +823,12 @@ class SessionEntry:
             "was_auto_reset": self.was_auto_reset,
             "auto_reset_reason": self.auto_reset_reason,
             "reset_had_activity": self.reset_had_activity,
+            "previous_session_id": self.previous_session_id,
+            "previous_finalize_reason": (
+                sanitize_previous_finalize_reason(self.previous_finalize_reason)
+                if self.previous_session_id
+                else None
+            ),
         }
         if self.model_override:
             # Defence-in-depth: strip credentials even if a caller stored an
@@ -755,13 +837,13 @@ class SessionEntry:
         if self.origin:
             result["origin"] = self.origin.to_dict()
         return result
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SessionEntry":
         origin = None
         if "origin" in data and isinstance(data["origin"], dict):
             origin = SessionSource.from_dict(data["origin"])
-        
+
         platform = None
         if data.get("platform"):
             try:
@@ -779,6 +861,10 @@ class SessionEntry:
 
         session_key = data["session_key"]
         session_id = data["session_id"]
+        previous_session_id = data.get("previous_session_id")
+        previous_finalize_reason = sanitize_previous_finalize_reason(
+            data.get("previous_finalize_reason")
+        )
 
         # Validate path-sensitive fields to prevent directory traversal (CWE-22).
         # ``session_id`` is the value used as a filename
@@ -790,6 +876,13 @@ class SessionEntry:
         if _is_path_unsafe(session_id):
             raise ValueError(
                 "Invalid session_id: potential directory traversal detected"
+            )
+        if previous_session_id is not None and (
+            not isinstance(previous_session_id, str)
+            or _is_path_unsafe(previous_session_id)
+        ):
+            raise ValueError(
+                "Invalid previous_session_id: potential directory traversal detected"
             )
         if _is_session_key_unsafe(session_key):
             raise ValueError(
@@ -813,7 +906,12 @@ class SessionEntry:
             last_prompt_tokens=data.get("last_prompt_tokens", 0),
             estimated_cost_usd=data.get("estimated_cost_usd", 0.0),
             cost_status=data.get("cost_status", "unknown"),
-            expiry_finalized=data.get("expiry_finalized", data.get("memory_flushed", False)),
+            expiry_finalized=data.get(
+                "expiry_finalized", data.get("memory_flushed", False)
+            ),
+            pending_finalize_reason=sanitize_pending_finalize_reason(
+                data.get("pending_finalize_reason")
+            ),
             suspended=data.get("suspended", False),
             resume_pending=data.get("resume_pending", False),
             resume_reason=data.get("resume_reason"),
@@ -822,6 +920,10 @@ class SessionEntry:
             was_auto_reset=data.get("was_auto_reset", False),
             auto_reset_reason=data.get("auto_reset_reason"),
             reset_had_activity=data.get("reset_had_activity", False),
+            previous_session_id=previous_session_id or None,
+            previous_finalize_reason=(
+                previous_finalize_reason if previous_session_id else None
+            ),
             model_override=sanitize_model_override(data.get("model_override")),
         )
 
@@ -937,7 +1039,9 @@ def build_session_key(
         # Same JID/LID-flip bug as the DM case: without canonicalisation, a
         # single group member gets two isolated per-user sessions when the
         # bridge reshuffles alias forms.
-        participant_id = canonical_whatsapp_identifier(str(participant_id)) or participant_id
+        participant_id = (
+            canonical_whatsapp_identifier(str(participant_id)) or participant_id
+        )
     key_parts = [ns, platform, source.chat_type]
 
     if source.chat_id:
@@ -961,13 +1065,14 @@ def build_session_key(
 class SessionStore:
     """
     Manages session storage and retrieval.
-    
+
     Uses SQLite (via SessionDB) for session metadata and message transcripts.
     Falls back to legacy JSONL files if SQLite is unavailable.
     """
-    
-    def __init__(self, sessions_dir: Path, config: GatewayConfig,
-                 has_active_processes_fn=None):
+
+    def __init__(
+        self, sessions_dir: Path, config: GatewayConfig, has_active_processes_fn=None
+    ):
         self.sessions_dir = sessions_dir
         self.config = config
         self._entries: Dict[str, SessionEntry] = {}
@@ -977,18 +1082,19 @@ class SessionStore:
         # Whether to keep writing the legacy sessions.json mirror alongside
         # the primary gateway_routing table in state.db. Default True for
         # backward compatibility; disable via gateway.write_sessions_json.
-        self._write_sessions_json = bool(
-            getattr(config, "write_sessions_json", True)
-        )
-        
+        self._write_sessions_json = bool(getattr(config, "write_sessions_json", True))
+
         # Initialize SQLite session database
         self._db = None
         try:
             from hermes_state import SessionDB
+
             self._db = SessionDB()
         except Exception as e:
-            print(f"[gateway] Warning: SQLite session store unavailable, falling back to JSONL: {e}")
-    
+            print(
+                f"[gateway] Warning: SQLite session store unavailable, falling back to JSONL: {e}"
+            )
+
     def _ensure_loaded(self) -> None:
         """Load sessions index from disk if not already loaded."""
         with self._lock:
@@ -1068,9 +1174,9 @@ class SessionStore:
                     # aborts loading ALL remaining sessions (#46994).
                     if not isinstance(entry_data, dict):
                         logger.warning(
-                            "Skipping invalid session entry %r: "
-                            "expected dict, got %s",
-                            key, type(entry_data).__name__,
+                            "Skipping invalid session entry %r: expected dict, got %s",
+                            key,
+                            type(entry_data).__name__,
                         )
                         continue
                     try:
@@ -1082,32 +1188,33 @@ class SessionStore:
                     logger.info(
                         "gateway.session: imported %d legacy sessions.json "
                         "entr%s missing from state.db routing table",
-                        imported, "y" if imported == 1 else "ies",
+                        imported,
+                        "y" if imported == 1 else "ies",
                     )
             except Exception as e:
                 print(f"[gateway] Warning: Failed to load sessions: {e}")
 
         self._loaded = True
 
-        # Prune any sessions.json entries that point to sessions already ended
-        # in state.db. A hard gateway crash (exit code 1) skips the graceful
-        # shutdown path, so sessions.json is never cleared and is left pointing
-        # at ended sessions. On the next startup those stale entries act as live
-        # routing keys. get_or_create_session() only consulted end_reason at
-        # startup (here) until #54878 added a routing-time guard for the
-        # live-gateway case; this startup prune still self-heals crash-left
-        # entries before the first message arrives. Pruning here (lock already
-        # held) is cheap: one lookup per routing key, once at startup.
+        # Heal routing entries that point to sessions already ended in state.db.
+        # A hard gateway crash can leave such a mapping behind.  Recoverable
+        # continuations are repointed here; an unfinalized terminal entry stays
+        # addressable until get_or_create_session() rotates it with a durable
+        # previous_session_id token.  Only entries with an already-persisted
+        # Cortex finalization acknowledgement may be removed at startup.
         self._prune_stale_sessions_locked()
 
     def _prune_stale_sessions_locked(self) -> None:
-        """Remove sessions.json entries whose session has ended in state.db.
+        """Heal routing entries whose session has ended in state.db.
 
         Called once during startup (from ``_ensure_loaded_locked``, lock held).
-        A ``session_id`` is stale when state.db reports ``end_reason IS NOT
-        NULL`` for it. Sessions absent from the DB (never persisted / pre-SQLite
-        legacy) are left alone, and a ``None`` DB handle (SQLite unavailable) is
-        a no-op. DB errors are non-fatal — startup must never fail here.
+        Recoverable ``agent_close`` rows and compression continuations are
+        reopened/repointed.  A terminal row is removed only when
+        ``expiry_finalized`` proves its Cortex boundary already completed;
+        otherwise the routing entry is retained as the durable address that the
+        first inbound turn will rotate into a ``previous_session_id`` retry
+        token. Sessions absent from the DB are left alone, and DB errors are
+        non-fatal — startup must never fail here.
         """
         db = getattr(self, "_db", None)
         if not db or not self._entries:
@@ -1117,6 +1224,13 @@ class SessionStore:
         recovered_keys = 0
         try:
             for key, entry in self._entries.items():
+                # This entry owns the durable identity of an auto-reset
+                # predecessor that still needs finalization.  A clean shutdown
+                # may have ended the fresh (empty) DB row, but startup must not
+                # prune/recover it until the async inbound preflight consumes
+                # that retry token.
+                if entry.previous_session_id:
+                    continue
                 row = db.get_session(entry.session_id)
                 # row is None        -> not in DB (legacy / pre-SQLite) — keep
                 # end_reason is None  -> session alive — keep
@@ -1139,17 +1253,15 @@ class SessionStore:
                                 exc,
                             )
 
-                    # If the stale entry points at a compression-ended parent but
-                    # a newer live child session exists for the exact same gateway
-                    # peer, repoint the routing index instead of dropping it. A
-                    # hard restart between compression rotation and the next clean
-                    # save otherwise leaves Telegram with no resumable mapping, so
-                    # queued/resume-pending work disappears until the user sends a
-                    # fresh message.
-                    if recovered_entry is not None and recovered_entry.session_id != entry.session_id:
+                    # Reopen/repoint every recoverable continuation.  This
+                    # includes an agent_close row that recovery intentionally
+                    # reopens under the same session id as well as a compression
+                    # parent whose live child has a different id.  Neither is a
+                    # semantic end-of-session boundary.
+                    if recovered_entry is not None:
                         logger.warning(
-                            "gateway.session: repointing stale sessions.json entry "
-                            "%r from ended %s (end_reason=%r) to recovered %s",
+                            "gateway.session: recovering stale routing entry %r "
+                            "from ended %s (end_reason=%r) to %s",
                             key,
                             entry.session_id,
                             row["end_reason"],
@@ -1159,10 +1271,29 @@ class SessionStore:
                         recovered_keys += 1
                         continue
 
+                    # The routing entry is the last durable address for detached
+                    # Cortex finalization.  Never discard it merely because the
+                    # transcript DB row is ended.  The live routing guard will
+                    # create a fresh entry carrying previous_session_id, and the
+                    # async inbound preflight clears that token only after the
+                    # boundary succeeds.  An expiry-finalized entry is the one
+                    # safe exception: its durable acknowledgement already exists.
+                    if not entry.expiry_finalized:
+                        logger.warning(
+                            "gateway.session: retaining ended routing entry %r -> "
+                            "%s (end_reason=%r) for Cortex boundary retry",
+                            key,
+                            entry.session_id,
+                            row["end_reason"],
+                        )
+                        continue
+
                     logger.warning(
-                        "gateway.session: pruning stale sessions.json entry "
-                        "%r -> %s (end_reason=%r); left by a crashed gateway",
-                        key, entry.session_id, row["end_reason"],
+                        "gateway.session: pruning finalized stale routing entry "
+                        "%r -> %s (end_reason=%r)",
+                        key,
+                        entry.session_id,
+                        row["end_reason"],
                     )
                     stale_keys.append(key)
         except Exception as exc:
@@ -1217,6 +1348,7 @@ class SessionStore:
     def _save_sessions_json(self, data: Dict[str, Any]) -> None:
         """Write the legacy sessions.json mirror of the routing index."""
         import tempfile
+
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         sessions_file = self.sessions_dir / "sessions.json"
 
@@ -1253,8 +1385,10 @@ class SessionStore:
             except OSError as e:
                 logger.debug("Could not remove temp file %s: %s", tmp_path, e)
             raise
-    
-    def _resolve_profile_for_key(self, source: Optional[SessionSource] = None) -> Optional[str]:
+
+    def _resolve_profile_for_key(
+        self, source: Optional[SessionSource] = None
+    ) -> Optional[str]:
         """Return the profile namespace for session keys, or None when off.
 
         When ``multiplex_profiles`` is disabled (default), returns ``None`` so
@@ -1269,6 +1403,7 @@ class SessionStore:
             return source.profile
         try:
             from hermes_cli.profiles import get_active_profile_name
+
             return get_active_profile_name() or "default"
         except Exception:
             return None
@@ -1288,6 +1423,7 @@ class SessionStore:
     def _active_profile_name() -> str:
         try:
             from hermes_cli.profiles import get_active_profile_name
+
             return get_active_profile_name() or "default"
         except Exception:
             return "default"
@@ -1316,8 +1452,12 @@ class SessionStore:
         """Generate a session key from a source."""
         return build_session_key(
             source,
-            group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
-            thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
+            group_sessions_per_user=getattr(
+                self.config, "group_sessions_per_user", True
+            ),
+            thread_sessions_per_user=getattr(
+                self.config, "thread_sessions_per_user", False
+            ),
             profile=self._resolve_profile_for_key(source),
         )
 
@@ -1331,7 +1471,9 @@ class SessionStore:
     ) -> SessionEntry:
         started_at = row.get("started_at")
         try:
-            created_at = datetime.fromtimestamp(float(started_at)) if started_at else now
+            created_at = (
+                datetime.fromtimestamp(float(started_at)) if started_at else now
+            )
         except (TypeError, ValueError, OSError):
             created_at = now
         return SessionEntry(
@@ -1368,7 +1510,9 @@ class SessionStore:
                 thread_id=source.thread_id,
             )
         except Exception as exc:
-            logger.debug("Gateway session DB recovery failed for %s: %s", session_key, exc)
+            logger.debug(
+                "Gateway session DB recovery failed for %s: %s", session_key, exc
+            )
             return None
         if not recovered:
             return None
@@ -1387,7 +1531,9 @@ class SessionStore:
         try:
             self._db.reopen_session(str(recovered["id"]))
         except Exception as exc:
-            logger.debug("Gateway session DB reopen failed for %s: %s", session_key, exc)
+            logger.debug(
+                "Gateway session DB reopen failed for %s: %s", session_key, exc
+            )
         return self._create_entry_from_recovered_row(
             row=recovered,
             session_key=session_key,
@@ -1438,9 +1584,110 @@ class SessionStore:
                     thread_id=source.thread_id,
                 )
             except Exception as exc:
-                logger.debug("Gateway session peer record failed for %s: %s", session_key, exc)
+                logger.debug(
+                    "Gateway session peer record failed for %s: %s", session_key, exc
+                )
         except Exception as exc:
-            logger.debug("Gateway session peer record failed for %s: %s", session_key, exc)
+            logger.debug(
+                "Gateway session peer record failed for %s: %s", session_key, exc
+            )
+
+    def mark_terminal_finalize_pending(
+        self,
+        session_key: str,
+        *,
+        session_id: str,
+        reason: str,
+    ) -> Optional[SessionEntry]:
+        """Persist a write-ahead token for an exact one-shot session ending.
+
+        The key and ID comparison prevents an old completion callback from
+        attaching its boundary to a route that has since moved.  Returning
+        ``None`` means the requested identity/reason no longer owns the route.
+        Persistence failures restore the in-memory value so a caller can fail
+        closed without publishing a token that only exists in RAM.
+        """
+        normalized_reason = sanitize_pending_finalize_reason(reason)
+        if normalized_reason is None:
+            raise ValueError(f"Unsupported pending finalize reason: {reason!r}")
+
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None or entry.session_id != session_id:
+                return None
+            if entry.expiry_finalized and entry.pending_finalize_reason is None:
+                return entry
+            if entry.pending_finalize_reason not in (None, normalized_reason):
+                return None
+            if entry.pending_finalize_reason == normalized_reason:
+                return entry
+
+            entry.pending_finalize_reason = normalized_reason
+            try:
+                self._save()
+            except Exception:
+                entry.pending_finalize_reason = None
+                raise
+            return entry
+
+    def complete_terminal_finalize(
+        self,
+        session_key: str,
+        *,
+        session_id: str,
+        reason: str,
+    ) -> bool:
+        """Compare-and-ack a completed one-shot Cortex/SessionDB boundary."""
+        normalized_reason = sanitize_pending_finalize_reason(reason)
+        if normalized_reason is None:
+            raise ValueError(f"Unsupported pending finalize reason: {reason!r}")
+
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None or entry.session_id != session_id:
+                return False
+            if entry.expiry_finalized and entry.pending_finalize_reason is None:
+                return True
+            if entry.pending_finalize_reason != normalized_reason:
+                return False
+
+            previous_finalized = entry.expiry_finalized
+            previous_override = entry.model_override
+            entry.pending_finalize_reason = None
+            entry.expiry_finalized = True
+            entry.model_override = None
+            try:
+                self._save()
+            except Exception:
+                entry.pending_finalize_reason = normalized_reason
+                entry.expiry_finalized = previous_finalized
+                entry.model_override = previous_override
+                raise
+
+        if self._db:
+            setter = getattr(self._db, "set_expiry_finalized", None)
+            if callable(setter):
+                try:
+                    setter(session_id, True)
+                except Exception as exc:
+                    logger.debug(
+                        "Session DB expiry_finalized write failed for %s: %s",
+                        session_id,
+                        exc,
+                    )
+        return True
+
+    def list_pending_terminal_finalizations(self) -> List[SessionEntry]:
+        """Return persisted one-shot boundaries awaiting completion/retry."""
+        with self._lock:
+            self._ensure_loaded_locked()
+            return [
+                entry
+                for entry in self._entries.values()
+                if entry.pending_finalize_reason and not entry.expiry_finalized
+            ]
 
     def set_expiry_finalized(
         self, entry: SessionEntry, *, clear_model_override: bool = True
@@ -1470,24 +1717,95 @@ class SessionStore:
                 except Exception as exc:
                     logger.debug(
                         "Session DB expiry_finalized write failed for %s: %s",
-                        entry.session_id, exc,
+                        entry.session_id,
+                        exc,
                     )
-    
+
+    def clear_previous_session_id(
+        self,
+        session_key: str,
+        *,
+        current_session_id: str,
+        previous_session_id: str,
+    ) -> bool:
+        """Acknowledge a completed routed-predecessor boundary durably.
+
+        The expected current and previous identities make the acknowledgement
+        compare-and-clear: a concurrent routing change cannot clear a newer
+        pending boundary.  If persistence fails, restore the in-memory retry
+        token so the next inbound message finalizes the boundary idempotently.
+        """
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None or entry.session_id != current_session_id:
+                return False
+            if entry.previous_session_id is None:
+                return True
+            if entry.previous_session_id != previous_session_id:
+                return False
+
+            previous_finalize_reason = entry.previous_finalize_reason
+            entry.previous_session_id = None
+            entry.previous_finalize_reason = None
+            try:
+                self._save()
+            except Exception:
+                entry.previous_session_id = previous_session_id
+                entry.previous_finalize_reason = previous_finalize_reason
+                raise
+            return True
+
     def _is_session_expired(self, entry: SessionEntry) -> bool:
         """Check if a session has expired based on its reset policy.
-        
+
         Works from the entry alone — no SessionSource needed.
         Used by the background expiry watcher to proactively flush memories.
         Sessions with active background processes are never considered expired.
         """
+        return self._session_reset_reason(entry) is not None
+
+    def _session_reset_reason(self, entry: SessionEntry) -> Optional[str]:
+        """Return the exact configured reset reason for one idle route."""
         if self._has_active_processes_fn:
             if self._has_active_processes_fn(entry.session_key):
                 logger.debug(
                     "Session %s not expired — active background processes",
                     entry.session_key,
                 )
-                return False
+                return None
 
+        policy = self.config.get_reset_policy(
+            platform=entry.platform,
+            session_type=entry.chat_type,
+        )
+        now = _now()
+        if policy.mode in {"idle", "both"}:
+            idle_deadline = entry.updated_at + timedelta(minutes=policy.idle_minutes)
+            if now > idle_deadline:
+                return "idle"
+        if policy.mode in {"daily", "both"}:
+            today_reset = now.replace(
+                hour=policy.at_hour,
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            if now.hour < policy.at_hour:
+                today_reset -= timedelta(days=1)
+            if entry.updated_at < today_reset:
+                return "daily"
+        return None
+
+    def _is_reset_policy_expired(self, entry: SessionEntry) -> bool:
+        """Check the configured reset clock without process-liveness guards.
+
+        ``_is_session_expired`` adds the active-background-process exemption used
+        by semantic finalization. Routing retention calls this clock-only helper
+        after its own fail-closed liveness check so it can distinguish a genuine
+        policy boundary from max-age-only cleanup without checking a mutable
+        process callback twice.
+        """
         policy = self.config.get_reset_policy(
             platform=entry.platform,
             session_type=entry.chat_type,
@@ -1506,7 +1824,9 @@ class SessionStore:
         if policy.mode in {"daily", "both"}:
             today_reset = now.replace(
                 hour=policy.at_hour,
-                minute=0, second=0, microsecond=0,
+                minute=0,
+                second=0,
+                microsecond=0,
             )
             if now.hour < policy.at_hour:
                 today_reset -= timedelta(days=1)
@@ -1572,13 +1892,15 @@ class SessionStore:
             return False
         return bool(row is not None and row.get("end_reason") is not None)
 
-    def _should_reset(self, entry: SessionEntry, source: SessionSource) -> Optional[str]:
+    def _should_reset(
+        self, entry: SessionEntry, source: SessionSource
+    ) -> Optional[str]:
         """
         Check if a session should be reset based on policy.
-        
+
         Returns the reset reason ("idle" or "daily") if a reset is needed,
         or None if the session is still valid.
-        
+
         Sessions with active background processes are never reset.
         """
         if self._has_active_processes_fn:
@@ -1591,36 +1913,34 @@ class SessionStore:
                 return None
 
         policy = self.config.get_reset_policy(
-            platform=source.platform,
-            session_type=source.chat_type
+            platform=source.platform, session_type=source.chat_type
         )
-        
+
         if policy.mode == "none":
             return None
-        
+
         now = _now()
-        
+
         if policy.mode in {"idle", "both"}:
             idle_deadline = entry.updated_at + timedelta(minutes=policy.idle_minutes)
             if now > idle_deadline:
                 return "idle"
-        
+
         if policy.mode in {"daily", "both"}:
             today_reset = now.replace(
-                hour=policy.at_hour, 
-                minute=0, 
-                second=0, 
-                microsecond=0
+                hour=policy.at_hour, minute=0, second=0, microsecond=0
             )
             if now.hour < policy.at_hour:
                 today_reset -= timedelta(days=1)
-            
+
             if entry.updated_at < today_reset:
                 return "daily"
-        
+
         return None
-    
-    def _compression_tip_for_session_id(self, session_id: Optional[str]) -> Optional[str]:
+
+    def _compression_tip_for_session_id(
+        self, session_id: Optional[str]
+    ) -> Optional[str]:
         """Return the latest compression continuation for *session_id*.
 
         When an agent compresses context mid-turn the transcript moves to a
@@ -1685,9 +2005,7 @@ class SessionStore:
             return len(self._entries) > 1
 
     def get_or_create_session(
-        self,
-        source: SessionSource,
-        force_new: bool = False
+        self, source: SessionSource, force_new: bool = False
     ) -> SessionEntry:
         """
         Get an existing session or create a new one.
@@ -1701,6 +2019,7 @@ class SessionStore:
         # SQLite calls are made outside the lock to avoid holding it during I/O.
         # All _entries / _loaded mutations are protected by self._lock.
         db_end_session_id = None
+        stale_predecessor_session_id = None
         db_create_kwargs = None
         existing_session_id = None
 
@@ -1723,6 +2042,17 @@ class SessionStore:
 
             if session_key in self._entries and not force_new:
                 entry = self._entries[session_key]
+
+                # Preserve the predecessor token before any compression-tip or
+                # stale-DB self-healing can replace this routing entry.  Clean
+                # shutdown may mark the fresh empty row ended while its prior
+                # Cortex boundary is still pending; the inbound async preflight
+                # must finalize that predecessor first.
+                if entry.previous_session_id:
+                    entry.updated_at = now
+                    self._save()
+                    return entry
+
                 self._heal_compression_tip_locked(
                     entry, existing_session_id, canonical_existing_session_id
                 )
@@ -1736,7 +2066,7 @@ class SessionStore:
                 # it (#54878 — the live-gateway variant of #52804/FM9, which
                 # only the startup prune previously caught).
                 #
-                # Drop the stale entry and fall through to the recovery path
+                # Rotate the stale entry and fall through to the recovery path
                 # below.  Leaving db_end_session_id None routes us into
                 # _recover_session_from_db, whose finder
                 # (hermes_state.find_latest_gateway_session_for_peer) selects
@@ -1744,14 +2074,19 @@ class SessionStore:
                 # — so it REOPENS gateway-cleanup-ended ('agent_close') rows and
                 # resumes the SAME session_id (transcript preserved), but returns
                 # None for any other end_reason (e.g. /new), which then correctly
-                # starts a fresh session.
+                # starts a fresh session.  If recovery finds nothing, preserve
+                # the ended identity on that fresh entry as previous_session_id
+                # until the async inbound Cortex preflight acknowledges it.
                 if self._is_session_ended_in_db(entry.session_id):
+                    if not entry.expiry_finalized:
+                        stale_predecessor_session_id = entry.session_id
                     logger.warning(
                         "gateway.session: routing key %r -> %s is ended in "
-                        "state.db but still live in sessions.json; dropping "
-                        "stale entry and recovering/recreating the session "
+                        "state.db but still live in the routing index; rotating "
+                        "the stale entry and recovering/recreating the session "
                         "(#54878)",
-                        session_key, entry.session_id,
+                        session_key,
+                        entry.session_id,
                     )
                     self._entries.pop(session_key, None)
                     was_auto_reset = False
@@ -1841,6 +2176,14 @@ class SessionStore:
                 was_auto_reset=was_auto_reset,
                 auto_reset_reason=auto_reset_reason,
                 reset_had_activity=reset_had_activity,
+                previous_session_id=(
+                    db_end_session_id or stale_predecessor_session_id
+                ),
+                previous_finalize_reason=(
+                    "session_expired"
+                    if db_end_session_id or stale_predecessor_session_id
+                    else None
+                ),
             )
 
             self._entries[session_key] = entry
@@ -1993,8 +2336,13 @@ class SessionStore:
             self._save()
             return True
 
-    def prune_old_entries(self, max_age_days: int) -> int:
-        """Drop SessionEntry records older than max_age_days.
+    def prune_old_entries(
+        self,
+        max_age_days: int,
+        *,
+        protected_session_keys: Optional[set[str]] = None,
+    ) -> int:
+        """Drop old routing records without ending their conversations.
 
         Pruning is based on ``updated_at`` (last activity), not ``created_at``.
         A session that's been active within the window is kept regardless of
@@ -2003,9 +2351,14 @@ class SessionStore:
         process (via has_active_processes_fn) are also kept so long-running
         background work isn't orphaned.
 
-        Pruning is functionally identical to a natural reset-policy expiry:
-        the transcript in SQLite stays, but the session_key → session_id
-        mapping is dropped and the user starts a fresh session on return.
+        Max-age retention bounds the routing index only. It is not evidence that
+        the customer ended the logical conversation, so this method never marks
+        an entry finalized and never creates semantic-memory authority. A route
+        whose reset policy has independently expired is retained until its true
+        boundary is durably acknowledged by ``expiry_finalized``. Persisted
+        one-shot intents, auto-reset predecessors, suspended routes, protected
+        live-handler keys, and routes with active background processes are also
+        retained.
 
         ``max_age_days <= 0`` disables pruning; returns 0 immediately.
         Returns the number of entries removed.
@@ -2015,27 +2368,33 @@ class SessionStore:
         from datetime import timedelta
 
         cutoff = _now() - timedelta(days=max_age_days)
+        protected = frozenset(protected_session_keys or ())
         removed_keys: list[str] = []
 
         with self._lock:
             self._ensure_loaded_locked()
             for key, entry in list(self._entries.items()):
-                if entry.suspended:
+                if key in protected:
                     continue
-                # Never prune sessions with an active background process
-                # attached — the user may still be waiting on output.
-                # The callback is keyed by session_key (see process_registry.
-                # has_active_for_session); passing session_id here used to
-                # never match, so active sessions got pruned anyway.
-                if self._has_active_processes_fn is not None:
-                    try:
-                        if self._has_active_processes_fn(entry.session_key):
-                            continue
-                    except Exception as exc:
-                        logger.debug(
-                            "has_active_processes_fn raised during prune for %s: %s",
-                            entry.session_key, exc,
-                        )
+                if not self.is_session_age_prunable(entry, max_age_days):
+                    continue
+                try:
+                    policy_expired = self._is_reset_policy_expired(entry)
+                except Exception as exc:
+                    # A policy lookup failure must not let routing retention
+                    # bypass a boundary that may require durable finalization.
+                    logger.debug(
+                        "Reset-policy lookup failed during prune for %s: %s",
+                        entry.session_key,
+                        exc,
+                    )
+                    continue
+                if policy_expired and not entry.expiry_finalized:
+                    continue
+                # Recheck the cutoff while holding the store lock even though
+                # is_session_age_prunable() already evaluated it.  This keeps
+                # the mutation predicate obvious and protects against future
+                # helper changes that add candidate-only policy.
                 if entry.updated_at < cutoff:
                     removed_keys.append(key)
             for key in removed_keys:
@@ -2046,9 +2405,43 @@ class SessionStore:
         if removed_keys:
             logger.info(
                 "SessionStore pruned %d entries older than %d days",
-                len(removed_keys), max_age_days,
+                len(removed_keys),
+                max_age_days,
             )
         return len(removed_keys)
+
+    def is_session_age_prunable(
+        self, entry: SessionEntry, max_age_days: int
+    ) -> bool:
+        """Return whether *entry* is a nonsemantic routing-retention candidate.
+
+        Suspended sessions, pending terminal intents, sessions with a pending
+        auto-reset predecessor, and sessions that still own background processes
+        remain reachable. Reset-policy expiry is checked separately by
+        :meth:`prune_old_entries` so age retention cannot bypass its durable
+        logical boundary.
+        """
+        if max_age_days is None or max_age_days <= 0:
+            return False
+        if (
+            entry.suspended
+            or entry.previous_session_id
+            or entry.pending_finalize_reason
+        ):
+            return False
+        if self._has_active_processes_fn is not None:
+            try:
+                if self._has_active_processes_fn(entry.session_key):
+                    return False
+            except Exception as exc:
+                logger.debug(
+                    "has_active_processes_fn raised during prune for %s: %s",
+                    entry.session_key,
+                    exc,
+                )
+                return False
+        cutoff = _now() - timedelta(days=max_age_days)
+        return entry.updated_at < cutoff
 
     def suspend_recently_active(self, max_age_seconds: int = 120) -> int:
         """Mark recently-active sessions as resumable after an unexpected exit.
@@ -2086,8 +2479,35 @@ class SessionStore:
                 self._save()
         return count
 
-    def reset_session(self, session_key: str, display_name: Optional[str] = None) -> Optional[SessionEntry]:
-        """Force reset a session, creating a new session ID."""
+    def reset_session(
+        self,
+        session_key: str,
+        display_name: Optional[str] = None,
+        *,
+        expected_session_id: Optional[str] = None,
+        defer_memory_finalize_reason: Optional[str] = None,
+        end_reason: str = "session_reset",
+        auto_reset_reason: Optional[str] = None,
+    ) -> Optional[SessionEntry]:
+        """Force reset a session, creating a new session ID.
+
+        Supplying ``defer_memory_finalize_reason`` makes the routing CAS the
+        proof that the old logical session ended.  The fresh entry retains the
+        exact predecessor until Cortex admits that boundary and the caller
+        compare-and-clears it.  Semantic work can therefore never precede a
+        reset whose routing CAS later loses.
+        """
+        normalized_finalize_reason = sanitize_previous_finalize_reason(
+            defer_memory_finalize_reason
+        )
+        if (
+            defer_memory_finalize_reason is not None
+            and normalized_finalize_reason != defer_memory_finalize_reason
+        ):
+            raise ValueError(
+                "Unsupported deferred memory-finalize reason: "
+                f"{defer_memory_finalize_reason!r}"
+            )
         db_end_session_id = None
         db_create_kwargs = None
         new_entry = None
@@ -2099,6 +2519,25 @@ class SessionStore:
                 return None
 
             old_entry = self._entries[session_key]
+            if (
+                expected_session_id is not None
+                and old_entry.session_id != expected_session_id
+            ):
+                logger.warning(
+                    "Refusing stale reset for %s: expected session %s, found %s",
+                    session_key,
+                    expected_session_id,
+                    old_entry.session_id,
+                )
+                return None
+            if old_entry.previous_session_id:
+                logger.warning(
+                    "Refusing to reset session %s while prior memory boundary %s "
+                    "is still pending",
+                    old_entry.session_id,
+                    old_entry.previous_session_id,
+                )
+                return None
             db_end_session_id = old_entry.session_id
 
             now = _now()
@@ -2110,10 +2549,21 @@ class SessionStore:
                 created_at=now,
                 updated_at=now,
                 origin=old_entry.origin,
-                display_name=display_name if display_name is not None else old_entry.display_name,
+                display_name=display_name
+                if display_name is not None
+                else old_entry.display_name,
                 platform=old_entry.platform,
                 chat_type=old_entry.chat_type,
                 is_fresh_reset=True,
+                was_auto_reset=bool(auto_reset_reason),
+                auto_reset_reason=auto_reset_reason,
+                reset_had_activity=(
+                    old_entry.last_prompt_tokens > 0 if auto_reset_reason else False
+                ),
+                previous_session_id=(
+                    old_entry.session_id if normalized_finalize_reason else None
+                ),
+                previous_finalize_reason=normalized_finalize_reason,
             )
 
             self._entries[session_key] = new_entry
@@ -2130,7 +2580,7 @@ class SessionStore:
 
         if self._db and db_end_session_id:
             try:
-                self._db.end_session(db_end_session_id, "session_reset")
+                self._db.end_session(db_end_session_id, end_reason)
             except Exception as e:
                 logger.debug("Session DB operation failed: %s", e)
 
@@ -2148,13 +2598,20 @@ class SessionStore:
 
         return new_entry
 
-    def switch_session(self, session_key: str, target_session_id: str) -> Optional[SessionEntry]:
+    def switch_session(
+        self,
+        session_key: str,
+        target_session_id: str,
+        *,
+        expected_session_id: Optional[str] = None,
+        end_current: bool = True,
+    ) -> Optional[SessionEntry]:
         """Switch a session key to point at an existing session ID.
 
-        Used by ``/resume`` to restore a previously-named session.
-        Ends the current session in SQLite (like reset), but instead of
-        generating a fresh session ID, re-uses ``target_session_id`` so the
-        old transcript is loaded on the next message. If the target session was
+        Used by ``/resume`` to restore a previously-named session and by
+        ``/branch`` to publish a newly-created child. Resume ends the current
+        session in SQLite; branch passes ``end_current=False`` because a fork is
+        not proof that its source conversation ended. If the target session was
         previously ended, re-open it so gateway resume semantics match the CLI.
         """
         db_end_session_id = None
@@ -2168,11 +2625,35 @@ class SessionStore:
 
             old_entry = self._entries[session_key]
 
+            if (
+                expected_session_id is not None
+                and old_entry.session_id != expected_session_id
+            ):
+                logger.warning(
+                    "Refusing stale switch for %s: expected session %s, found %s",
+                    session_key,
+                    expected_session_id,
+                    old_entry.session_id,
+                )
+                return None
+
             # Don't switch if already on that session
             if old_entry.session_id == target_session_id:
                 return old_entry
 
-            db_end_session_id = old_entry.session_id
+            # A switch replaces the whole routing entry.  Refuse to discard an
+            # auto-reset predecessor until the async gateway lifecycle path has
+            # finalized and compare-and-cleared its durable retry token.
+            if old_entry.previous_session_id:
+                logger.warning(
+                    "Refusing to switch session %s while prior memory boundary "
+                    "%s is still pending",
+                    old_entry.session_id,
+                    old_entry.previous_session_id,
+                )
+                return None
+
+            db_end_session_id = old_entry.session_id if end_current else None
 
             now = _now()
             new_entry = SessionEntry(
@@ -2249,8 +2730,10 @@ class SessionStore:
             self._ensure_loaded_locked()
             entry = self._entries.get(session_key)
             return getattr(entry, "session_id", None) if entry else None
-    
-    def append_to_transcript(self, session_id: str, message: Dict[str, Any], skip_db: bool = False) -> None:
+
+    def append_to_transcript(
+        self, session_id: str, message: Dict[str, Any], skip_db: bool = False
+    ) -> None:
         """Append a message to a session's transcript (SQLite).
 
         Args:
@@ -2268,11 +2751,21 @@ class SessionStore:
                     tool_name=message.get("tool_name"),
                     tool_calls=message.get("tool_calls"),
                     tool_call_id=message.get("tool_call_id"),
-                    reasoning=message.get("reasoning") if message.get("role") == "assistant" else None,
-                    reasoning_content=message.get("reasoning_content") if message.get("role") == "assistant" else None,
-                    reasoning_details=message.get("reasoning_details") if message.get("role") == "assistant" else None,
-                    codex_reasoning_items=message.get("codex_reasoning_items") if message.get("role") == "assistant" else None,
-                    codex_message_items=message.get("codex_message_items") if message.get("role") == "assistant" else None,
+                    reasoning=message.get("reasoning")
+                    if message.get("role") == "assistant"
+                    else None,
+                    reasoning_content=message.get("reasoning_content")
+                    if message.get("role") == "assistant"
+                    else None,
+                    reasoning_details=message.get("reasoning_details")
+                    if message.get("role") == "assistant"
+                    else None,
+                    codex_reasoning_items=message.get("codex_reasoning_items")
+                    if message.get("role") == "assistant"
+                    else None,
+                    codex_message_items=message.get("codex_message_items")
+                    if message.get("role") == "assistant"
+                    else None,
                     # Platform-side message id (yuanbao msg_id, telegram update_id, …).
                     # Accept either explicit ``platform_message_id`` or the legacy
                     # ``message_id`` key the JSONL transcript used.
@@ -2284,7 +2777,7 @@ class SessionStore:
                 )
             except Exception as e:
                 logger.debug("Session DB operation failed: %s", e)
-    
+
     def has_platform_message_id(
         self, session_id: str, platform_message_id: str
     ) -> bool:
@@ -2297,14 +2790,14 @@ class SessionStore:
         if not self._db:
             return False
         try:
-            return self._db.has_platform_message_id(
-                session_id, platform_message_id
-            )
+            return self._db.has_platform_message_id(session_id, platform_message_id)
         except Exception:
             logger.debug("has_platform_message_id lookup failed", exc_info=True)
             return False
 
-    def rewrite_transcript(self, session_id: str, messages: List[Dict[str, Any]]) -> bool:
+    def rewrite_transcript(
+        self, session_id: str, messages: List[Dict[str, Any]]
+    ) -> bool:
         """Replace the entire transcript for a session with new messages.
 
         Used by /retry, /undo, and /compress to persist modified conversation
@@ -2389,29 +2882,45 @@ class SessionStore:
             target_text = ""
         return {
             "rewound_count": result.get("rewound_count", 0),
+            "rewound_message_ids": result.get("rewound_message_ids", []),
             "turns_undone": target_idx + 1,
             "target_text": target_text,
         }
+
+    def restore_rewind(self, session_id: str, message_ids: List[int | str]) -> bool:
+        """Compensate a rewind that could not be reconciled with durable memory."""
+
+        if not self._db:
+            return True
+        unique_ids = list(dict.fromkeys(message_ids))
+        if not unique_ids:
+            return True
+        try:
+            restored = self._db.restore_rewound_ids(session_id, unique_ids)
+            return restored == len(unique_ids)
+        except Exception as e:
+            logger.error("restore_rewind: compensation failed: %s", e, exc_info=True)
+            return False
 
 
 def build_session_context(
     source: SessionSource,
     config: GatewayConfig,
-    session_entry: Optional[SessionEntry] = None
+    session_entry: Optional[SessionEntry] = None,
 ) -> SessionContext:
     """
     Build a full session context from a source and config.
-    
+
     This is used to inject context into the agent's system prompt.
     """
     connected = config.get_connected_platforms()
-    
+
     home_channels = {}
     for platform in connected:
         home = config.get_home_channel(platform)
         if home:
             home_channels[platform] = home
-    
+
     context = SessionContext(
         source=source,
         connected_platforms=connected,
@@ -2422,11 +2931,11 @@ def build_session_context(
             thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
         ),
     )
-    
+
     if session_entry:
         context.session_key = session_entry.session_key
         context.session_id = session_entry.session_id
         context.created_at = session_entry.created_at
         context.updated_at = session_entry.updated_at
-    
+
     return context

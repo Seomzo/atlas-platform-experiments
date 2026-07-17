@@ -1351,9 +1351,18 @@ def init_agent(
     # Memory provider plugin (external — one at a time, alongside built-in)
     # Reads memory.provider from config to select which plugin to activate.
     agent._memory_manager = None
+    # Atlas Cortex owns semantic memory review at the logical session-end
+    # boundary. Selection reserves that ownership even if initialization is
+    # temporarily degraded; otherwise a provider outage would silently revive
+    # the legacy per-turn frontier-model review fork.
+    agent._cortex_memory_selected = False
+    agent._cortex_memory_active = False
     if not skip_memory:
         try:
             _mem_provider_name = mem_config.get("provider", "") if mem_config else ""
+            agent._cortex_memory_selected = (
+                str(_mem_provider_name or "").strip().lower() == "cortex"
+            )
 
             if _mem_provider_name and _mem_provider_name.strip():
                 from agent.memory_manager import MemoryManager as _MemoryManager
@@ -1368,6 +1377,7 @@ def init_agent(
                         "platform": platform or "cli",
                         "hermes_home": str(get_hermes_home()),
                         "agent_context": "primary",
+                        "tool_names": sorted(agent.valid_tool_names),
                     }
                     if _init_kwargs["platform"] == "cli":
                         _init_kwargs["warning_callback"] = agent._emit_warning
@@ -1408,13 +1418,29 @@ def init_agent(
                     except Exception:
                         pass
                     agent._memory_manager.initialize_all(**_init_kwargs)
-                    _ra().logger.info("Memory provider '%s' activated", _mem_provider_name)
+                    if agent._memory_manager.providers:
+                        _ra().logger.info(
+                            "Memory provider '%s' activated", _mem_provider_name
+                        )
+                    else:
+                        # ``initialize_all`` unregisters failed providers so
+                        # their prompt/tool surface cannot be advertised.
+                        agent._memory_manager = None
                 else:
                     _ra().logger.debug("Memory provider '%s' not found or not available", _mem_provider_name)
                     agent._memory_manager = None
         except Exception as _mpe:
             _ra().logger.warning("Memory provider plugin init failed: %s", _mpe)
             agent._memory_manager = None
+
+    if agent._memory_manager is not None:
+        try:
+            agent._cortex_memory_active = any(
+                provider.name == "cortex"
+                for provider in agent._memory_manager.providers
+            )
+        except Exception:
+            agent._cortex_memory_active = False
 
     from agent.memory_manager import inject_memory_provider_tools as _inject_memory_provider_tools
     _inject_memory_provider_tools(agent)

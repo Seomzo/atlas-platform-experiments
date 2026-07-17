@@ -330,6 +330,7 @@ class TestCliApprovalUi:
 
         class FakeAgent:
             def __init__(self, **kwargs):
+                seen["agent_kwargs"] = kwargs
                 self._print_fn = None
                 self.thinking_callback = None
 
@@ -348,6 +349,12 @@ class TestCliApprovalUi:
                     "failed": False,
                 }
 
+            def shutdown_memory_provider(self, *_args, **kwargs):
+                seen["shutdown_kwargs"] = kwargs
+
+            def close(self):
+                seen["closed"] = True
+
         with patch.object(cli_module, "AIAgent", FakeAgent), \
              patch.object(cli_module, "_cprint"), \
              patch.object(cli_module, "ChatConsole") as chat_console:
@@ -364,6 +371,9 @@ class TestCliApprovalUi:
         assert seen["approval"].__func__ is HermesCLI._approval_callback
         assert seen["sudo"].__self__ is cli
         assert seen["sudo"].__func__ is HermesCLI._sudo_password_callback
+        assert seen["agent_kwargs"]["skip_memory"] is True
+        assert seen["shutdown_kwargs"] == {"finalize": False}
+        assert seen["closed"] is True
         assert not cli._background_tasks
 
 
@@ -736,4 +746,3 @@ class TestClearOverlaysForInterrupt:
 
         assert not t.is_alive(), "worker thread never unblocked"
         assert result["value"] == "deny"
-

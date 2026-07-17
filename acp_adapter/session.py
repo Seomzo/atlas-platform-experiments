@@ -181,6 +181,12 @@ class SessionState:
     runtime_lock: Any = field(default_factory=Lock)
     current_prompt_text: str = ""
     interrupted_prompt_text: str = ""
+    # ACP exposes a stable editor-facing handle, but Hermes may rotate the
+    # physical session underneath it (context compression and /reset both do
+    # this).  Persist the live head explicitly so a restarted ACP process does
+    # not accidentally reopen the finalized root.
+    current_session_id: str = ""
+    parent_session_id: str = ""
 
 
 class SessionManager:
@@ -220,6 +226,7 @@ class SessionManager:
             cwd=cwd,
             model=getattr(agent, "model", "") or "",
             cancel_event=threading.Event(),
+            current_session_id=session_id,
         )
         with self._lock:
             self._sessions[session_id] = state
@@ -241,17 +248,88 @@ class SessionManager:
         # Attempt to restore from database.
         return self._restore(session_id)
 
-    def remove_session(self, session_id: str) -> bool:
-        """Remove a session from memory and database. Returns True if it existed."""
+    def remove_session(self, session_id: str, *, reason: str = "acp_close") -> bool:
+        """Close an ACP logical session after its durable memory boundary.
+
+        This deliberately preserves the SessionDB transcript.  ACP removal is
+        a lifecycle event, not a privacy erasure request: Cortex must observe
+        the true end boundary, and the ended transcript remains available to
+        history/search instead of being silently deleted.
+        """
         with self._lock:
-            existed = self._sessions.pop(session_id, None) is not None
-        db_existed = self._delete_persisted(session_id)
-        if existed or db_existed:
-            _clear_task_cwd(session_id)
-        return existed or db_existed
+            state = self._sessions.get(session_id)
+
+        db = self._get_db()
+        row = None
+        if db is not None:
+            try:
+                row = db.get_session(session_id)
+            except Exception:
+                logger.debug("Failed to inspect ACP session %s", session_id, exc_info=True)
+        if state is None and (
+            row is None
+            or str(row.get("end_reason") or "") in {"acp_close", "acp_shutdown"}
+        ):
+            return False
+        if state is None:
+            state = self._restore(session_id)
+
+        if state is not None:
+            with state.runtime_lock:
+                if state.is_running:
+                    logger.warning("Refusing to close running ACP session %s", session_id)
+                    return False
+                current_id = self._current_session_id(state)
+                snapshot = copy.deepcopy(state.history)
+                manager = self._memory_manager(state.agent)
+                if manager is not None:
+                    manager.on_session_finalize(snapshot, reason=reason)
+                    if hasattr(manager, "flush_pending"):
+                        manager.flush_pending(timeout=10)
+                elif bool(getattr(state.agent, "_cortex_memory_selected", False)):
+                    if not self._finalize_detached(current_id, reason=reason):
+                        return False
+        else:
+            current_id = session_id
+            if db is not None:
+                try:
+                    current_id = db.get_compression_tip(session_id) or session_id
+                except Exception:
+                    pass
+            if not self._finalize_detached(current_id, reason=reason):
+                return False
+
+        # Publish the terminal SessionDB state only after Cortex accepted the
+        # boundary.  The public ACP handle and a rotated internal head can be
+        # distinct rows, so close both (end_session is idempotent).
+        if db is not None:
+            try:
+                db.end_session(current_id, reason)
+                if current_id != session_id:
+                    db.end_session(session_id, reason)
+            except Exception:
+                logger.warning(
+                    "Could not close SessionDB rows for ACP session %s",
+                    session_id,
+                    exc_info=True,
+                )
+                return False
+
+        with self._lock:
+            removed = self._sessions.pop(session_id, None)
+        if removed is not None:
+            self._shutdown_agent_nonfinalizing(
+                removed.agent,
+                snapshot,
+                boundary_finalized=True,
+            )
+        _clear_task_cwd(session_id)
+        if current_id != session_id:
+            _clear_task_cwd(current_id)
+        return True
 
     def fork_session(self, session_id: str, cwd: str = ".") -> Optional[SessionState]:
-        """Deep-copy a session's history into a new session."""
+        """Deep-copy a session while preserving durable parent lineage."""
         import threading
 
         cwd = _translate_acp_cwd(cwd)
@@ -259,26 +337,128 @@ class SessionManager:
         if original is None:
             return None
 
-        new_id = str(uuid.uuid4())
-        agent = self._make_agent(
-            session_id=new_id,
-            cwd=cwd,
-            model=original.model or None,
-        )
-        state = SessionState(
-            session_id=new_id,
-            agent=agent,
-            cwd=cwd,
-            model=getattr(agent, "model", original.model) or original.model,
-            history=copy.deepcopy(original.history),
-            cancel_event=threading.Event(),
-        )
-        with self._lock:
-            self._sessions[new_id] = state
-        _register_task_cwd(new_id, cwd)
-        self._persist(state)
-        logger.info("Forked ACP session %s -> %s", session_id, new_id)
-        return state
+        with original.runtime_lock:
+            if original.is_running:
+                logger.warning("Refusing to fork running ACP session %s", session_id)
+                return None
+
+            parent_id = self._current_session_id(original)
+            new_id = str(uuid.uuid4())
+            child_agent = None
+            lineage_prepared = False
+            source_binding_safe = True
+            db = self._get_db()
+            try:
+                if db is not None:
+                    db.create_session(
+                        session_id=new_id,
+                        source="acp",
+                        model=str(original.model) if original.model else None,
+                        model_config={
+                            "cwd": cwd,
+                            "current_session_id": new_id,
+                            "_branched_from": parent_id,
+                        },
+                        parent_session_id=parent_id,
+                    )
+
+                manager = self._memory_manager(original.agent)
+                if manager is not None:
+                    # A fork does not end its source.  Use the provider's
+                    # switch contract only to create the child lineage, then
+                    # immediately restore the source binding before publishing
+                    # either state.  The runtime lock keeps turns out while the
+                    # provider is transiently rebound.
+                    try:
+                        manager.on_session_switch(
+                            new_id,
+                            parent_session_id=parent_id,
+                            reset=False,
+                            reason="branch",
+                        )
+                        lineage_prepared = True
+                    finally:
+                        try:
+                            manager.on_session_switch(
+                                parent_id,
+                                parent_session_id="",
+                                reset=False,
+                                reason="resume",
+                            )
+                        except Exception:
+                            source_binding_safe = False
+                            raise
+                elif bool(getattr(original.agent, "_cortex_memory_selected", False)):
+                    raise RuntimeError(
+                        "Cortex fork lineage unavailable for the live ACP agent"
+                    )
+
+                child_agent = self._make_agent(
+                    session_id=new_id,
+                    cwd=cwd,
+                    model=original.model or None,
+                    parent_session_id=parent_id,
+                )
+                state = SessionState(
+                    session_id=new_id,
+                    agent=child_agent,
+                    cwd=cwd,
+                    model=getattr(child_agent, "model", original.model) or original.model,
+                    history=copy.deepcopy(original.history),
+                    cancel_event=threading.Event(),
+                    current_session_id=new_id,
+                    parent_session_id=parent_id,
+                )
+                self._persist(state, raise_on_error=True)
+                self._prime_agent_persistence(child_agent, db, len(state.history))
+            except Exception:
+                logger.warning(
+                    "Failed to durably fork ACP session %s",
+                    session_id,
+                    exc_info=True,
+                )
+                if child_agent is not None:
+                    self._shutdown_agent_nonfinalizing(child_agent, [])
+                branch_discarded = True
+                if lineage_prepared:
+                    branch_discarded = self._discard_detached_branch(
+                        parent_id,
+                        new_session_id=new_id,
+                    )
+                    if not branch_discarded:
+                        logger.error(
+                            "Could not hide unpublished ACP Cortex fork %s",
+                            new_id,
+                        )
+                if not source_binding_safe:
+                    # The old provider could still be pointed at the rejected
+                    # child. Evict that runtime non-finalizingly; a later prompt
+                    # restores a clean agent at the persisted parent head.
+                    with self._lock:
+                        self._sessions.pop(session_id, None)
+                    self._shutdown_agent_nonfinalizing(
+                        original.agent,
+                        copy.deepcopy(original.history),
+                    )
+                if db is not None and branch_discarded:
+                    try:
+                        db.delete_session(new_id)
+                    except Exception:
+                        logger.debug(
+                            "Could not discard unpublished ACP fork %s",
+                            new_id,
+                            exc_info=True,
+                        )
+                return None
+
+            # Publication is last: neither the in-memory route nor cwd/tool
+            # binding becomes visible until Cortex lineage and SessionDB copy
+            # have both succeeded.
+            with self._lock:
+                self._sessions[new_id] = state
+            _register_task_cwd(new_id, cwd)
+            logger.info("Forked ACP session %s -> %s", session_id, new_id)
+            return state
 
     def list_sessions(self, cwd: str | None = None) -> List[Dict[str, Any]]:
         """Return lightweight info dicts for all sessions (memory + database)."""
@@ -365,25 +545,202 @@ class SessionManager:
         self._persist(state)
         return state
 
-    def cleanup(self) -> None:
-        """Remove all sessions (memory and database) and clear task-specific cwd overrides."""
-        with self._lock:
-            session_ids = list(self._sessions.keys())
-            self._sessions.clear()
-        for session_id in session_ids:
-            _clear_task_cwd(session_id)
-            self._delete_persisted(session_id)
-        # Also remove any DB-only ACP sessions not currently in memory.
-        db = self._get_db()
-        if db is not None:
+    def reset_session(self, session_id: str) -> Optional[SessionState]:
+        """Commit a true logical reset while retaining the stable ACP handle.
+
+        Cortex receives an atomic old-head -> new-head boundary before the
+        transcript or agent identity is mutated.  The cheap semantic worker is
+        merely queued by that commit; it never blocks this reset.
+        """
+        state = self.get_session(session_id)
+        if state is None:
+            return None
+
+        with state.runtime_lock:
+            if state.is_running:
+                logger.warning("Refusing to reset running ACP session %s", session_id)
+                return None
+
+            old_id = self._current_session_id(state)
+            new_id = str(uuid.uuid4())
+            snapshot = copy.deepcopy(state.history)
+            db = self._get_db()
+
+            # Prepare the private physical row first. It is not discoverable as
+            # an ACP session and is discarded if the memory boundary fails.
+            if db is not None:
+                db.create_session(
+                    session_id=new_id,
+                    source="acp_internal",
+                    model=str(state.model) if state.model else None,
+                    model_config={
+                        "cwd": state.cwd,
+                        "_acp_owner_session_id": state.session_id,
+                        "_reset_from": old_id,
+                    },
+                    parent_session_id=old_id,
+                )
+
+            manager = self._memory_manager(state.agent)
             try:
-                rows = db.search_sessions(source="acp", limit=10000)
-                for row in rows:
-                    sid = row["id"]
-                    _clear_task_cwd(sid)
-                    db.delete_session(sid)
+                if manager is not None:
+                    manager.commit_session_boundary_async(
+                        snapshot,
+                        new_session_id=new_id,
+                        parent_session_id=old_id,
+                        reason="reset",
+                        reset=True,
+                    )
+                    if hasattr(manager, "flush_pending"):
+                        manager.flush_pending(timeout=10)
+                elif bool(getattr(state.agent, "_cortex_memory_selected", False)):
+                    if not self._commit_detached_boundary(
+                        old_id,
+                        new_session_id=new_id,
+                        parent_session_id=old_id,
+                        reason="reset",
+                        reset=True,
+                    ):
+                        raise RuntimeError("detached Cortex reset boundary failed")
             except Exception:
-                logger.debug("Failed to cleanup ACP sessions from DB", exc_info=True)
+                if db is not None:
+                    try:
+                        db.delete_session(new_id)
+                    except Exception:
+                        logger.debug(
+                            "Could not discard unpublished ACP reset target %s",
+                            new_id,
+                            exc_info=True,
+                        )
+                raise
+
+            # The durable provider now owns the new head. From this point on we
+            # complete the local rebind rather than pretending the old session
+            # remained usable if a best-effort cleanup operation fails.
+            try:
+                if hasattr(state.agent, "commit_memory_session"):
+                    state.agent.commit_memory_session(
+                        snapshot,
+                        checkpoint_memory=False,
+                    )
+            except Exception:
+                logger.debug("ACP reset context-engine close failed", exc_info=True)
+
+            state.current_session_id = new_id
+            try:
+                state.agent.session_id = new_id
+            except Exception:
+                pass
+            try:
+                state.agent.session_start = datetime.now(timezone.utc)
+            except Exception:
+                pass
+            try:
+                state.agent.reset_session_state()
+            except Exception:
+                logger.debug("ACP agent reset_session_state failed", exc_info=True)
+            try:
+                state.agent._session_messages = []
+                state.agent._last_flushed_db_idx = 0
+                state.agent._session_db_created = db is not None
+            except Exception:
+                pass
+            state.history.clear()
+            state.queued_prompts.clear()
+            state.current_prompt_text = ""
+            state.interrupted_prompt_text = ""
+
+            # Persist the stable-handle -> live-head mapping before the caller
+            # publishes the /reset response.  The child row already exists, so
+            # this is an idempotent local metadata update.
+            self._persist(state, raise_on_error=True)
+            if db is not None and old_id != state.session_id:
+                db.end_session(old_id, "reset")
+            _register_task_cwd(new_id, state.cwd)
+            logger.info(
+                "Reset ACP logical session %s (%s -> %s)",
+                state.session_id,
+                old_id,
+                new_id,
+            )
+            return state
+
+    def replace_agent(
+        self,
+        session_id: str,
+        *,
+        model: str,
+        requested_provider: str | None = None,
+        base_url: str | None = None,
+        api_mode: str | None = None,
+    ) -> Optional[SessionState]:
+        """Replace an ACP model runtime without ending the logical session."""
+        state = self.get_session(session_id)
+        if state is None:
+            return None
+        with state.runtime_lock:
+            if state.is_running:
+                logger.warning(
+                    "Refusing to replace model for running ACP session %s",
+                    session_id,
+                )
+                return None
+            current_id = self._current_session_id(state)
+            old_agent = state.agent
+            replacement = self._make_agent(
+                session_id=current_id,
+                cwd=state.cwd,
+                model=model,
+                requested_provider=requested_provider,
+                base_url=base_url,
+                api_mode=api_mode,
+                parent_session_id=state.parent_session_id,
+            )
+            old_model = state.model
+            state.agent = replacement
+            state.model = model
+            state.current_session_id = current_id
+            try:
+                self._persist(state, raise_on_error=True)
+            except Exception:
+                state.agent = old_agent
+                state.model = old_model
+                self._shutdown_agent_nonfinalizing(replacement, [])
+                raise
+            self._prime_agent_persistence(
+                replacement,
+                self._get_db(),
+                len(state.history),
+            )
+            self._shutdown_agent_nonfinalizing(old_agent, copy.deepcopy(state.history))
+            return state
+
+    def cleanup(self) -> None:
+        """Persist and release process-local ACP resources without finalizing.
+
+        Server/process teardown is not evidence that the customer's logical
+        conversation ended.  Keep SessionDB and Cortex sessions resumable and
+        use only the non-finalizing compatibility checkpoint while closing live
+        runtimes.  ``remove_session`` is the explicit true-close surface.
+        """
+        with self._lock:
+            states = list(self._sessions.values())
+            self._sessions.clear()
+        for state in states:
+            snapshot = copy.deepcopy(state.history)
+            try:
+                self._persist(state)
+            except Exception:
+                logger.debug(
+                    "Failed to persist ACP session %s during process cleanup",
+                    state.session_id,
+                    exc_info=True,
+                )
+            self._shutdown_agent_nonfinalizing(state.agent, snapshot)
+            _clear_task_cwd(state.session_id)
+            current_id = self._current_session_id(state)
+            if current_id != state.session_id:
+                _clear_task_cwd(current_id)
 
     def save_session(self, session_id: str) -> None:
         """Persist the current state of a session to the database.
@@ -420,7 +777,7 @@ class SessionManager:
             logger.debug("SessionDB unavailable for ACP persistence", exc_info=True)
             return None
 
-    def _persist(self, state: SessionState) -> None:
+    def _persist(self, state: SessionState, *, raise_on_error: bool = False) -> bool:
         """Write session state to the database.
 
         Creates the session record if it doesn't exist, then replaces all
@@ -428,11 +785,18 @@ class SessionManager:
         """
         db = self._get_db()
         if db is None:
-            return
+            return True
 
         # Ensure model is a plain string (not a MagicMock or other proxy).
         model_str = str(state.model) if state.model else None
-        session_meta = {"cwd": state.cwd}
+        current_session_id = self._current_session_id(state)
+        state.current_session_id = current_session_id
+        session_meta = {
+            "cwd": state.cwd,
+            "current_session_id": current_session_id,
+        }
+        if state.parent_session_id:
+            session_meta["_branched_from"] = state.parent_session_id
         provider = getattr(state.agent, "provider", None)
         base_url = getattr(state.agent, "base_url", None)
         api_mode = getattr(state.agent, "api_mode", None)
@@ -452,7 +816,8 @@ class SessionManager:
                     session_id=state.session_id,
                     source="acp",
                     model=model_str,
-                    model_config={"cwd": state.cwd},
+                    model_config=session_meta,
+                    parent_session_id=state.parent_session_id or None,
                 )
             else:
                 # Update model_config (contains cwd) if changed.
@@ -460,6 +825,24 @@ class SessionManager:
                     db.update_session_meta(state.session_id, cwd_json, model_str)
                 except Exception:
                     logger.debug("Failed to update ACP session metadata", exc_info=True)
+                    if raise_on_error:
+                        raise
+
+            # A reset keeps the public ACP handle stable while rotating the
+            # physical Hermes head. Ensure that private head exists, but keep it
+            # out of ACP list/load discovery as a separate editor session.
+            if current_session_id != state.session_id:
+                current_row = db.get_session(current_session_id)
+                if current_row is None:
+                    db.create_session(
+                        session_id=current_session_id,
+                        source="acp_internal",
+                        model=model_str,
+                        model_config={
+                            "cwd": state.cwd,
+                            "_acp_owner_session_id": state.session_id,
+                        },
+                    )
 
             # When the agent owns persistence to this same SessionDB it has
             # already flushed the live transcript incrementally during
@@ -496,14 +879,18 @@ class SessionManager:
                 # archived turns untouched; otherwise the destructive replace is
                 # safe (fresh create/fork with no archived history to lose).
                 try:
-                    has_archived = db.has_archived_messages(state.session_id)
+                    has_archived = db.has_archived_messages(current_session_id)
                 except Exception:
                     has_archived = False
                 db.replace_messages(
-                    state.session_id, state.history, active_only=has_archived
+                    current_session_id, state.history, active_only=has_archived
                 )
+            return True
         except Exception:
             logger.warning("Failed to persist ACP session %s", state.session_id, exc_info=True)
+            if raise_on_error:
+                raise
+            return False
 
     def _restore(self, session_id: str) -> Optional[SessionState]:
         """Load a session from the database into memory, recreating the AIAgent."""
@@ -532,29 +919,54 @@ class SessionManager:
         restored_base_url = row.get("billing_base_url")
         restored_api_mode = None
         mc = row.get("model_config")
+        current_session_id = session_id
         if mc:
             try:
                 meta = json.loads(mc)
                 if isinstance(meta, dict):
                     cwd = meta.get("cwd", ".")
+                    current_session_id = str(
+                        meta.get("current_session_id") or session_id
+                    )
                     requested_provider = meta.get("provider") or requested_provider
                     restored_base_url = meta.get("base_url") or restored_base_url
                     restored_api_mode = meta.get("api_mode") or restored_api_mode
             except (json.JSONDecodeError, TypeError):
                 pass
 
+        try:
+            current_session_id = (
+                db.get_compression_tip(current_session_id) or current_session_id
+            )
+        except Exception:
+            pass
+
+        # Compression ends the stable root while moving the live transcript to
+        # a continuation, so an ended public row alone is not terminal.  An ACP
+        # close/shutdown marker on either the route or its current head is.
+        terminal_reasons = {"acp_close", "acp_shutdown"}
+        if str(row.get("end_reason") or "") in terminal_reasons:
+            return None
+        if current_session_id != session_id:
+            try:
+                current_row = db.get_session(current_session_id)
+            except Exception:
+                current_row = None
+            if current_row and str(current_row.get("end_reason") or "") in terminal_reasons:
+                return None
+
         model = row.get("model") or None
 
         # Load conversation history.
         try:
-            history = db.get_messages_as_conversation(session_id)
+            history = db.get_messages_as_conversation(current_session_id)
         except Exception:
             logger.warning("Failed to load messages for ACP session %s", session_id, exc_info=True)
             history = []
 
         try:
             agent = self._make_agent(
-                session_id=session_id,
+                session_id=current_session_id,
                 cwd=cwd,
                 model=model,
                 requested_provider=requested_provider,
@@ -572,25 +984,172 @@ class SessionManager:
             model=model or getattr(agent, "model", "") or "",
             history=history,
             cancel_event=threading.Event(),
+            current_session_id=current_session_id,
+            parent_session_id=str(row.get("parent_session_id") or ""),
         )
+        self._prime_agent_persistence(agent, db, len(history))
         with self._lock:
             self._sessions[session_id] = state
         _register_task_cwd(session_id, cwd)
         logger.info("Restored ACP session %s from DB (%d messages)", session_id, len(history))
         return state
 
-    def _delete_persisted(self, session_id: str) -> bool:
-        """Delete a session from the database. Returns True if it existed."""
-        db = self._get_db()
-        if db is None:
-            return False
+    # ---- internal -----------------------------------------------------------
+
+    @staticmethod
+    def _memory_manager(agent: Any) -> Any | None:
+        manager = getattr(agent, "_memory_manager", None)
+        # Test doubles frequently expose arbitrary attributes as mocks.  A
+        # usable manager must at least provide one lifecycle method.
+        if manager is None or not (
+            callable(getattr(manager, "on_session_finalize", None))
+            or callable(getattr(manager, "commit_session_boundary_async", None))
+        ):
+            return None
+        return manager
+
+    @staticmethod
+    def _current_session_id(state: SessionState) -> str:
+        agent_id = getattr(state.agent, "session_id", None)
+        if isinstance(agent_id, str) and agent_id.strip():
+            return agent_id.strip()
+        if isinstance(state.current_session_id, str) and state.current_session_id.strip():
+            return state.current_session_id.strip()
+        return state.session_id
+
+    @staticmethod
+    def _shutdown_agent_nonfinalizing(
+        agent: Any,
+        messages: List[Dict[str, Any]],
+        *,
+        boundary_finalized: bool = False,
+    ) -> None:
+        """Release one runtime without publishing a logical session end."""
+        if agent is None:
+            return
         try:
-            return db.delete_session(session_id)
+            agent._end_session_on_close = False
         except Exception:
-            logger.debug("Failed to delete ACP session %s from DB", session_id, exc_info=True)
+            pass
+        if boundary_finalized:
+            # The true boundary already captured the terminal evidence epoch.
+            # Close context/provider resources without a second durable
+            # checkpoint, which would otherwise write after finalization.
+            try:
+                commit_context = getattr(agent, "commit_memory_session", None)
+                if callable(commit_context):
+                    commit_context(
+                        copy.deepcopy(messages or []),
+                        checkpoint_memory=False,
+                    )
+            except Exception:
+                logger.debug("ACP context resource close failed", exc_info=True)
+            try:
+                manager = getattr(agent, "_memory_manager", None)
+                if manager is not None and hasattr(manager, "shutdown_all"):
+                    manager.shutdown_all()
+                agent._memory_manager = None
+            except Exception:
+                logger.warning("ACP memory provider shutdown failed", exc_info=True)
+        else:
+            try:
+                shutdown = getattr(agent, "shutdown_memory_provider", None)
+                if callable(shutdown):
+                    shutdown(copy.deepcopy(messages or []), finalize=False)
+            except Exception:
+                logger.warning("ACP non-finalizing memory shutdown failed", exc_info=True)
+        try:
+            close = getattr(agent, "close", None)
+            if callable(close):
+                close()
+        except Exception:
+            logger.debug("ACP agent close failed", exc_info=True)
+
+    @staticmethod
+    def _prime_agent_persistence(agent: Any, db: Any, history_len: int) -> None:
+        """Tell a replacement/restored agent which DB prefix already exists."""
+        if agent is None or db is None:
+            return
+        try:
+            if getattr(agent, "_session_db", None) is db:
+                agent._session_db_created = True
+                agent._last_flushed_db_idx = max(0, int(history_len))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _finalize_detached(session_id: str, *, reason: str) -> bool:
+        try:
+            from altas.cortex.lifecycle import finalize_detached_session
+
+            return bool(
+                finalize_detached_session(
+                    get_hermes_home(),
+                    session_id,
+                    reason=reason,
+                )
+            )
+        except Exception:
+            logger.warning(
+                "Detached Cortex finalization failed for ACP session %s",
+                session_id,
+                exc_info=True,
+            )
             return False
 
-    # ---- internal -----------------------------------------------------------
+    @staticmethod
+    def _commit_detached_boundary(
+        session_id: str,
+        *,
+        new_session_id: str,
+        parent_session_id: str,
+        reason: str,
+        reset: bool,
+    ) -> bool:
+        try:
+            from altas.cortex.lifecycle import commit_detached_session_boundary
+
+            return bool(
+                commit_detached_session_boundary(
+                    get_hermes_home(),
+                    session_id,
+                    new_session_id=new_session_id,
+                    parent_session_id=parent_session_id,
+                    reason=reason,
+                    reset=reset,
+                )
+            )
+        except Exception:
+            logger.warning(
+                "Detached Cortex boundary failed for ACP session %s",
+                session_id,
+                exc_info=True,
+            )
+            return False
+
+    @staticmethod
+    def _discard_detached_branch(
+        session_id: str,
+        *,
+        new_session_id: str,
+    ) -> bool:
+        try:
+            from altas.cortex.lifecycle import discard_detached_session_branch
+
+            return bool(
+                discard_detached_session_branch(
+                    get_hermes_home(),
+                    session_id,
+                    new_session_id=new_session_id,
+                )
+            )
+        except Exception:
+            logger.warning(
+                "Detached Cortex branch discard failed for ACP child %s",
+                new_session_id,
+                exc_info=True,
+            )
+            return False
 
     def _make_agent(
         self,
@@ -601,9 +1160,17 @@ class SessionManager:
         requested_provider: str | None = None,
         base_url: str | None = None,
         api_mode: str | None = None,
+        parent_session_id: str | None = None,
     ):
         if self._agent_factory is not None:
-            return self._agent_factory()
+            agent = self._agent_factory()
+            try:
+                existing_id = getattr(agent, "session_id", None)
+                if not isinstance(existing_id, str) or not existing_id.strip():
+                    agent.session_id = session_id
+            except Exception:
+                pass
+            return agent
 
         from run_agent import AIAgent
         from hermes_cli.config import load_config
@@ -635,6 +1202,7 @@ class SessionManager:
             "session_id": session_id,
             "session_db": self._get_db(),
             "model": model or default_model,
+            "parent_session_id": parent_session_id,
         }
 
         try:

@@ -132,10 +132,23 @@ The current prototype:
 - Uses fixture data, not a live Tekion connector.
 - Runs the fixture workflow directly; it does not yet launch or supervise a
   Hermes engine process.
-- Enables the Hermes dispatch guard only when the Atlas provider selects
-  managed mode. The upstream developer CLI remains intentionally unmanaged and
-  is not the commercial worker. A production supervisor must set managed mode,
-  isolate the process, and restrict network egress before launching the engine.
+- Enables the Hermes dispatch guard only inside an authenticated, context-local
+  managed request scope. The Atlas provider does not toggle managed mode
+  process-wide. The upstream developer CLI remains intentionally unmanaged and
+  is not the commercial worker. A production supervisor must create the scoped
+  authorization, isolate the process, and restrict network egress before
+  launching the conversational engine.
+- Binds official managed Cortex execution end to end with a strict persisted
+  local-job provenance envelope. The shipped worker compares it to the exact
+  next admitted Cortex job and leases only that job; claim, model, and atomic
+  usage-reservation paths require the same dedicated admission and
+  constant-time header match. Generic job queue/requeue routes reject Cortex,
+  and invalid legacy/tampered active jobs are terminally quarantined.
+- This Cortex provenance contract is official-runtime path integrity, not
+  remote attestation. The control plane still trusts an authenticated device's
+  claim about its owner-local database. A compromised device can fabricate
+  local state until production adds hardware-backed identity/attestation and
+  proof-bound inference credentials.
 - Does not provide production Windows/Linux credential-vault adapters.
 - Does not ship an OS sandbox, egress firewall, signed updater, SBOM, SSO,
   Stripe integration, or formal data-retention system.

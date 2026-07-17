@@ -2305,6 +2305,43 @@ class TestBulkDeleteSessions:
         # Unlisted survives.
         assert db.get_session("c") is not None
 
+    def test_explicit_delete_closure_expands_logical_and_delegate_lineages(self, db):
+        db.create_session(session_id="root", source="cli")
+        db.end_session("root", end_reason="compression")
+        db.create_session(
+            session_id="tip", source="cli", parent_session_id="root"
+        )
+        db.create_session(
+            session_id="branch",
+            source="cli",
+            parent_session_id="tip",
+            model_config={"_branched_from": "tip"},
+        )
+        db.create_session(
+            session_id="delegate",
+            source="tool",
+            parent_session_id="tip",
+            model_config={"_delegate_from": "tip"},
+        )
+        db.end_session("delegate", end_reason="compression")
+        db.create_session(
+            session_id="delegate-tip",
+            source="tool",
+            parent_session_id="delegate",
+        )
+
+        closure = db.get_session_delete_closure(["tip"])
+
+        assert closure == ["root", "tip", "delegate", "delegate-tip"]
+        assert "branch" not in closure
+
+    def test_explicit_delete_closure_ignores_unknown_ids(self, db):
+        db.create_session(session_id="real", source="cli")
+
+        assert db.get_session_delete_closure(["ghost", "real", "ghost"]) == [
+            "real"
+        ]
+
     def test_returns_real_count_skipping_unknown_ids(self, db):
         """Unknown IDs are silently skipped — the return value reflects
         what was *actually* deleted, so the UI can show an accurate
@@ -2389,6 +2426,74 @@ class TestBulkDeleteSessions:
         assert not (tmp_path / "s1.jsonl").exists()
         assert not (tmp_path / "s2.json").exists()
 
+    def test_coordinated_exact_delete_runs_barrier_before_db_mutation(self, db):
+        db.create_session(session_id="parent", source="cli")
+        db.create_session(
+            session_id="late-delegate",
+            source="tool",
+            parent_session_id="parent",
+            model_config={"_delegate_from": "parent"},
+        )
+        observed = []
+
+        def before_delete(session_ids):
+            observed.append(tuple(session_ids))
+            assert db._conn.execute(
+                "SELECT COUNT(*) FROM sessions WHERE id='parent'"
+            ).fetchone()[0] == 1
+
+        deleted = db.delete_sessions(
+            ["parent"],
+            before_delete=before_delete,
+            exact_scope=True,
+        )
+
+        assert deleted == 1
+        assert observed == [("parent",)]
+        assert db.get_session("parent") is None
+        delegate = db.get_session("late-delegate")
+        assert delegate is not None
+        assert delegate["parent_session_id"] is None
+
+    def test_coordinated_detached_delete_rejects_unended_row_before_barrier(self, db):
+        from hermes_state import ActiveSessionDeleteConflict
+
+        db.create_session(session_id="live", source="acp")
+        observed = []
+
+        with pytest.raises(ActiveSessionDeleteConflict):
+            db.delete_sessions(
+                ["live"],
+                before_delete=lambda ids: observed.append(ids),
+                exact_scope=True,
+                require_ended=True,
+            )
+
+        assert observed == []
+        assert db.get_session("live") is not None
+
+    def test_coordinated_delete_rejects_stale_related_scope_before_barrier(self, db):
+        db.create_session(session_id="compressed-parent", source="cli")
+        db.end_session("compressed-parent", end_reason="compression")
+        db.create_session(
+            session_id="late-compression-tip",
+            source="cli",
+            parent_session_id="compressed-parent",
+        )
+        observed = []
+
+        with pytest.raises(RuntimeError, match="scope changed"):
+            db.delete_sessions(
+                ["compressed-parent"],
+                before_delete=lambda ids: observed.append(ids),
+                exact_scope=True,
+                validate_related_scope=True,
+            )
+
+        assert observed == []
+        assert db.get_session("compressed-parent") is not None
+        assert db.get_session("late-compression-tip") is not None
+
 
 class TestDeleteEmptySessions:
     """``delete_empty_sessions`` sweeps every ended, non-archived session
@@ -2406,7 +2511,9 @@ class TestDeleteEmptySessions:
     4. Children of a deleted parent are orphaned (parent_session_id →
        NULL) rather than cascade-deleted, matching the
        ``delete_session`` / ``prune_sessions`` contract.
-    5. The pre-DB count matches the post-DB delete return value.
+    5. A physical compression segment is kept when any segment in its logical
+       conversation is not itself an empty-session candidate.
+    6. The pre-DB count matches the post-DB delete return value.
     """
 
     def test_count_and_delete_empties_only(self, db):
@@ -2429,6 +2536,23 @@ class TestDeleteEmptySessions:
         assert db.get_session("empty2") is None
         assert db.get_session("hasmsg") is not None
         assert db.count_empty_sessions() == 0
+
+    def test_skips_empty_segment_when_compression_lineage_survives(self, db):
+        db.create_session(session_id="empty-root", source="cli")
+        db.end_session("empty-root", end_reason="compression")
+        db.create_session(
+            session_id="nonempty-tip",
+            source="cli",
+            parent_session_id="empty-root",
+        )
+        db.append_message("nonempty-tip", role="user", content="Keep this tip")
+        db.end_session("nonempty-tip", end_reason="done")
+
+        assert db.list_empty_session_ids() == []
+        assert db.count_empty_sessions() == 0
+        assert db.delete_empty_sessions() == 0
+        assert db.get_session("empty-root") is not None
+        assert db.get_session("nonempty-tip") is not None
 
     def test_skips_active_empty_sessions(self, db):
         """A live (un-ended) empty session is what you get during the
@@ -2504,6 +2628,24 @@ class TestDeleteEmptySessions:
         assert deleted == 1
         assert not dump.exists()
         assert not transcript.exists()
+
+    def test_exact_candidate_snapshot_never_sweeps_later_empty_session(self, db):
+        db.create_session(session_id="first", source="cli")
+        db.end_session("first", end_reason="done")
+        candidates = db.list_empty_session_ids()
+        db.create_session(session_id="later", source="cli")
+        db.end_session("later", end_reason="done")
+        observed = []
+
+        deleted = db.delete_empty_sessions(
+            candidate_ids=candidates,
+            before_delete=lambda session_ids: observed.append(tuple(session_ids)),
+        )
+
+        assert deleted == 1
+        assert observed == [("first",)]
+        assert db.get_session("first") is None
+        assert db.get_session("later") is not None
 
 
 # =========================================================================

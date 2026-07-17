@@ -853,7 +853,9 @@ export const zh: Translations = {
       defaultsFailed: '保存模型默认值失败',
       auxiliaryTitle: '辅助模型',
       resetAllToMain: '全部重置为主模型',
+      resetHelpersToMain: '将辅助模型重置为主模型',
       auxiliaryDesc: '辅助任务默认使用主模型。你可以为任意任务指定专用模型。',
+      cortexDedicatedNote: 'Cortex 记忆模型会保留其专用路由。',
       setToMain: '设为主模型',
       change: '更改',
       autoUseMain: '自动 · 使用主模型',
@@ -2000,8 +2002,7 @@ export const zh: Translations = {
     copy: '复制',
     copied: '已复制',
     done: '完成',
-    applyingBody:
-      'Atlas 更新器会在自己的窗口中接管，并在完成后自动重新打开 Atlas。更新期间请不要自行重新打开 Atlas。',
+    applyingBody: 'Atlas 更新器会在自己的窗口中接管，并在完成后自动重新打开 Atlas。更新期间请不要自行重新打开 Atlas。',
     applyingBodyBackend: '远程后端正在应用更新并将重启。恢复后 Atlas 会自动重新连接。',
     applyingClose: '此窗口会在更新期间关闭，随后 Atlas 会自动重新打开。',
     errorTitle: '更新未完成',
@@ -2119,7 +2120,31 @@ export const zh: Translations = {
     price: (input, output) => `${input} 输入 / ${output} 输出每 Mtok`,
     change: '更改',
     startChatting: '开始',
-    docs: provider => `${provider} 文档`
+    docs: provider => `${provider} 文档`,
+    memoryModel: {
+      title: '选择记忆模型',
+      loading: '正在加载专用记忆模型…',
+      dedicatedModel: '记忆模型',
+      chatModel: '对话模型',
+      routeLabel: '独立路由 · 仅在会话结束时运行',
+      description:
+        '逻辑会话结束后，Atlas 会将有限的会话证据发送给此专用模型，用于整理长期记忆。它不会在实时对话中运行，也不会回退到你的对话模型。',
+      recommended: '推荐',
+      pickerTitle: '更改记忆模型',
+      pickerDescription: '选择一个已连接、专用于会话结束记忆处理的模型。',
+      search: '筛选提供方和模型…',
+      noModels: '没有符合条件的记忆模型。',
+      notConnected: '未连接',
+      unavailable: '不可用',
+      finishSetup: '完成设置',
+      errorTitle: '记忆模型设置需要处理',
+      connectProvider: provider => `连接 ${provider} 作为记忆模型`,
+      connectDescription: provider => `添加 ${provider} 作为专用记忆提供方。你已选择的对话模型将保持不变。`,
+      chatModelUnchanged: '· 对话模型保持不变',
+      apiKeyPlaceholder: keyEnv => `粘贴 ${keyEnv}`,
+      connectAndContinue: '连接并选择记忆模型',
+      connectingProvider: '正在连接记忆提供方…'
+    }
   },
 
   modelPicker: {

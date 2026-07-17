@@ -1,5 +1,7 @@
 """Focused tests for API server session-control endpoints."""
 
+import asyncio
+import threading
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -7,6 +9,8 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from gateway.config import PlatformConfig
+from altas.cortex.models import EvidenceInput
+from altas.cortex.runtime import open_cortex_store
 from gateway.platforms.api_server import APIServerAdapter
 from hermes_state import SessionDB
 
@@ -49,6 +53,49 @@ def _create_session_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_post("/api/sessions/{session_id}/chat", adapter._handle_session_chat)
     app.router.add_post("/api/sessions/{session_id}/chat/stream", adapter._handle_session_chat_stream)
     return app
+
+
+def _write_cortex_config(home, *, provider="cortex", enabled=True):
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.yaml").write_text(
+        f"""
+memory:
+  provider: {provider}
+cortex:
+  enabled: {str(enabled).lower()}
+  storage:
+    backend: sqlite
+    path: cortex/cortex.db
+  capture:
+    enabled: true
+  dream:
+    enabled: false
+  graphrag:
+    enabled: false
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+
+def _seed_cortex_turn(home, session_id):
+    store, _ = open_cortex_store(home, {})
+    store.ensure_session(session_id)
+    evidence_id = store.append_evidence(
+        session_id,
+        EvidenceInput(
+            source_type="user_message",
+            source_locator=f"{session_id}:turn:1:user",
+            content="remember the customer prefers concise status updates",
+        ),
+    )
+    store.add_observation(
+        session_id=session_id,
+        kind="preference",
+        text="The customer prefers concise status updates",
+        evidence_ids=[evidence_id],
+        processing_state="pending",
+    )
+    return store
 
 
 @pytest.mark.asyncio
@@ -170,6 +217,420 @@ async def test_session_crud_and_message_history(adapter, session_db):
 
 
 @pytest.mark.asyncio
+async def test_patch_end_owns_cortex_admission_before_state_db(
+    adapter, session_db, tmp_path, monkeypatch
+):
+    home = tmp_path / "atlas-profile"
+    _write_cortex_config(home)
+    session_id = session_db.create_session("cortex-end", "api_server")
+    session_db.append_message(session_id, "user", "remember my preference")
+    session_db.append_message(session_id, "assistant", "I will remember it")
+    store = _seed_cortex_turn(home, session_id)
+    monkeypatch.setattr(adapter, "_cortex_profile_home", lambda: home)
+
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        response = await cli.patch(
+            f"/api/sessions/{session_id}",
+            json={"end_reason": "customer_closed"},
+        )
+        assert response.status == 200, await response.text()
+
+    state_session = session_db.get_session(session_id)
+    assert state_session["end_reason"] == "customer_closed"
+    assert store.session_lineage(session_id)["state"] == "finalized"
+    with store.connect() as connection:
+        admission_count = connection.execute(
+            "SELECT COUNT(*) FROM session_distill_admissions WHERE brain_id=?",
+            (store.brain_id,),
+        ).fetchone()[0]
+        root_count = connection.execute(
+            "SELECT COUNT(*) FROM cognitive_jobs WHERE brain_id=? "
+            "AND job_type='session_distill' AND parent_job_id IS NULL",
+            (store.brain_id,),
+        ).fetchone()[0]
+    assert admission_count == 1
+    assert root_count == 1
+
+
+@pytest.mark.asyncio
+async def test_patch_end_cortex_failure_leaves_all_state_db_fields_unchanged(
+    adapter, session_db, monkeypatch
+):
+    session_id = session_db.create_session("end-failure", "api_server")
+    session_db.set_session_title(session_id, "Original")
+    session_db.append_message(session_id, "user", "durable content")
+    boundary = AsyncMock(side_effect=RuntimeError("disk unavailable"))
+    monkeypatch.setattr(adapter, "_commit_cortex_session_boundary", boundary)
+
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        response = await cli.patch(
+            f"/api/sessions/{session_id}",
+            json={"title": "Must not publish", "end_reason": "customer_closed"},
+        )
+        payload = await response.json()
+
+    assert response.status == 503
+    assert payload["error"]["code"] == "cortex_session_boundary_failed"
+    unchanged = session_db.get_session(session_id)
+    assert unchanged["title"] == "Original"
+    assert unchanged["ended_at"] is None
+    assert unchanged["end_reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_patch_end_fails_closed_when_required_cortex_evidence_is_missing(
+    adapter, session_db, tmp_path, monkeypatch
+):
+    home = tmp_path / "missing-evidence-profile"
+    _write_cortex_config(home)
+    session_id = session_db.create_session("missing-evidence", "api_server")
+    session_db.append_message(session_id, "user", "retainable customer fact")
+    store, _ = open_cortex_store(home, {})
+    store.ensure_session(session_id)
+    monkeypatch.setattr(adapter, "_cortex_profile_home", lambda: home)
+
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        response = await cli.patch(
+            f"/api/sessions/{session_id}",
+            json={"end_reason": "customer_closed"},
+        )
+        payload = await response.json()
+
+    assert response.status == 503
+    assert payload["error"]["code"] == "cortex_session_boundary_failed"
+    assert session_db.get_session(session_id)["ended_at"] is None
+    assert store.session_lineage(session_id)["state"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_patch_end_allows_intentionally_unretained_session_without_job(
+    adapter, session_db, tmp_path, monkeypatch
+):
+    home = tmp_path / "no-retention-profile"
+    _write_cortex_config(home)
+    session_id = session_db.create_session("no-retention", "api_server")
+    session_db.append_message(
+        session_id,
+        "user",
+        "Could you please not store anything from this conversation?",
+    )
+    session_db.append_message(session_id, "assistant", "I will not retain it.")
+    store, _ = open_cortex_store(home, {})
+    store.ensure_session(session_id)
+    monkeypatch.setattr(adapter, "_cortex_profile_home", lambda: home)
+
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        response = await cli.patch(
+            f"/api/sessions/{session_id}",
+            json={"end_reason": "customer_closed"},
+        )
+
+    assert response.status == 200
+    assert session_db.get_session(session_id)["end_reason"] == "customer_closed"
+    assert store.session_lineage(session_id)["state"] == "finalized"
+    with store.connect() as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM session_distill_admissions WHERE brain_id=?",
+                (store.brain_id,),
+            ).fetchone()[0]
+            == 0
+        )
+
+
+@pytest.mark.asyncio
+async def test_patch_end_rejects_an_exact_inflight_api_turn(
+    adapter, session_db, monkeypatch
+):
+    session_id = session_db.create_session("active-session", "api_server")
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingAgent:
+        session_prompt_tokens = 0
+        session_completion_tokens = 0
+        session_total_tokens = 0
+
+        def __init__(self):
+            self.session_id = session_id
+
+        def run_conversation(self, **_kwargs):
+            started.set()
+            assert release.wait(timeout=5)
+            return {"final_response": "done"}
+
+    monkeypatch.setattr(adapter, "_create_agent", lambda **_kwargs: BlockingAgent())
+    boundary = AsyncMock(return_value=True)
+    monkeypatch.setattr(adapter, "_commit_cortex_session_boundary", boundary)
+    run_task = asyncio.create_task(
+        adapter._run_agent(
+            user_message="still working",
+            conversation_history=[],
+            session_id=session_id,
+        )
+    )
+    assert await asyncio.to_thread(started.wait, 2)
+
+    try:
+        app = _create_session_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            response = await cli.patch(
+                f"/api/sessions/{session_id}",
+                json={"end_reason": "customer_closed"},
+            )
+            payload = await response.json()
+            delete_response = await cli.delete(f"/api/sessions/{session_id}")
+            delete_payload = await delete_response.json()
+        assert response.status == 409
+        assert payload["error"]["code"] == "session_active"
+        assert delete_response.status == 409
+        assert delete_payload["error"]["code"] == "session_active"
+        assert session_db.get_session(session_id)["ended_at"] is None
+        boundary.assert_not_awaited()
+    finally:
+        release.set()
+        await run_task
+
+
+@pytest.mark.asyncio
+async def test_cancelled_api_wrapper_stays_active_until_worker_thread_exits(
+    adapter, session_db, monkeypatch
+):
+    session_id = session_db.create_session("cancelled-wrapper", "api_server")
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingAgent:
+        session_prompt_tokens = 0
+        session_completion_tokens = 0
+        session_total_tokens = 0
+
+        def __init__(self):
+            self.session_id = session_id
+
+        def run_conversation(self, **_kwargs):
+            started.set()
+            assert release.wait(timeout=5)
+            return {"final_response": "done"}
+
+    monkeypatch.setattr(adapter, "_create_agent", lambda **_kwargs: BlockingAgent())
+    run_task = asyncio.create_task(
+        adapter._run_agent(
+            user_message="still writing",
+            conversation_history=[],
+            session_id=session_id,
+        )
+    )
+    assert await asyncio.to_thread(started.wait, 2)
+    run_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+
+    assert adapter._session_has_active_api_request(session_id) is True
+    try:
+        app = _create_session_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            response = await cli.patch(
+                f"/api/sessions/{session_id}",
+                json={"end_reason": "customer_closed"},
+            )
+            payload = await response.json()
+        assert response.status == 409
+        assert payload["error"]["code"] == "session_active"
+    finally:
+        release.set()
+
+    for _ in range(50):
+        if not adapter._session_has_active_api_request(session_id):
+            break
+        await asyncio.sleep(0.01)
+    assert adapter._session_has_active_api_request(session_id) is False
+
+
+@pytest.mark.asyncio
+async def test_patch_end_barrier_rejects_a_new_turn_during_cortex_commit(
+    adapter, session_db, monkeypatch
+):
+    session_id = session_db.create_session("boundary-race", "api_server")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_boundary(*_args, **_kwargs):
+        entered.set()
+        await release.wait()
+        return False
+
+    monkeypatch.setattr(adapter, "_commit_cortex_session_boundary", slow_boundary)
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        patch_task = asyncio.create_task(
+            cli.patch(
+                f"/api/sessions/{session_id}",
+                json={"end_reason": "customer_closed"},
+            )
+        )
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        with pytest.raises(RuntimeError, match="lifecycle mutation in progress"):
+            await adapter._run_agent(
+                user_message="must not race",
+                conversation_history=[],
+                session_id=session_id,
+            )
+        release.set()
+        response = await patch_task
+
+    assert response.status == 200
+    assert session_id not in adapter._session_lifecycle_mutations
+
+
+@pytest.mark.asyncio
+async def test_patch_end_preserves_non_cortex_profile_compatibility(
+    adapter, session_db, tmp_path, monkeypatch
+):
+    home = tmp_path / "non-cortex-profile"
+    _write_cortex_config(home, provider="", enabled=False)
+    monkeypatch.setattr(adapter, "_cortex_profile_home", lambda: home)
+    session_id = session_db.create_session("legacy-end", "api_server")
+    session_db.append_message(session_id, "user", "legacy transcript")
+
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        response = await cli.patch(
+            f"/api/sessions/{session_id}",
+            json={"end_reason": "customer_closed"},
+        )
+
+    assert response.status == 200
+    assert session_db.get_session(session_id)["end_reason"] == "customer_closed"
+    assert not (home / "cortex" / "cortex.db").exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_does_not_distill_content_being_deleted(
+    adapter, session_db, monkeypatch
+):
+    session_id = session_db.create_session("delete-without-distill", "api_server")
+    session_db.append_message(session_id, "user", "private transcript")
+    boundary = AsyncMock(return_value=True)
+    monkeypatch.setattr(adapter, "_commit_cortex_session_boundary", boundary)
+
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        response = await cli.delete(f"/api/sessions/{session_id}")
+
+    assert response.status == 200
+    assert session_db.get_session(session_id) is None
+    boundary.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_delete_revokes_cortex_semantics_before_removing_transcript(
+    adapter, session_db, tmp_path, monkeypatch
+):
+    home = tmp_path / "delete-profile"
+    _write_cortex_config(home)
+    session_id = session_db.create_session("privacy-delete", "api_server")
+    session_db.append_message(session_id, "user", "private customer detail")
+    store = _seed_cortex_turn(home, session_id)
+    store.finalize_session(session_id)
+    monkeypatch.setattr(adapter, "_cortex_profile_home", lambda: home)
+
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        response = await cli.delete(f"/api/sessions/{session_id}")
+
+    assert response.status == 200, await response.text()
+    assert session_db.get_session(session_id) is None
+    assert store.session_lineage(session_id)["state"] == "deleted"
+    with store.connect() as connection:
+        assert connection.execute(
+            "SELECT tombstoned_at FROM evidence_items WHERE brain_id=?",
+            (store.brain_id,),
+        ).fetchone()["tombstoned_at"]
+        admission = connection.execute(
+            "SELECT revoked_at FROM session_distill_admissions WHERE brain_id=?",
+            (store.brain_id,),
+        ).fetchone()
+        job = connection.execute(
+            "SELECT state FROM cognitive_jobs WHERE brain_id=? "
+            "AND job_type='session_distill'",
+            (store.brain_id,),
+        ).fetchone()
+    assert admission["revoked_at"]
+    assert job["state"] == "dead_letter"
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_same_full_compression_lineage_from_both_stores(
+    adapter, session_db, tmp_path, monkeypatch
+):
+    home = tmp_path / "delete-lineage-profile"
+    _write_cortex_config(home)
+    session_db.create_session("delete-root", "api_server")
+    session_db.end_session("delete-root", "compression")
+    session_db.create_session(
+        "delete-tip", "api_server", parent_session_id="delete-root"
+    )
+    store, _ = open_cortex_store(home, {})
+    store.ensure_session("delete-root")
+    store.ensure_session(
+        "delete-tip",
+        parent_session_id="delete-root",
+        logical_conversation_id="delete-root",
+    )
+    monkeypatch.setattr(adapter, "_cortex_profile_home", lambda: home)
+
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        response = await cli.delete("/api/sessions/delete-tip")
+
+    assert response.status == 200, await response.text()
+    assert session_db.get_session("delete-root") is None
+    assert session_db.get_session("delete-tip") is None
+    assert store.session_lineage("delete-root")["state"] == "deleted"
+    assert store.session_lineage("delete-tip")["state"] == "deleted"
+
+
+@pytest.mark.asyncio
+async def test_delete_cortex_failure_leaves_sessiondb_unchanged(
+    adapter, session_db, tmp_path, monkeypatch
+):
+    home = tmp_path / "delete-running-profile"
+    _write_cortex_config(home)
+    session_id = session_db.create_session("privacy-running", "api_server")
+    session_db.append_message(session_id, "user", "must not race")
+    store = _seed_cortex_turn(home, session_id)
+    store.finalize_session(session_id)
+    with store.transaction() as connection:
+        connection.execute(
+            "UPDATE cognitive_jobs SET state='running', lease_owner='worker', "
+            "started_at=?, heartbeat_at=?, lease_expires_at=? "
+            "WHERE brain_id=? AND job_type='session_distill'",
+            (
+                "2026-07-14T00:00:00Z",
+                "2026-07-14T00:00:00Z",
+                "2099-07-14T00:00:00Z",
+                store.brain_id,
+            ),
+        )
+    monkeypatch.setattr(adapter, "_cortex_profile_home", lambda: home)
+
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        response = await cli.delete(f"/api/sessions/{session_id}")
+        payload = await response.json()
+
+    assert response.status == 503
+    assert payload["error"]["code"] == "cortex_session_delete_failed"
+    assert session_db.get_session(session_id) is not None
+    assert store.session_lineage(session_id)["state"] == "finalized"
+
+
+@pytest.mark.asyncio
 async def test_session_messages_follow_compression_tip(adapter, session_db):
     source_id = session_db.create_session("source-session", "api_server")
     session_db.append_message(source_id, "user", "before compression")
@@ -208,7 +669,122 @@ async def test_session_fork_uses_current_sessiondb_branch_primitives(adapter, se
     assert fork["parent_session_id"] == source_id
     assert fork["title"] == "Alternative"
     assert [m["content"] for m in session_db.get_messages(fork["id"])] == ["first path", "answer"]
-    assert session_db.get_session(source_id)["end_reason"] == "branched"
+    assert session_db.get_session(source_id)["end_reason"] is None
+    assert session_db.get_session(source_id)["ended_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_session_fork_prepares_cortex_child_without_ending_parent(
+    adapter, session_db, tmp_path, monkeypatch
+):
+    home = tmp_path / "atlas-fork-profile"
+    _write_cortex_config(home)
+    source_id = session_db.create_session("cortex-parent", "api_server")
+    session_db.append_message(source_id, "user", "take the alternate path")
+    session_db.append_message(source_id, "assistant", "ready")
+    store = _seed_cortex_turn(home, source_id)
+    monkeypatch.setattr(adapter, "_cortex_profile_home", lambda: home)
+
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        response = await cli.post(
+            f"/api/sessions/{source_id}/fork",
+            json={"id": "cortex-child", "title": "Alternate"},
+        )
+        assert response.status == 201, await response.text()
+
+    assert session_db.get_session(source_id)["end_reason"] is None
+    assert session_db.get_session(source_id)["ended_at"] is None
+    state_child = session_db.get_session("cortex-child")
+    assert state_child["parent_session_id"] == source_id
+    cortex_parent = store.session_lineage(source_id)
+    cortex_child = store.session_lineage("cortex-child")
+    assert cortex_parent["state"] == "active"
+    assert cortex_child["state"] == "active"
+    assert cortex_child["parent_session_id"] == source_id
+    with store.connect() as connection:
+        admission_count = connection.execute(
+            "SELECT COUNT(*) FROM session_distill_admissions WHERE brain_id=?",
+            (store.brain_id,),
+        ).fetchone()[0]
+    assert admission_count == 0
+
+
+@pytest.mark.asyncio
+async def test_session_fork_cortex_failure_does_not_end_or_create_state_rows(
+    adapter, session_db, monkeypatch
+):
+    source_id = session_db.create_session("fork-failure-parent", "api_server")
+    session_db.append_message(source_id, "user", "source content")
+    boundary = AsyncMock(side_effect=RuntimeError("cortex write failed"))
+    monkeypatch.setattr(adapter, "_commit_cortex_session_boundary", boundary)
+
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        response = await cli.post(
+            f"/api/sessions/{source_id}/fork",
+            json={"id": "must-not-exist", "title": "Not published"},
+        )
+        payload = await response.json()
+
+    assert response.status == 503
+    assert payload["error"]["code"] == "cortex_session_boundary_failed"
+    assert session_db.get_session(source_id)["ended_at"] is None
+    assert session_db.get_session("must-not-exist") is None
+
+
+@pytest.mark.asyncio
+async def test_session_fork_title_race_compensates_child_and_retry_reuses_cortex(
+    adapter, session_db, tmp_path, monkeypatch
+):
+    home = tmp_path / "atlas-fork-retry-profile"
+    _write_cortex_config(home)
+    source_id = session_db.create_session("retry-parent", "api_server")
+    session_db.append_message(source_id, "user", "durable branch evidence")
+    store = _seed_cortex_turn(home, source_id)
+    monkeypatch.setattr(adapter, "_cortex_profile_home", lambda: home)
+
+    real_set_title = session_db.set_session_title
+    failed_once = False
+
+    def fail_first_child_title(session_id, title):
+        nonlocal failed_once
+        if session_id == "retry-child" and not failed_once:
+            failed_once = True
+            raise ValueError("Title was concurrently claimed")
+        return real_set_title(session_id, title)
+
+    monkeypatch.setattr(session_db, "set_session_title", fail_first_child_title)
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        first = await cli.post(
+            f"/api/sessions/{source_id}/fork",
+            json={"id": "retry-child", "title": "Retry branch"},
+        )
+        first_payload = await first.json()
+        assert first.status == 409
+        assert first_payload["error"]["code"] == "session_title_conflict"
+        assert session_db.get_session(source_id)["ended_at"] is None
+        assert session_db.get_session("retry-child") is None
+        assert store.session_lineage("retry-child")["parent_session_id"] == source_id
+
+        second = await cli.post(
+            f"/api/sessions/{source_id}/fork",
+            json={"id": "retry-child", "title": "Retry branch"},
+        )
+        assert second.status == 201, await second.text()
+
+    assert session_db.get_session(source_id)["end_reason"] is None
+    assert session_db.get_session(source_id)["ended_at"] is None
+    assert session_db.get_session("retry-child")["parent_session_id"] == source_id
+    with store.connect() as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM session_distill_admissions WHERE brain_id=?",
+                (store.brain_id,),
+            ).fetchone()[0]
+            == 0
+        )
 
 
 @pytest.mark.asyncio

@@ -305,7 +305,10 @@ def build_turn_context(
 
     # Track memory nudge trigger (turn-based, checked here).
     should_review_memory = False
-    if (agent._memory_nudge_interval > 0
+    from agent.native_memory_providers import cortex_owns_semantic_review
+
+    if (not cortex_owns_semantic_review(agent)
+            and agent._memory_nudge_interval > 0
             and "memory" in agent.valid_tool_names
             and agent._memory_store):
         agent._turns_since_memory += 1
@@ -461,6 +464,26 @@ def build_turn_context(
                 if not _compressor.should_compress(_preflight_tokens):
                     break
 
+    # Compression can replace/reorder the message list, so the index captured
+    # immediately after append is no longer authoritative.  Recall and plugin
+    # context must be attached to this turn's user row, never to an older user
+    # or the compression summary.  Prefer exact content identity and fall back
+    # to the final user row (the current turn is always the newest user input at
+    # this point in the lifecycle).
+    _matched_current_user = None
+    for _idx in range(len(messages) - 1, -1, -1):
+        _candidate = messages[_idx]
+        if _candidate.get("role") != "user":
+            continue
+        if _matched_current_user is None:
+            _matched_current_user = _idx
+        if _candidate.get("content") == user_message:
+            _matched_current_user = _idx
+            break
+    if _matched_current_user is not None:
+        current_turn_user_idx = _matched_current_user
+        agent._persist_user_message_idx = current_turn_user_idx
+
     # Plugin hook: pre_llm_call (context injected into user message, not system prompt).
     plugin_user_context = ""
     try:
@@ -546,7 +569,10 @@ def build_turn_context(
     if agent._memory_manager:
         try:
             _query = original_user_message if isinstance(original_user_message, str) else ""
-            ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""
+            ext_prefetch_cache = agent._memory_manager.prefetch_all(
+                _query,
+                session_id=agent.session_id or "",
+            ) or ""
         except Exception:
             pass
 

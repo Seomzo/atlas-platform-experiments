@@ -179,6 +179,10 @@ const codec = createLoadout<StarmapGraph>({
 
 // Serialize a star-map graph to a short, opaque, clipboard-safe loadout string.
 export function encodeShareCode(graph: StarmapGraph): string {
+  if (graph.source === 'cortex') {
+    throw new ShareCodeError('Cortex graphs are private and cannot use legacy share codes.')
+  }
+
   return codec.encode(graph)
 }
 

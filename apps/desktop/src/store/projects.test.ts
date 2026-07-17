@@ -14,7 +14,8 @@ import {
   openProjectCreate,
   pickProjectFolder,
   refreshProjects,
-  refreshWorktrees
+  refreshWorktrees,
+  resolveWorkspaceSessionTarget
 } from './projects'
 
 vi.mock('@/i18n', () => ({
@@ -32,6 +33,10 @@ vi.mock('@/lib/desktop-fs', () => ({
   writeDesktopFileText: vi.fn()
 }))
 
+vi.mock('@/lib/desktop-git', () => ({
+  desktopGit: vi.fn()
+}))
+
 vi.mock('@/store/gateway', () => ({
   activeGateway: vi.fn(),
   ensureActiveGatewayOpen: vi.fn()
@@ -41,6 +46,8 @@ const fs = await import('@/lib/desktop-fs')
 const desktopDefaultCwd = vi.mocked(fs.desktopDefaultCwd)
 const isDesktopFsRemoteMode = vi.mocked(fs.isDesktopFsRemoteMode)
 const selectDesktopPaths = vi.mocked(fs.selectDesktopPaths)
+const git = await import('@/lib/desktop-git')
+const desktopGit = vi.mocked(git.desktopGit)
 
 const gw = await import('@/store/gateway')
 const activeGateway = vi.mocked(gw.activeGateway)
@@ -86,6 +93,46 @@ describe('worktree refresh', () => {
     const before = $worktreeRefreshToken.get()
     refreshWorktrees()
     expect($worktreeRefreshToken.get()).toBe(before + 1)
+  })
+})
+
+describe('resolveWorkspaceSessionTarget', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('returns an existing path without mutating Git', async () => {
+    const branchSwitch = vi.fn()
+    const worktreeAdd = vi.fn()
+    desktopGit.mockReturnValue({ branchSwitch, worktreeAdd } as never)
+
+    await expect(resolveWorkspaceSessionTarget('/repo/.worktrees/existing')).resolves.toBe('/repo/.worktrees/existing')
+    expect(branchSwitch).not.toHaveBeenCalled()
+    expect(worktreeAdd).not.toHaveBeenCalled()
+  })
+
+  it('executes a deferred branch switch only when the target is resolved', async () => {
+    const branchSwitch = vi.fn(async () => undefined)
+    desktopGit.mockReturnValue({ branchSwitch } as never)
+
+    await expect(
+      resolveWorkspaceSessionTarget({ branch: 'main', kind: 'switch-branch', repoPath: '/repo' })
+    ).resolves.toBe('/repo')
+    expect(branchSwitch).toHaveBeenCalledWith('/repo', 'main')
+  })
+
+  it('creates a deferred worktree and returns its resolved path', async () => {
+    const worktreeAdd = vi.fn(async () => ({ branch: 'feature/memory', path: '/repo/.worktrees/memory' }))
+    desktopGit.mockReturnValue({ worktreeAdd } as never)
+
+    await expect(
+      resolveWorkspaceSessionTarget({
+        kind: 'create-worktree',
+        options: { branch: 'feature/memory', name: 'feature/memory' },
+        repoPath: '/repo'
+      })
+    ).resolves.toBe('/repo/.worktrees/memory')
+    expect(worktreeAdd).toHaveBeenCalledWith('/repo', { branch: 'feature/memory', name: 'feature/memory' })
   })
 })
 

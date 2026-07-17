@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from altas.cortex.managed_dispatch import (
+    CORTEX_DISPATCH_SCHEMA,
+    CortexDispatchAdmission as CoreCortexDispatchAdmission,
+)
 
 
 class StrictModel(BaseModel):
@@ -53,6 +59,47 @@ class QueueJobRequest(StrictModel):
     capability: str = Field(min_length=1, max_length=160)
     payload: dict[str, Any] = Field(default_factory=dict)
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=160)
+
+
+class CortexDispatchAdmission(StrictModel):
+    """Privacy-safe provenance for one exact locally admitted Cortex job."""
+
+    schema_version: Literal["atlas.cortex.dispatch-admission.v1"] = (
+        CORTEX_DISPATCH_SCHEMA
+    )
+    local_job_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
+    admission_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
+    root_job_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
+    canonical_input_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    attempt: int = Field(ge=0, le=1_000_000)
+    due_at: str = Field(min_length=1, max_length=64)
+    dispatch_key_commitment: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_core_contract(self) -> "CortexDispatchAdmission":
+        CoreCortexDispatchAdmission.from_mapping(self.model_dump(mode="json"))
+        return self
+
+
+class CortexMaintenanceRequest(StrictModel):
+    """Idempotent local-Cortex wake signal from an authenticated worker."""
+
+    tenant_id: str = Field(min_length=1, max_length=128)
+    store_id: str = Field(min_length=1, max_length=128)
+    agent_id: str = Field(min_length=1, max_length=128)
+    dispatch_key: str = Field(pattern=r"^[0-9a-f]{64}$", repr=False)
+    dispatch_admission: CortexDispatchAdmission
+
+    @model_validator(mode="after")
+    def validate_dispatch_commitment(self) -> "CortexMaintenanceRequest":
+        admission = CoreCortexDispatchAdmission.from_mapping(
+            self.dispatch_admission.model_dump(mode="json")
+        )
+        if not admission.is_canonical() or not hmac.compare_digest(
+            admission.canonical_dispatch_key(), self.dispatch_key
+        ):
+            raise ValueError("dispatch key does not match its admission commitment")
+        return self
 
 
 class ToggleRequest(StrictModel):
@@ -110,6 +157,12 @@ class ChatMessage(StrictModel):
         return self
 
 
+class JsonObjectResponseFormat(StrictModel):
+    """Only the bounded structured-output mode required by Atlas Cortex."""
+
+    type: Literal["json_object"]
+
+
 class ChatCompletionRequest(StrictModel):
     """Strict, cost-bounded subset of the OpenAI chat-completions schema.
 
@@ -134,6 +187,7 @@ class ChatCompletionRequest(StrictModel):
     stop: str | list[str] | None = None
     seed: int | None = Field(default=None, ge=-(2**63), le=2**63 - 1)
     user: str | None = Field(default=None, max_length=256)
+    response_format: JsonObjectResponseFormat | None = None
 
     @field_validator("messages")
     @classmethod

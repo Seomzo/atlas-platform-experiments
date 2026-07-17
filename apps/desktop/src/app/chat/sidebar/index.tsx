@@ -21,6 +21,7 @@ import {
 } from '@/components/ui/sidebar'
 import { searchSessions, type SessionInfo, type SessionSearchResult } from '@/hermes'
 import { useI18n } from '@/i18n'
+import { Starmap } from '@/lib/icons'
 import { comboTokens } from '@/lib/keybinds/combo'
 import { profileColor } from '@/lib/profile-color'
 import { sessionMatchesSearch } from '@/lib/session-search'
@@ -60,6 +61,7 @@ import {
   unpinSession
 } from '@/store/layout'
 import { $newChatProfile, $profiles, $profileScope, ALL_PROFILES, normalizeProfileKey } from '@/store/profile'
+import type { WorkspaceSessionTarget } from '@/store/projects'
 import {
   $activeProjectId,
   $projects,
@@ -95,7 +97,8 @@ import {
   setCurrentCwd
 } from '@/store/session'
 
-import { type AppView, ARTIFACTS_ROUTE, MESSAGING_ROUTE, SKILLS_ROUTE } from '../../routes'
+import { type AppView, ARTIFACTS_ROUTE, MESSAGING_ROUTE, SKILLS_ROUTE, STARMAP_ROUTE } from '../../routes'
+import { publicCronJobs } from '../../starmap/system-job'
 import type { SidebarNavItem } from '../../types'
 
 import { countLabel } from './chrome'
@@ -144,7 +147,8 @@ const SIDEBAR_NAV: SidebarNavItem[] = [
     route: SKILLS_ROUTE
   },
   { id: 'messaging', label: '', icon: props => <Codicon name="comment" {...props} />, route: MESSAGING_ROUTE },
-  { id: 'artifacts', label: '', icon: props => <Codicon name="files" {...props} />, route: ARTIFACTS_ROUTE }
+  { id: 'artifacts', label: '', icon: props => <Codicon name="files" {...props} />, route: ARTIFACTS_ROUTE },
+  { id: 'starmap', label: '', icon: Starmap, route: STARMAP_ROUTE }
 ]
 
 // Two modes via the `compact` height variant (styles.css):
@@ -208,7 +212,8 @@ interface ChatSidebarProps extends React.ComponentProps<typeof Sidebar> {
   onDeleteSession: (sessionId: string) => void
   onArchiveSession: (sessionId: string) => void
   onBranchSession: (sessionId: string) => void
-  onNewSessionInWorkspace: (path: null | string) => void
+  onNewSessionInProfile: (profile: string) => Promise<boolean> | void
+  onNewSessionInWorkspace: (target: WorkspaceSessionTarget, branch?: string) => boolean | Promise<boolean> | void
   onManageCronJob: (jobId: string) => void
   onTriggerCronJob: (jobId: string) => void
 }
@@ -223,6 +228,7 @@ export function ChatSidebar({
   onDeleteSession,
   onArchiveSession,
   onBranchSession,
+  onNewSessionInProfile,
   onNewSessionInWorkspace,
   onManageCronJob,
   onTriggerCronJob
@@ -243,6 +249,7 @@ export function ChatSidebar({
   const sessions = useStore($sessions)
   const cronSessions = useStore($cronSessions)
   const cronJobs = useStore($cronJobs)
+  const visibleCronJobs = useMemo(() => publicCronJobs(cronJobs), [cronJobs])
   const messagingSessions = useStore($messagingSessions)
   const messagingPlatformTotals = useStore($messagingPlatformTotals)
   const messagingTruncated = useStore($messagingTruncated)
@@ -1049,11 +1056,13 @@ export function ChatSidebar({
             <SidebarMenu className="gap-px">
               {SIDEBAR_NAV.map(item => {
                 const isInteractive = Boolean(item.action) || Boolean(item.route)
+                const label = item.id === 'starmap' ? t.starmap.title : (s.nav[item.id] ?? item.label)
 
                 const active =
                   (item.id === 'skills' && currentView === 'skills') ||
                   (item.id === 'messaging' && currentView === 'messaging') ||
-                  (item.id === 'artifacts' && currentView === 'artifacts')
+                  (item.id === 'artifacts' && currentView === 'artifacts') ||
+                  (item.id === 'starmap' && currentView === 'starmap')
 
                 const isNewSession = item.id === 'new-session'
 
@@ -1086,13 +1095,13 @@ export function ChatSidebar({
 
                         onNavigate(item)
                       }}
-                      tooltip={s.nav[item.id] ?? item.label}
+                      tooltip={label}
                       type="button"
                     >
                       <item.icon className="size-4 shrink-0 text-[color-mix(in_srgb,currentColor_72%,transparent)]" />
                       {contentVisible && (
                         <>
-                          <span className="min-w-0 flex-1 truncate">{s.nav[item.id] ?? item.label}</span>
+                          <span className="min-w-0 flex-1 truncate">{label}</span>
                           {isNewSession && (
                             <KbdGroup
                               className={cn('ml-auto opacity-55', newSessionKbdFlash && 'opacity-100!')}
@@ -1304,6 +1313,7 @@ export function ChatSidebar({
                 onBranchSession={onBranchSession}
                 onDeleteSession={onDeleteSession}
                 onEnterProject={onEnterProject}
+                onNewSessionInProfile={onNewSessionInProfile}
                 onNewSessionInWorkspace={showAllProfiles ? undefined : onNewSessionInWorkspace}
                 onReorderProjects={showAllProfiles ? undefined : reorderProjects}
                 onReorderSessions={showAllProfiles ? undefined : reorderSessions}
@@ -1378,9 +1388,9 @@ export function ChatSidebar({
                 )
               })}
 
-            {!trimmedQuery && !worktreeGroupingActive && cronJobs.length > 0 && (
+            {!trimmedQuery && !worktreeGroupingActive && visibleCronJobs.length > 0 && (
               <SidebarCronJobsSection
-                jobs={cronJobs}
+                jobs={visibleCronJobs}
                 label={s.cronJobs}
                 onManageJob={onManageCronJob}
                 onOpenRun={onResumeSession}

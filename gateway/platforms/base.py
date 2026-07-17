@@ -4537,6 +4537,9 @@ class BasePlatformAdapter(ABC):
 
         try:
             response = await self._message_handler(event)
+            preserve_active_session = bool(
+                getattr(response, "preserve_active_session", False)
+            )
             _text, _eph_ttl = self._unwrap_ephemeral(response)
             # Send the response BEFORE cancelling the old task so the send
             # cannot be affected by task-cancellation side effects (race
@@ -4563,6 +4566,18 @@ class BasePlatformAdapter(ABC):
                         message_id=_r.message_id,
                         ttl_seconds=_eph_ttl,
                     )
+            if preserve_active_session:
+                # The runner timed out waiting for a required durable capture
+                # barrier and deliberately declined the logical boundary. Keep
+                # the original owner task alive so it can finish unwinding;
+                # cancelling it here would allow late evidence to arrive after
+                # a later session-end snapshot. Restore its guard before
+                # returning so the command-scoped guard does not strand it.
+                if current_guard is not None:
+                    self._active_sessions[session_key] = current_guard
+                else:
+                    self._release_session_guard(session_key, guard=command_guard)
+                return
             # Old adapter task (if any) is cancelled AFTER the response has
             # been sent — keeps ordering deterministic and avoids the race.
             await self.cancel_session_processing(

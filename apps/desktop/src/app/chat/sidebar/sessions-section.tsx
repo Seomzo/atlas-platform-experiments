@@ -9,6 +9,7 @@ import type { HermesGitWorktree } from '@/global'
 import type { SessionInfo } from '@/hermes'
 import { flattenSessionsWithBranches } from '@/lib/session-branch-tree'
 import { cn } from '@/lib/utils'
+import type { WorkspaceSessionTarget } from '@/store/projects'
 import { sessionPinId } from '@/store/session'
 
 import { SidebarCount } from './chrome'
@@ -91,7 +92,8 @@ interface SidebarSessionsSectionProps {
   onArchiveSession: (sessionId: string) => void
   onBranchSession?: (sessionId: string, profile?: string) => void
   onTogglePin: (sessionId: string) => void
-  onNewSessionInWorkspace?: (path: null | string) => void
+  onNewSessionInProfile?: (profile: string) => Promise<boolean> | void
+  onNewSessionInWorkspace?: (target: WorkspaceSessionTarget, branch?: string) => boolean | Promise<boolean> | void
   pinned: boolean
   rootClassName?: string
   contentClassName?: string
@@ -149,6 +151,7 @@ export function SidebarSessionsSection({
   onArchiveSession,
   onBranchSession,
   onTogglePin,
+  onNewSessionInProfile,
   onNewSessionInWorkspace,
   pinned,
   rootClassName,
@@ -296,6 +299,7 @@ export function SidebarSessionsSection({
         group={group}
         key={group.id}
         onNewSession={onNewSessionInWorkspace}
+        onNewSessionInProfile={onNewSessionInProfile}
         renderRows={renderRows}
       />
     ))

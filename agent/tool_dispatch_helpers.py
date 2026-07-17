@@ -77,6 +77,51 @@ _DESTRUCTIVE_PATTERNS = re.compile(
 _REDIRECT_OVERWRITE = re.compile(r'[^>]>[^>]|^>[^>]')
 
 
+def _text_only_message_content(content: Any) -> str:
+    """Return only user-authored text from an OpenAI-style message payload."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict) and item.get("type") in {
+            "text",
+            "input_text",
+        }:
+            text = item.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+    return "\n".join(parts)
+
+
+def _current_user_message_for_memory_control(agent: Any, messages: Any) -> str:
+    """Return the authoritative current-turn user text for memory controls.
+
+    Memory-provider tool arguments are model-authored and therefore cannot
+    prove that the user asked for a destructive memory mutation. The turn
+    builder records the authoritative user-row index before any model/tool
+    output is appended. Use that row (or its persistence override) and fail
+    closed when the marker is missing or stale; never scan tool/assistant
+    content for an authorization phrase.
+    """
+    override = getattr(agent, "_persist_user_message_override", None)
+    if isinstance(override, str):
+        return override
+
+    index = getattr(agent, "_persist_user_message_idx", None)
+    if not isinstance(index, int) or not isinstance(messages, list):
+        return ""
+    if index < 0 or index >= len(messages):
+        return ""
+    message = messages[index]
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return ""
+    return _text_only_message_content(message.get("content"))
+
+
 def _is_destructive_command(cmd: str) -> bool:
     """Heuristic: does this terminal command look like it modifies/deletes files?"""
     if not cmd:
@@ -488,6 +533,7 @@ __all__ = [
     "_PATH_SCOPED_TOOLS",
     "_DESTRUCTIVE_PATTERNS",
     "_REDIRECT_OVERWRITE",
+    "_current_user_message_for_memory_control",
     "_is_destructive_command",
     "_should_parallelize_tool_batch",
     "_extract_parallel_scope_path",

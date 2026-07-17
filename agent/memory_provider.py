@@ -24,6 +24,7 @@ Lifecycle (called by MemoryManager, wired in run_agent.py):
 Optional hooks (override to opt in):
   on_turn_start(turn, message, **kwargs) — per-turn tick with runtime context
   on_session_end(messages)               — end-of-session extraction
+  commit_session_boundary(...)           — atomic durable finalize + rebind
   on_session_switch(new_session_id, **kwargs) — mid-process session_id rotation
   on_pre_compress(messages) -> str       — extract before context compression
   on_memory_write(action, target, content, metadata=None) — mirror built-in memory writes
@@ -131,6 +132,17 @@ class MemoryProvider(ABC):
         Providers that do not need raw turn context can ignore it.
         """
 
+    @property
+    def requires_synchronous_turn_durability(self) -> bool:
+        """Whether ``sync_turn`` is a local durable enqueue that must run inline.
+
+        Default providers stay on the manager's background worker. Native
+        stores may opt in when their sync path is bounded local I/O and losing
+        a completed turn on process death would violate their durability
+        contract. Semantic extraction/model work never belongs on this path.
+        """
+        return False
+
     @abstractmethod
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         """Return tool schemas this provider exposes.
@@ -147,7 +159,9 @@ class MemoryProvider(ABC):
         Must return a JSON string (the tool result).
         Only called for tool names returned by get_tool_schemas().
         """
-        raise NotImplementedError(f"Provider {self.name} does not handle tool {tool_name}")
+        raise NotImplementedError(
+            f"Provider {self.name} does not handle tool {tool_name}"
+        )
 
     def shutdown(self) -> None:
         """Clean shutdown — flush queues, close connections."""
@@ -163,15 +177,58 @@ class MemoryProvider(ABC):
         Providers use what they need; extras are ignored.
         """
 
-    def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
-        """Called when a session ends (explicit exit or timeout).
+    def on_durability_failure(self, operation: str, error: BaseException) -> None:
+        """Report a failed provider operation that was promised as durable.
 
-        Use for end-of-session fact extraction, summarization, etc.
-        messages is the full conversation history.
-
-        NOT called after every turn — only at actual session boundaries
-        (CLI exit, /reset, gateway session expiry).
+        The default is a no-op for compatibility. Native stores can persist a
+        privacy-safe health marker so a fail-soft foreground turn does not
+        become an invisible data-loss condition.
         """
+
+    def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
+        """Legacy durable checkpoint for a physical/runtime session boundary.
+
+        This hook may run for compression, cache teardown, or process/runtime
+        cleanup as well as an explicit exit. It is suitable for deterministic
+        evidence flushes, but it is not proof that the customer ended the
+        logical conversation and must not authorize semantic consolidation.
+        Providers that need a true end use :meth:`on_session_finalize`.
+        """
+
+    def on_session_finalize(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        reason: str = "finalize",
+        **kwargs: Any,
+    ) -> None:
+        """Commit a true logical conversation boundary.
+
+        Unlike ``on_session_end`` (a legacy checkpoint hook also used by
+        compression/cache paths), this hook is only for reset/new, owned UI
+        close, or policy expiry. Providers should enqueue one idempotent
+        distillation/dream job here. Process restart and soft eviction are not
+        logical finalization events.
+        """
+
+    def commit_session_boundary(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        new_session_id: str,
+        parent_session_id: str = "",
+        reason: str = "new_session",
+        reset: bool = True,
+    ) -> bool:
+        """Atomically finalize the old session and prepare/rebind the new one.
+
+        Providers that opt into synchronous durability must override this and
+        return ``True`` only after both sides of the boundary commit together.
+        The default ``False`` prevents MemoryManager from approximating an
+        atomic boundary with two independently fallible hooks.
+        """
+
+        return False
 
     def on_session_switch(
         self,
@@ -229,8 +286,9 @@ class MemoryProvider(ABC):
         """
         return ""
 
-    def on_delegation(self, task: str, result: str, *,
-                      child_session_id: str = "", **kwargs) -> None:
+    def on_delegation(
+        self, task: str, result: str, *, child_session_id: str = "", **kwargs
+    ) -> None:
         """Called on the PARENT agent when a subagent completes.
 
         The parent's memory provider gets the task+result pair as an

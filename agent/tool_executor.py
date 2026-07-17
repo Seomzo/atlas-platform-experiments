@@ -32,6 +32,7 @@ from agent.display import (
 )
 from agent.tool_guardrails import ToolGuardrailDecision
 from agent.tool_dispatch_helpers import (
+    _current_user_message_for_memory_control,
     _is_destructive_command,
     _is_multimodal_tool_result,
     _multimodal_text_summary,
@@ -1396,7 +1397,14 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             _mem_result = None
             try:
                 def _execute(next_args: dict) -> Any:
-                    return agent._memory_manager.handle_tool_call(function_name, next_args)
+                    current_user_message = _current_user_message_for_memory_control(
+                        agent, messages
+                    )
+                    return agent._memory_manager.handle_tool_call(
+                        function_name,
+                        next_args,
+                        current_user_message=current_user_message,
+                    )
                 function_result, function_args = _run_agent_tool_execution_middleware(
                     agent,
                     function_name=function_name,

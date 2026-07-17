@@ -10,8 +10,10 @@ import { DesktopOnboardingOverlay } from '@/components/onboarding'
 import { Pane, PaneMain } from '@/components/pane-shell'
 import { RemoteDisplayBanner } from '@/components/remote-display-banner'
 import { useMediaQuery } from '@/hooks/use-media-query'
+import { useI18n } from '@/i18n'
 import { isFocusWithin } from '@/lib/keybinds/combo'
 import { cn } from '@/lib/utils'
+import { notify, notifyError } from '@/store/notifications'
 import { useSkinCommand } from '@/themes/use-skin-command'
 
 import { formatRefValue } from '../components/assistant-ui/directive-text'
@@ -46,8 +48,20 @@ import {
   setPetOverlaySubmitHandler
 } from '../store/pet-overlay'
 import { $filePreviewTarget, $previewTarget, closeActiveRightRailTab } from '../store/preview'
-import { $activeGatewayProfile, $freshSessionRequest, $profileScope, refreshActiveProfile } from '../store/profile'
-import { $startWorkSessionRequest, followActiveSessionCwd, resolveNewSessionCwd } from '../store/projects'
+import {
+  $activeGatewayProfile,
+  $freshSessionRequest,
+  $profileScope,
+  newSessionInProfile,
+  refreshActiveProfile
+} from '../store/profile'
+import {
+  $startWorkSessionRequest,
+  followActiveSessionCwd,
+  resolveNewSessionCwd,
+  resolveWorkspaceSessionTarget,
+  type WorkspaceSessionTarget
+} from '../store/projects'
 import { $reviewOpen, REVIEW_PANE_ID } from '../store/review'
 import {
   $activeSessionId,
@@ -76,6 +90,7 @@ import { onSessionsChanged } from '../store/session-sync'
 import { clearSessionTodos, setSessionTodos, todosForHydration } from '../store/todos'
 import { openUpdatesWindow, startUpdatePoller, stopUpdatePoller } from '../store/updates'
 import { isSecondaryWindow } from '../store/windows'
+import { setWorkspaceMutationActive } from '../store/workspace-handoff'
 
 import { ChatView } from './chat'
 import { requestComposerFocus, requestComposerInsert } from './chat/composer/focus'
@@ -88,6 +103,11 @@ import {
 } from './chat/right-rail'
 import { ChatSidebar } from './chat/sidebar'
 import { CommandPalette } from './command-palette'
+import {
+  closeThenPrepareWorkspace,
+  runSerializedWorkspacePreparation,
+  workspaceHandoffSourceMatches
+} from './desktop-controller-utils'
 import { useGatewayBoot } from './gateway/hooks/use-gateway-boot'
 import { useGatewayRequest } from './gateway/hooks/use-gateway-request'
 import { useKeybinds } from './hooks/use-keybinds'
@@ -179,12 +199,17 @@ function sessionMessagesSignature(messages: SessionMessage[]): string {
 
 export function DesktopController() {
   const queryClient = useQueryClient()
+  const { t } = useI18n()
   const location = useLocation()
   const navigate = useNavigate()
 
   const busyRef = useRef(false)
   const creatingSessionRef = useRef(false)
   const messagingTranscriptSignatureRef = useRef(new Map<string, string>())
+
+  const openStoredSessionRef = useRef<
+    (sessionId: string, options?: { forceResume?: boolean; replace?: boolean }) => boolean
+  >(() => false)
 
   const gatewayState = useStore($gatewayState)
   const activeSessionId = useStore($activeSessionId)
@@ -290,9 +315,9 @@ export function DesktopController() {
     const last = getRememberedSessionId()
 
     if (last && location.pathname === NEW_CHAT_ROUTE) {
-      navigate(sessionRoute(last), { replace: true })
+      openStoredSessionRef.current(last, { replace: true })
     }
-  }, [location.pathname, navigate])
+  }, [location.pathname])
 
   useEffect(() => {
     if (resumeExhaustedSessionId && getRememberedSessionId() === resumeExhaustedSessionId) {
@@ -308,12 +333,12 @@ export function DesktopController() {
   useEffect(() => {
     const unsubscribe = window.hermesDesktop?.onFocusSession?.(sessionId => {
       if (sessionId) {
-        navigate(sessionRoute(storedSessionIdForNotification(sessionId, runtimeIdByStoredSessionIdRef.current)))
+        openStoredSessionRef.current(storedSessionIdForNotification(sessionId, runtimeIdByStoredSessionIdRef.current))
       }
     })
 
     return () => unsubscribe?.()
-  }, [navigate, runtimeIdByStoredSessionIdRef])
+  }, [runtimeIdByStoredSessionIdRef])
 
   // Notification action button (Approve/Reject) — resolve in place, no navigation.
   useEffect(() => {
@@ -608,6 +633,7 @@ export function DesktopController() {
     createBackendSessionForSend,
     openSettings,
     removeSession,
+    resetFreshSessionDraft,
     resumeSession,
     selectSidebarItem,
     startFreshSessionDraft
@@ -628,10 +654,130 @@ export function DesktopController() {
     updateSessionState
   })
 
+  // New Chat close requests can be safely coalesced, but their downstream
+  // destinations cannot. Every user intent advances this token so only the
+  // latest workspace/profile/navigation continuation is allowed to mutate UI
+  // or checkout state after the shared semantic close resolves.
+  const freshSessionIntentRef = useRef(0)
+  const workspaceMutationActiveRef = useRef(false)
+  const workspacePreparationQueueRef = useRef<Promise<void>>(Promise.resolve())
+
+  const workspaceMutationState = useMemo(
+    () => ({
+      get current() {
+        return workspaceMutationActiveRef.current
+      },
+      set current(active: boolean) {
+        workspaceMutationActiveRef.current = active
+        setWorkspaceMutationActive(active)
+      }
+    }),
+    []
+  )
+
+  const rejectWhileWorkspaceMutates = useCallback(() => {
+    if (!workspaceMutationActiveRef.current) {
+      return false
+    }
+
+    notify({
+      id: 'workspace-handoff-busy',
+      kind: 'info',
+      title: 'Workspace change in progress',
+      message: 'Wait for the current Git operation to finish, then try that destination again.'
+    })
+
+    return true
+  }, [])
+
+  const claimStoredSessionDestination = useCallback(() => {
+    if (rejectWhileWorkspaceMutates()) {
+      return false
+    }
+
+    freshSessionIntentRef.current += 1
+
+    return true
+  }, [rejectWhileWorkspaceMutates])
+
+  // Every explicit session destination uses one entry point. Besides keeping
+  // navigation behavior consistent, the claim invalidates a coalesced workspace
+  // continuation before it can apply checkout/UI state to the newly opened chat.
+  const openStoredSession = useCallback(
+    (sessionId: string, options: { forceResume?: boolean; replace?: boolean } = {}): boolean => {
+      const target = sessionId.trim()
+
+      if (!target || !claimStoredSessionDestination()) {
+        return false
+      }
+
+      if (options.forceResume && routedSessionId === target) {
+        void resumeSession(target, true)
+      } else {
+        navigate(sessionRoute(target), { replace: options.replace })
+      }
+
+      return true
+    },
+    [claimStoredSessionDestination, navigate, resumeSession, routedSessionId]
+  )
+
+  openStoredSessionRef.current = openStoredSession
+
+  const resumeStoredSessionDestination = useCallback(
+    (sessionId: string): void => {
+      openStoredSession(sessionId)
+    },
+    [openStoredSession]
+  )
+
+  // Browser history, deep links, and any future route producer can bypass the
+  // explicit wrapper above. Claim a changed session route before useRouteResume
+  // touches runtime state; if Git is already in its irreversible section, put
+  // the URL back on the fresh draft that owns that operation.
+  const claimRoutedSessionDestination = useCallback(
+    (_sessionId: string): boolean => {
+      if (claimStoredSessionDestination()) {
+        return true
+      }
+
+      navigate(NEW_CHAT_ROUTE, { replace: true })
+
+      return false
+    },
+    [claimStoredSessionDestination, navigate]
+  )
+
+  const startPlainFreshSession = useCallback(
+    (replaceRoute = false) => {
+      if (rejectWhileWorkspaceMutates()) {
+        return Promise.resolve(false)
+      }
+
+      freshSessionIntentRef.current += 1
+
+      return startFreshSessionDraft(replaceRoute)
+    },
+    [rejectWhileWorkspaceMutates, startFreshSessionDraft]
+  )
+
+  const selectSidebarItemWithIntent = useCallback(
+    (item: Parameters<typeof selectSidebarItem>[0]) => {
+      if (rejectWhileWorkspaceMutates()) {
+        return
+      }
+
+      freshSessionIntentRef.current += 1
+      selectSidebarItem(item)
+    },
+    [rejectWhileWorkspaceMutates, selectSidebarItem]
+  )
+
   // Single global listener for every rebindable hotkey (incl. profile switching)
   // plus the on-screen keybind editor's capture mode.
   useKeybinds({
-    startFreshSession: startFreshSessionDraft,
+    openStoredSession,
+    startFreshSession: startPlainFreshSession,
     toggleCommandCenter,
     toggleSelectedPin
   })
@@ -647,8 +793,22 @@ export function DesktopController() {
     }
 
     lastFreshRef.current = freshSessionRequest
-    startFreshSessionDraft()
-  }, [freshSessionRequest, startFreshSessionDraft])
+    freshSessionIntentRef.current += 1
+
+    if (workspaceMutationActiveRef.current) {
+      const capturedRequest = freshSessionRequest
+
+      void workspacePreparationQueueRef.current.finally(() => {
+        if (lastFreshRef.current === capturedRequest) {
+          resetFreshSessionDraft()
+        }
+      })
+
+      return
+    }
+
+    resetFreshSessionDraft()
+  }, [freshSessionRequest, resetFreshSessionDraft])
 
   // Swapping the live gateway to another profile must re-pull that profile's
   // global model + active-profile pill. Both are nanostores, so the blanket
@@ -734,16 +894,64 @@ export function DesktopController() {
   )
 
   const startSessionInWorkspace = useCallback(
-    (path: null | string) => {
-      startFreshSessionDraft()
+    async (workspace: WorkspaceSessionTarget, branch?: string, beforeReset?: () => void): Promise<boolean> => {
+      const intent = freshSessionIntentRef.current + 1
+      freshSessionIntentRef.current = intent
+      const isCurrentIntent = () => freshSessionIntentRef.current === intent
+      const explicitTarget = workspace !== null && (typeof workspace !== 'string' || Boolean(workspace.trim()))
+
+      const targetLabel =
+        branch || (typeof workspace === 'object' && workspace !== null && 'branch' in workspace ? workspace.branch : '')
+
+      const preparedWorkspace: { path: null | string } = { path: null }
+      let started = false
+
+      try {
+        started = await closeThenPrepareWorkspace(
+          () =>
+            startFreshSessionDraft(
+              false,
+              beforeReset
+                ? () => {
+                    if (isCurrentIntent()) {
+                      beforeReset()
+                    }
+                  }
+                : undefined
+            ),
+          async () => {
+            await runSerializedWorkspacePreparation(
+              workspacePreparationQueueRef,
+              isCurrentIntent,
+              async () => {
+                preparedWorkspace.path = await resolveWorkspaceSessionTarget(workspace, branch)
+
+                if (typeof workspace === 'object' && workspace !== null && !preparedWorkspace.path) {
+                  throw new Error('Atlas could not create or resolve the requested worktree.')
+                }
+              },
+              workspaceMutationState
+            )
+          },
+          isCurrentIntent
+        )
+      } catch (err) {
+        notifyError(err, t.statusStack.coding.switchFailed(targetLabel || 'branch'))
+
+        return false
+      }
+
+      if (!started) {
+        return false
+      }
 
       // A worktree lane carries its own path; the trunk "+" can be path-less (the
       // main checkout is implicit), so fall back to the active project's root
       // instead of no-op'ing on null — that was "+ on main does nothing".
-      const target = path?.trim() || resolveNewSessionCwd()
+      const target = preparedWorkspace.path?.trim() || resolveNewSessionCwd()
 
-      if (!target) {
-        return
+      if (!target || !isCurrentIntent()) {
+        return true
       }
 
       // The next message creates the backend session in $currentCwd, so seed
@@ -751,6 +959,10 @@ export function DesktopController() {
       setCurrentCwd(target)
       void requestGateway<{ branch?: string; cwd?: string }>('config.get', { key: 'project', cwd: target })
         .then(info => {
+          if (!isCurrentIntent()) {
+            return
+          }
+
           const resolved = info.cwd || target
 
           setCurrentCwd(resolved)
@@ -763,22 +975,44 @@ export function DesktopController() {
           // live overlay skips `.worktrees` rows, and the session.info cwd-follow
           // only fires on a same-session move, not a fresh session). The
           // path-less trunk "+" keeps the current scope untouched.
-          if (path?.trim()) {
+          if (explicitTarget) {
             restoreWorktree(resolved)
             void followActiveSessionCwd(resolved)
           }
         })
         .catch(() => undefined)
+
+      return true
     },
-    [requestGateway, startFreshSessionDraft]
+    [requestGateway, startFreshSessionDraft, t.statusStack.coding, workspaceMutationState]
   )
 
-  // Composer "branch off into a new worktree": the composer already created the
-  // worktree and cleared its draft; open a fresh session anchored to that tree,
-  // then prefill the task that kicked it off. startSessionInWorkspace owns the
-  // reset+cwd seed (it runs startFreshSessionDraft, which would otherwise stomp
-  // the cwd back to the default), so the prefill is dispatched right after — its
-  // deferred event lands once the fresh composer has remounted and rebound.
+  const startSessionInProfile = useCallback(
+    async (profile: string): Promise<boolean> => {
+      if (rejectWhileWorkspaceMutates()) {
+        return false
+      }
+
+      const intent = freshSessionIntentRef.current + 1
+      freshSessionIntentRef.current = intent
+      const started = await startFreshSessionDraft()
+
+      if (!started || freshSessionIntentRef.current !== intent) {
+        return false
+      }
+
+      // Only swap gateways after the owning runtime confirms its semantic
+      // close; otherwise session.close could be sent to the target profile.
+      newSessionInProfile(profile)
+
+      return true
+    },
+    [rejectWhileWorkspaceMutates, startFreshSessionDraft]
+  )
+
+  // Composer worktree handoff: reject a request whose source chat has changed,
+  // then let startSessionInWorkspace close, prepare Git, and transfer payload in
+  // that order. Legacy callers can still supply `draft` for deferred insertion.
   const startWorkSessionRequest = useStore($startWorkSessionRequest)
   const lastStartWorkTokenRef = useRef(startWorkSessionRequest?.token ?? 0)
 
@@ -788,12 +1022,20 @@ export function DesktopController() {
     }
 
     lastStartWorkTokenRef.current = startWorkSessionRequest.token
-    startSessionInWorkspace(startWorkSessionRequest.path)
+    const { beforeReset, draft, sourceSessionKey, target } = startWorkSessionRequest
 
-    if (startWorkSessionRequest.draft) {
-      requestComposerInsert(startWorkSessionRequest.draft, { target: 'main' })
+    if (
+      !workspaceHandoffSourceMatches(sourceSessionKey, selectedStoredSessionIdRef.current, activeSessionIdRef.current)
+    ) {
+      return
     }
-  }, [startSessionInWorkspace, startWorkSessionRequest])
+
+    void startSessionInWorkspace(target, undefined, beforeReset).then(started => {
+      if (started && draft) {
+        requestComposerInsert(draft, { target: 'main' })
+      }
+    })
+  }, [activeSessionIdRef, selectedStoredSessionIdRef, startSessionInWorkspace, startWorkSessionRequest])
 
   const handleSkinCommand = useSkinCommand()
 
@@ -816,24 +1058,24 @@ export function DesktopController() {
     openMemoryGraph: openStarmap,
     refreshSessions,
     requestGateway,
-    resumeStoredSession: resumeSession,
+    resumeStoredSession: resumeStoredSessionDestination,
     selectedStoredSessionIdRef,
-    startFreshSessionDraft,
+    startFreshSessionDraft: startPlainFreshSession,
     sttEnabled,
     updateSessionState
   })
 
   // The popped-out pet drives two actions back into the app: send a prompt, and
   // open the most recent thread. Both are registered ONCE through refs that track
-  // the latest callbacks — re-registering on every `submitText`/`resumeSession`
+  // the latest callbacks — re-registering on every `submitText`/session-open
   // identity change left a brief window where the handler was nulled (cleanup
   // before re-register), which could drop a submit fired from the overlay (e.g.
   // creating a session from the new-session screen). The ref form keeps a stable,
   // always-current handler. Primary window only — it owns the overlay.
   const submitTextRef = useRef(submitText)
   submitTextRef.current = submitText
-  const resumeSessionRef = useRef(resumeSession)
-  resumeSessionRef.current = resumeSession
+  const openStoredSessionHandlerRef = useRef(openStoredSession)
+  openStoredSessionHandlerRef.current = openStoredSession
   const requestGatewayRef = useRef(requestGateway)
   requestGatewayRef.current = requestGateway
 
@@ -853,7 +1095,7 @@ export function DesktopController() {
       const recent = $sessions.get()[0]
 
       if (recent?.id) {
-        void resumeSessionRef.current(recent.id)
+        openStoredSessionHandlerRef.current(recent.id)
       }
     })
 
@@ -986,6 +1228,7 @@ export function DesktopController() {
     freshDraftReady,
     gatewayState,
     locationPathname: location.pathname,
+    onRoutedSessionIntent: claimRoutedSessionDestination,
     resumeSession,
     resumeFailedSessionId,
     resumeExhaustedSessionId,
@@ -993,7 +1236,7 @@ export function DesktopController() {
     runtimeIdByStoredSessionIdRef,
     selectedStoredSessionId,
     selectedStoredSessionIdRef,
-    startFreshSessionDraft
+    startFreshSessionDraft: resetFreshSessionDraft
   })
 
   const { leftStatusbarItems, statusbarItems } = useStatusbarItems({
@@ -1025,9 +1268,10 @@ export function DesktopController() {
         setCronFocusJobId(jobId)
         navigate(CRON_ROUTE)
       }}
-      onNavigate={selectSidebarItem}
+      onNavigate={selectSidebarItemWithIntent}
+      onNewSessionInProfile={startSessionInProfile}
       onNewSessionInWorkspace={startSessionInWorkspace}
-      onResumeSession={sessionId => navigate(sessionRoute(sessionId))}
+      onResumeSession={openStoredSession}
       onTriggerCronJob={jobId => {
         void triggerCronJob(jobId)
           .then(() => refreshCronJobs())
@@ -1059,14 +1303,18 @@ export function DesktopController() {
         />
       )}
       <ModelPickerOverlay gateway={gatewayRef.current || undefined} onSelect={selectModel} />
-      <SessionPickerOverlay onResume={resumeSession} />
+      <SessionPickerOverlay onResume={openStoredSession} />
       <ModelVisibilityOverlay gateway={gatewayRef.current || undefined} onOpenProviders={openProviderSettings} />
       <UpdatesOverlay />
       <GatewayConnectingOverlay />
       <BootFailureOverlay />
-      <CommandPalette />
+      <CommandPalette
+        openStoredSession={openStoredSession}
+        startFreshSession={startPlainFreshSession}
+        startSessionInWorkspace={startSessionInWorkspace}
+      />
       <PetGenerateOverlay />
-      <SessionSwitcher />
+      <SessionSwitcher onOpenSession={openStoredSession} />
       <FileActionDialogs />
       <RemoteFolderPicker />
 
@@ -1098,7 +1346,7 @@ export function DesktopController() {
             onClose={closeOverlayToPreviousRoute}
             onDeleteSession={removeSession}
             onNavigateRoute={path => navigate(path)}
-            onOpenSession={sessionId => navigate(sessionRoute(sessionId))}
+            onOpenSession={openStoredSession}
           />
         </Suspense>
       )}
@@ -1111,10 +1359,7 @@ export function DesktopController() {
 
       {cronOpen && (
         <Suspense fallback={null}>
-          <CronView
-            onClose={closeOverlayToPreviousRoute}
-            onOpenSession={sessionId => navigate(sessionRoute(sessionId))}
-          />
+          <CronView onClose={closeOverlayToPreviousRoute} onOpenSession={openStoredSession} />
         </Suspense>
       )}
 
@@ -1157,7 +1402,7 @@ export function DesktopController() {
       onReload={reloadFromMessage}
       onRemoveAttachment={id => void composer.removeAttachment(id)}
       onRestoreToMessage={restoreToMessage}
-      onRetryResume={sessionId => void resumeSession(sessionId, true)}
+      onRetryResume={sessionId => void openStoredSession(sessionId, { forceResume: true })}
       onSteer={steerPrompt}
       onSubmit={submitText}
       onThreadMessagesChange={handleThreadMessagesChange}
@@ -1332,7 +1577,7 @@ export function DesktopController() {
           <Route
             element={
               <Suspense fallback={null}>
-                <ArtifactsView setStatusbarItemGroup={setStatusbarItemGroup} />
+                <ArtifactsView onOpenSession={openStoredSession} setStatusbarItemGroup={setStatusbarItemGroup} />
               </Suspense>
             }
             path="artifacts"

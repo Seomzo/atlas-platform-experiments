@@ -12,7 +12,7 @@ exactly as before.
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -59,6 +59,89 @@ def _seed(db, sid, title, n=8):
 
 
 class TestInPlaceCompaction:
+    def test_durable_capture_failure_prevents_rewrite_and_releases_lock(self):
+        from agent.conversation_compression import compress_context
+        from agent.memory_manager import MemoryDurabilityError
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = SessionDB(db_path=Path(tmp) / "t.db")
+            sid = "durability_barrier"
+            _seed(db, sid, "protected")
+            agent = _make_agent(db, sid, in_place=True)
+            agent._compression_feasibility_checked = True
+            agent.context_compressor.compress = MagicMock()
+            manager = MagicMock()
+            manager.on_pre_compress.side_effect = MemoryDurabilityError(
+                "cortex", "pre-compression capture"
+            )
+            agent._memory_manager = manager
+            messages = [{"role": "user", "content": f"m{i}"} for i in range(8)]
+
+            with pytest.raises(MemoryDurabilityError):
+                compress_context(
+                    agent,
+                    messages,
+                    approx_tokens=100_000,
+                    system_message="sys",
+                )
+
+            agent.context_compressor.compress.assert_not_called()
+            assert agent.session_id == sid
+            assert db.get_session(sid)["end_reason"] is None
+            assert db.get_compression_lock_holder(sid) is None
+            assert len(db.get_messages_as_conversation(sid)) == 8
+
+    def test_durable_rebind_failure_prevents_in_place_rewrite(self):
+        """A same-id provider refresh is still a pre-rewrite durability barrier."""
+        from agent.conversation_compression import compress_context
+        from agent.memory_manager import MemoryDurabilityError
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = SessionDB(db_path=Path(tmp) / "t.db")
+            sid = "in_place_rebind_barrier"
+            _seed(db, sid, "protected")
+            agent = _make_agent(db, sid, in_place=True)
+            agent._compression_feasibility_checked = True
+            manager = MagicMock()
+            manager.on_pre_compress.return_value = ""
+            manager.build_system_prompt.return_value = ""
+            manager.on_session_switch.side_effect = MemoryDurabilityError(
+                "cortex", "session switch"
+            )
+            agent._memory_manager = manager
+            messages = [{"role": "user", "content": f"m{i}"} for i in range(8)]
+
+            with pytest.raises(MemoryDurabilityError):
+                compress_context(
+                    agent,
+                    messages,
+                    approx_tokens=100_000,
+                    system_message="sys",
+                )
+
+            assert agent.session_id == sid
+            assert db.get_session(sid)["end_reason"] is None
+            assert len(db.get_messages_as_conversation(sid)) == 8
+            assert db.get_compression_lock_holder(sid) is None
+
+    def test_codex_explicit_compaction_stops_before_thread_compact(self):
+        from agent.conversation_compression import compress_context
+        from agent.memory_manager import MemoryDurabilityError
+
+        agent = MagicMock()
+        agent.api_mode = "codex_app_server"
+        agent._memory_manager.on_pre_compress.side_effect = MemoryDurabilityError(
+            "cortex", "pre-compression capture"
+        )
+        messages = [{"role": "user", "content": "still live"}]
+
+        with pytest.raises(MemoryDurabilityError):
+            compress_context(agent, messages, system_message="sys", force=True)
+
+        agent._codex_session.compact_thread.assert_not_called()
+
     def test_in_place_keeps_same_session_id(self):
         """In-place mode: id unchanged, no child row, no rename, history kept."""
         from hermes_state import SessionDB
@@ -185,6 +268,55 @@ class TestInPlaceCompaction:
 
 
 class TestRotationFallbackWhenFlagOff:
+    def test_durable_rebind_failure_rolls_back_to_parent(self):
+        """Never publish a child id while Cortex remains bound to its parent."""
+        from agent.conversation_compression import compress_context
+        from agent.memory_manager import MemoryDurabilityError
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = SessionDB(db_path=Path(tmp) / "t.db")
+            sid = "20260619_rebind_parent"
+            _seed(db, sid, "protected")
+            agent = _make_agent(db, sid, in_place=False)
+            agent._compression_feasibility_checked = True
+            agent._flush_messages_to_session_db = MagicMock()
+            manager = MagicMock()
+            manager.on_pre_compress.return_value = ""
+            manager.build_system_prompt.return_value = ""
+
+            def _switch(new_session_id, **kwargs):
+                if kwargs.get("reason") == "compression":
+                    assert agent.session_id == sid
+                    raise MemoryDurabilityError("cortex", "session switch")
+                assert kwargs.get("reason") == "compression_rollback"
+                assert new_session_id == sid
+
+            manager.on_session_switch.side_effect = _switch
+            agent._memory_manager = manager
+            messages = [{"role": "user", "content": f"m{i}"} for i in range(8)]
+
+            with pytest.raises(MemoryDurabilityError):
+                compress_context(
+                    agent,
+                    messages,
+                    approx_tokens=100_000,
+                    system_message="sys",
+                )
+
+            assert agent.session_id == sid
+            assert agent._session_db_created is True
+            assert db.get_session(sid)["end_reason"] is None
+            children = db._conn.execute(
+                "SELECT id FROM sessions WHERE parent_session_id = ?", (sid,)
+            ).fetchall()
+            assert children == []
+            assert len(db.get_messages_as_conversation(sid)) == 8
+            assert db.get_compression_lock_holder(sid) is None
+            assert manager.on_session_switch.call_count == 2
+            assert manager.on_session_switch.call_args_list[0].args[0] != sid
+            assert manager.on_session_switch.call_args_list[1].args[0] == sid
+
     def test_rotation_when_flag_off(self):
         """Rotation is now the OPT-OUT fallback (default flipped to in-place in
         #38763). With in_place=False explicitly set, legacy rotation is
@@ -317,4 +449,3 @@ class TestCompactedTurnsStaySearchable:
                 "ZEBRAWORD", role_filter=["user", "assistant"], include_inactive=True
             )
             assert len(recovered) == 1
-

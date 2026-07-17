@@ -23,6 +23,7 @@ def _make_cli():
     cli.conversation_history = []
     cli.session_id = "test-session"
     cli._delete_session_on_exit = False
+    cli._logical_close_requested = False
     return cli
 
 
@@ -32,18 +33,21 @@ class TestExitDeleteFlag:
         result = cli.process_command("/exit")
         assert result is False
         assert cli._delete_session_on_exit is False
+        assert cli._logical_close_requested is True
 
     def test_plain_quit_does_not_arm_delete(self):
         cli = _make_cli()
         result = cli.process_command("/quit")
         assert result is False
         assert cli._delete_session_on_exit is False
+        assert cli._logical_close_requested is True
 
     def test_exit_delete_arms_flag(self):
         cli = _make_cli()
         result = cli.process_command("/exit --delete")
         assert result is False
         assert cli._delete_session_on_exit is True
+        assert cli._logical_close_requested is True
 
     def test_quit_delete_arms_flag(self):
         cli = _make_cli()
@@ -90,6 +94,7 @@ class TestExitDeleteFlag:
         # process_command returns True = keep running
         assert result is True
         assert cli._delete_session_on_exit is False
+        assert cli._logical_close_requested is False
 
     def test_unknown_exit_argument_prints_help(self):
         cli = _make_cli()
@@ -100,6 +105,7 @@ class TestExitDeleteFlag:
         result = cli.process_command("/exit garbage")
         assert result is True
         assert cli._delete_session_on_exit is False
+        assert cli._logical_close_requested is False
 
 
 class TestCommandRegistry:

@@ -64,9 +64,13 @@ class ModelGateway:
         )
         if not isinstance(last_input, str):
             last_input = json.dumps(last_input, sort_keys=True, separators=(",", ":"))
-        content = (
-            f"Atlas mock response {digest[:12]}. Validated request: {last_input[:1000]}"
-        )
+        if request.model == self.settings.cortex_model_id:
+            content = self._mock_cortex_response(last_input)
+        else:
+            content = (
+                f"Atlas mock response {digest[:12]}. Validated request: "
+                f"{last_input[:1000]}"
+            )
         input_tokens = _estimate_tokens(canonical)
         output_tokens = _estimate_tokens(content)
         request_id = f"chatcmpl-mock-{digest[:20]}"
@@ -98,6 +102,71 @@ class ModelGateway:
             output_tokens=output_tokens,
         )
 
+    @staticmethod
+    def _mock_cortex_response(prompt: str) -> str:
+        """Return deterministic schema-valid no-promotion Cortex operations.
+
+        Development mock mode must exercise the real managed worker without
+        inventing or consuming customer memories. It therefore emits one
+        grounded, non-mutating ``defer_unresolved`` operation per supplied
+        candidate. Production never uses this path.
+        """
+        try:
+            payload = json.loads(prompt)
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        candidates = payload.get("candidates")
+        repair = False
+        if not isinstance(candidates, list):
+            candidates = payload.get("candidate_constraints")
+            repair = True
+        if not isinstance(candidates, list):
+            candidates = []
+        operations: list[dict[str, Any]] = []
+        for candidate in candidates[:20]:
+            if not isinstance(candidate, dict):
+                continue
+            authoritative = candidate.get("authoritative_evidence_ids")
+            evidence_ids = (
+                [str(value) for value in authoritative if str(value).strip()]
+                if isinstance(authoritative, list)
+                else []
+            )
+            if not evidence_ids and not repair:
+                evidence = candidate.get("evidence")
+                if isinstance(evidence, list):
+                    evidence_ids = [
+                        str(item.get("id"))
+                        for item in evidence
+                        if isinstance(item, dict) and str(item.get("id") or "").strip()
+                    ]
+            observation_id = str(candidate.get("observation_id") or "").strip()
+            if not observation_id or not evidence_ids:
+                continue
+            operations.append({
+                "observation_id": observation_id,
+                "action": "defer_unresolved",
+                "memory_kind": "event",
+                "statement": "",
+                "evidence_ids": [evidence_ids[0]],
+                "target_memory_id": None,
+                "entities": [],
+                "valid_from": None,
+                "valid_until": None,
+                "rationale": "Deterministic development mock; decision deferred.",
+                "sensitivity": "restricted",
+                "retention": "short",
+                "missing_information": "",
+            })
+        return json.dumps(
+            {
+                "schema_version": "atlas.cortex.triage.v1",
+                "operations": operations,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
     async def _upstream_complete(self, request: ChatCompletionRequest) -> GatewayResult:
         api_key = self.settings.upstream_api_key
         if not api_key:
@@ -113,6 +182,7 @@ class ModelGateway:
             "model",
             "parallel_tool_calls",
             "presence_penalty",
+            "response_format",
             "seed",
             "stop",
             "temperature",

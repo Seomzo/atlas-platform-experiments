@@ -14,6 +14,8 @@ import {
   $desktopOnboarding,
   clearPendingProviderOAuth,
   closeManualOnboarding,
+  completeDesktopOnboarding,
+  confirmOnboardingMemoryModel,
   confirmOnboardingModel,
   DEFAULT_MANUAL_ONBOARDING_REASON,
   DEFAULT_ONBOARDING_REASON,
@@ -25,6 +27,7 @@ import {
   setOnboardingMode,
   startProviderOAuth
 } from '@/store/onboarding'
+import { $activeGatewayProfile } from '@/store/profile'
 import type { ModelOptionProvider, OAuthProvider } from '@/types/hermes'
 
 import { DocsLink, FlowPanel, Status } from './flow'
@@ -161,6 +164,7 @@ export function DesktopOnboardingOverlay({ enabled, onCompleted, requestGateway 
   const { t } = useI18n()
   const onboarding = useStore($desktopOnboarding)
   const boot = useStore($desktopBoot)
+  const activeGatewayProfile = useStore($activeGatewayProfile)
   const ctxRef = useRef<OnboardingContext>({ requestGateway, onCompleted })
   ctxRef.current = { requestGateway, onCompleted }
 
@@ -178,28 +182,60 @@ export function DesktopOnboardingOverlay({ enabled, onCompleted, requestGateway 
   const [leaving, setLeaving] = useState(false)
   const [blueprintOpen, setBlueprintOpen] = useState(true)
 
-  const finalizeOnboarding = () => {
+  const finalizeOnboarding = async () => {
     if (leaving) {
+      return
+    }
+
+    // Pin the owner before any request or exit animation. A profile switch
+    // during either interval must not let profile B's setup mark profile A as
+    // configured.
+    const completionProfile = 'profile' in flow ? flow.profile : activeGatewayProfile
+    let shouldComplete = false
+
+    if (flow.status === 'confirming_model') {
+      const outcome = await confirmOnboardingModel(ctx)
+
+      if (outcome === 'memory' || !outcome) {
+        return
+      }
+
+      shouldComplete = outcome === 'complete'
+    } else if (flow.status === 'confirming_memory_model') {
+      shouldComplete = await confirmOnboardingMemoryModel()
+    }
+
+    if (!shouldComplete) {
       return
     }
 
     const reduce = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
 
+    const finish = () => {
+      if (!completeDesktopOnboarding(completionProfile)) {
+        setLeaving(false)
+
+        return
+      }
+
+      ctx.onCompleted?.()
+    }
+
     if (reduce) {
-      confirmOnboardingModel(ctx)
+      finish()
 
       return
     }
 
     setLeaving(true)
-    window.setTimeout(() => confirmOnboardingModel(ctx), ONBOARDING_EXIT_MS)
+    window.setTimeout(finish, ONBOARDING_EXIT_MS)
   }
 
   useEffect(() => {
     if (enabled || onboarding.requested) {
       void refreshOnboarding(ctx)
     }
-  }, [ctx, enabled, onboarding.requested])
+  }, [activeGatewayProfile, ctx, enabled, onboarding.requested])
 
   // When the Providers settings page asked to connect a specific provider, the
   // store stashed its id. Once the provider list has loaded and we're back at
@@ -240,10 +276,10 @@ export function DesktopOnboardingOverlay({ enabled, onCompleted, requestGateway 
     return null
   }
 
-  // The user chose "I'll choose a provider later" on first run. Stay out of the
-  // way on every subsequent launch — they re-enter via Settings → Providers
-  // (manual mode), which sets manual=true and bypasses this gate.
-  if (onboarding.firstRunSkipped && !onboarding.manual) {
+  // The user chose "I'll choose a provider later" on first run. Keep the idle
+  // provider prompt dismissed, but never hide an active recovery/migration
+  // flow (for example, required Cortex setup after chat was configured by CLI).
+  if (onboarding.firstRunSkipped && !onboarding.manual && onboarding.flow.status === 'idle') {
     return null
   }
 
@@ -267,9 +303,15 @@ export function DesktopOnboardingOverlay({ enabled, onCompleted, requestGateway 
   const ready = onboarding.manual || (enabled && onboarding.configured === false)
   const showPicker = flow.status === 'idle' || flow.status === 'success'
   const showBlueprint = ready && showPicker && blueprintOpen && !onboarding.manual && !onboarding.localEndpoint
+
   // The final "you're in" screen drops the card chrome and floats centered on
   // the surface — same bare, cinematic treatment as the connecting overlay.
-  const bare = ready && !showPicker && flow.status === 'confirming_model'
+  const bare =
+    ready &&
+    !showPicker &&
+    (flow.status === 'confirming_model' ||
+      flow.status === 'loading_memory_model' ||
+      flow.status === 'confirming_memory_model')
 
   return (
     <div
@@ -316,7 +358,7 @@ export function DesktopOnboardingOverlay({ enabled, onCompleted, requestGateway 
               showPicker ? (
                 <Picker ctx={ctx} />
               ) : (
-                <FlowPanel ctx={ctx} flow={flow} leaving={leaving} onBegin={finalizeOnboarding} />
+                <FlowPanel ctx={ctx} flow={flow} leaving={leaving} onBegin={() => void finalizeOnboarding()} />
               )
             ) : (
               <Preparing boot={boot} />

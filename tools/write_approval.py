@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -65,6 +66,7 @@ _SUBSYSTEMS = (MEMORY, SKILLS)
 # "block all writes" state — to disable a subsystem entirely use its own
 # enable flag (e.g. ``memory.memory_enabled: false``).
 CONFIG_KEY = "write_approval"
+_PENDING_ID_RE = re.compile(r"^[0-9a-f]{8}$", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +110,31 @@ def _normalize_enabled(value: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 def _pending_dir(subsystem: str) -> Path:
-    return get_hermes_home() / "pending" / subsystem
+    if subsystem not in _SUBSYSTEMS:
+        raise ValueError(f"unsupported pending-write subsystem: {subsystem}")
+    home = get_hermes_home().expanduser()
+    pending_root = home / "pending"
+    candidate = pending_root / subsystem
+    # Pending writes carry durable user data and must never escape the active
+    # profile through a pre-created symlink.
+    if pending_root.is_symlink() or candidate.is_symlink():
+        raise PermissionError("pending-write directory must not be a symlink")
+    resolved_home = home.resolve(strict=False)
+    resolved_candidate = candidate.resolve(strict=False)
+    try:
+        resolved_candidate.relative_to(resolved_home)
+    except ValueError as exc:
+        raise PermissionError(
+            "pending-write directory escaped the active profile"
+        ) from exc
+    return candidate
+
+
+def _pending_path(subsystem: str, pending_id: str) -> Path:
+    pending_id = str(pending_id or "")
+    if not _PENDING_ID_RE.fullmatch(pending_id):
+        raise ValueError("invalid pending-write id")
+    return _pending_dir(subsystem) / f"{pending_id}.json"
 
 
 def stage_write(subsystem: str, payload: Dict[str, Any],
@@ -139,25 +165,57 @@ def stage_write(subsystem: str, payload: Dict[str, Any],
         "created_at": time.time(),
         "payload": payload,
     }
+    tmp: Optional[Path] = None
     try:
         d = _pending_dir(subsystem)
-        d.mkdir(parents=True, exist_ok=True)
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name != "nt":
+            os.chmod(d.parent, 0o700)
+            os.chmod(d, 0o700)
         path = d / f"{pid}.json"
         tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        if path.exists() or path.is_symlink() or tmp.exists() or tmp.is_symlink():
+            raise FileExistsError("pending-write id collision")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(tmp, flags, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, indent=2))
+            handle.flush()
+            os.fsync(handle.fileno())
+        if os.name != "nt":
+            os.chmod(tmp, 0o600)
         os.replace(tmp, path)
+        if os.name != "nt":
+            os.chmod(path, 0o600)
+        record["persisted"] = True
     except Exception as e:  # pragma: no cover - disk failure path
+        record["persisted"] = False
         logger.error("Failed to stage pending %s write: %s", subsystem, e, exc_info=True)
+        if tmp is not None:
+            try:
+                if tmp.exists() and not tmp.is_symlink():
+                    tmp.unlink()
+            except OSError:
+                pass
     return record
 
 
 def list_pending(subsystem: str) -> List[Dict[str, Any]]:
     """Return all pending records for ``subsystem``, oldest first."""
-    d = _pending_dir(subsystem)
+    try:
+        d = _pending_dir(subsystem)
+    except (ValueError, PermissionError) as exc:
+        logger.error("Refusing unsafe pending-write directory: %s", exc)
+        return []
     if not d.exists():
         return []
     records: List[Dict[str, Any]] = []
     for p in d.glob("*.json"):
+        if p.is_symlink():
+            logger.warning("Skipping symlinked pending record: %s", p)
+            continue
         try:
             records.append(json.loads(p.read_text(encoding="utf-8")))
         except Exception:
@@ -168,8 +226,13 @@ def list_pending(subsystem: str) -> List[Dict[str, Any]]:
 
 def get_pending(subsystem: str, pending_id: str) -> Optional[Dict[str, Any]]:
     """Return a single pending record by id, or None."""
-    path = _pending_dir(subsystem) / f"{pending_id}.json"
+    try:
+        path = _pending_path(subsystem, pending_id)
+    except (ValueError, PermissionError):
+        return None
     if not path.exists():
+        return None
+    if path.is_symlink():
         return None
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -179,11 +242,15 @@ def get_pending(subsystem: str, pending_id: str) -> Optional[Dict[str, Any]]:
 
 def discard_pending(subsystem: str, pending_id: str) -> bool:
     """Delete a pending record. Returns True if it existed."""
-    path = _pending_dir(subsystem) / f"{pending_id}.json"
     try:
+        path = _pending_path(subsystem, pending_id)
+        if path.is_symlink():
+            return False
         if path.exists():
             path.unlink()
             return True
+    except (ValueError, PermissionError):
+        return False
     except Exception as e:  # pragma: no cover
         logger.error("Failed to discard pending %s/%s: %s", subsystem, pending_id, e)
     return False
@@ -191,7 +258,10 @@ def discard_pending(subsystem: str, pending_id: str) -> bool:
 
 def pending_count(subsystem: str) -> int:
     """Cheap count of pending records (for notification badges)."""
-    d = _pending_dir(subsystem)
+    try:
+        d = _pending_dir(subsystem)
+    except (ValueError, PermissionError):
+        return 0
     if not d.exists():
         return 0
     try:

@@ -53,6 +53,7 @@ import {
   PanelSectionLabel
 } from '../overlays/panel'
 import type { SetStatusbarItemGroup } from '../shell/statusbar-controls'
+import { publicCronJobs } from '../starmap/system-job'
 
 import { jobState, jobTitle, STATE_DOT } from './job-state'
 
@@ -255,8 +256,9 @@ export function CronView({ onClose, onOpenSession, setStatusbarItemGroup: _setSt
   // Source of truth is the shared atom (also fed by the controller poll), so the
   // sidebar and this overlay never drift — a delete here clears the sidebar row
   // immediately. `loading` only gates the first paint before the atom is filled.
-  const jobs = useStore($cronJobs)
-  const [loading, setLoading] = useState(jobs.length === 0)
+  const allJobs = useStore($cronJobs)
+  const jobs = useMemo(() => publicCronJobs(allJobs), [allJobs])
+  const [loading, setLoading] = useState(allJobs.length === 0)
   const [query, setQuery] = useState('')
   const [busyJobId, setBusyJobId] = useState<null | string>(null)
   // Master/detail: the job whose schedule + run history fill the right pane.

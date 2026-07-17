@@ -35,7 +35,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import types
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -88,6 +88,22 @@ class _FakeAgent:
 
 
 class TestFinalizeShutdownFlushesInflightTranscript:
+    def test_operational_shutdown_never_emits_logical_finalize_hook(self):
+        runner = _make_runner()
+        agent = _FakeAgent(
+            session_messages=[{"role": "user", "content": "resume me later"}]
+        )
+
+        with patch("hermes_cli.plugins.invoke_hook") as invoke_hook:
+            _finalize(runner, {"k": agent})
+
+        invoke_hook.assert_not_called()
+        agent.shutdown_memory_provider.assert_called_once_with(
+            agent._session_messages,
+            finalize=False,
+            reason="resource_cleanup",
+        )
+
     def test_inflight_messages_flushed_before_teardown(self):
         """The mid-turn transcript (tail = pending tool result) is flushed
         to the session DB during shutdown finalization."""

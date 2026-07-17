@@ -17,7 +17,12 @@ import asyncio
 import pytest
 
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
+from gateway.platforms.base import (
+    BasePlatformAdapter,
+    EphemeralReply,
+    MessageEvent,
+    MessageType,
+)
 from gateway.session import SessionSource, build_session_key
 
 
@@ -111,6 +116,34 @@ class TestCommandBypassActiveSession:
 
         assert sk not in adapter._pending_messages
         assert any("handled:new" in r for r in adapter.sent_responses)
+
+    @pytest.mark.asyncio
+    async def test_new_durability_timeout_preserves_old_owner_and_guard(self):
+        """A declined boundary must not cancel the still-unwinding turn."""
+        adapter = _make_adapter()
+        sk = _session_key()
+        original_guard = asyncio.Event()
+        owner_task = asyncio.create_task(asyncio.sleep(60))
+        adapter._active_sessions[sk] = original_guard
+        adapter._session_tasks[sk] = owner_task
+
+        async def _declined_boundary(_event):
+            reply = EphemeralReply("memory capture still finishing")
+            reply.preserve_active_session = True
+            return reply
+
+        adapter._message_handler = _declined_boundary
+        try:
+            await adapter.handle_message(_make_event("/new"))
+
+            assert adapter._active_sessions[sk] is original_guard
+            assert adapter._session_tasks[sk] is owner_task
+            assert not owner_task.cancelled()
+            assert "memory capture still finishing" in adapter.sent_responses
+        finally:
+            owner_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await owner_task
 
     @pytest.mark.asyncio
     async def test_reset_bypasses_guard(self):

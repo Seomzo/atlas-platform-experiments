@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import inspect
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Optional
@@ -49,7 +50,9 @@ def _normalize_toolsets(toolsets: object = None) -> list[str] | None:
     return [item for item in normalized if item] or None
 
 
-def _validate_explicit_toolsets(toolsets: object = None) -> tuple[list[str] | None, str | None]:
+def _validate_explicit_toolsets(
+    toolsets: object = None,
+) -> tuple[list[str] | None, str | None]:
     normalized = _normalize_toolsets(toolsets)
     if normalized is None:
         return None, None
@@ -92,7 +95,11 @@ def _validate_explicit_toolsets(toolsets: object = None) -> tuple[list[str] | No
             from hermes_cli.tools_config import _parse_enabled_flag
 
             cfg = read_raw_config()
-            mcp_servers = cfg.get("mcp_servers") if isinstance(cfg.get("mcp_servers"), dict) else {}
+            mcp_servers = (
+                cfg.get("mcp_servers")
+                if isinstance(cfg.get("mcp_servers"), dict)
+                else {}
+            )
             for name, server_cfg in mcp_servers.items():
                 if not isinstance(server_cfg, dict):
                     continue
@@ -106,11 +113,17 @@ def _validate_explicit_toolsets(toolsets: object = None) -> tuple[list[str] | No
 
     mcp_valid = [name for name in unresolved if name in mcp_names]
     disabled = [name for name in unresolved if name in mcp_disabled]
-    unknown = [name for name in unresolved if name not in mcp_names and name not in mcp_disabled]
+    unknown = [
+        name
+        for name in unresolved
+        if name not in mcp_names and name not in mcp_disabled
+    ]
     valid = built_in + mcp_valid
 
     if unknown:
-        sys.stderr.write(f"hermes -z: ignoring unknown --toolsets entries: {', '.join(unknown)}\n")
+        sys.stderr.write(
+            f"hermes -z: ignoring unknown --toolsets entries: {', '.join(unknown)}\n"
+        )
     if disabled:
         sys.stderr.write(
             "hermes -z: ignoring disabled MCP servers (set enabled: true in config.yaml to use): "
@@ -123,7 +136,9 @@ def _validate_explicit_toolsets(toolsets: object = None) -> tuple[list[str] | No
     return valid, None
 
 
-def _write_usage_file(path: Optional[str], result: dict, failure: Optional[str] = None) -> None:
+def _write_usage_file(
+    path: Optional[str], result: dict, failure: Optional[str] = None
+) -> None:
     """Best-effort JSON usage report for pipelines (``-z --usage-file``).
 
     Written even on failure so callers can always account for spend. Never
@@ -271,7 +286,9 @@ def run_oneshot(
         return 2
 
     if not (response or "").strip():
-        real_stderr.write("hermes -z: no final response was produced; treating the run as failed.\n")
+        real_stderr.write(
+            "hermes -z: no final response was produced; treating the run as failed.\n"
+        )
         real_stderr.flush()
         return 1
 
@@ -292,6 +309,88 @@ def _create_session_db_for_oneshot():
     except Exception as exc:
         logging.debug("SQLite session store not available for oneshot mode: %s", exc)
         return None
+
+
+def _finalize_oneshot_agent(agent, session_db, *, reason: str) -> None:
+    """Own the one-shot logical boundary before ending its transcript row.
+
+    ``hermes -z`` bypasses the interactive CLI cleanup stack.  Its agent is a
+    real primary Atlas agent, however, so the end of the single run is also the
+    end of its logical Cortex session.  Commit the immutable admission first;
+    only then mark the short-term SQLite session ended.  On a durable failure
+    Cortex leaves its evidence-bound recovery marker in place and the DB row is
+    deliberately left open instead of publishing a false completed boundary.
+    Resource cleanup still runs on every path.
+    """
+
+    if agent is None:
+        return
+    session_id = str(getattr(agent, "session_id", "") or "")
+    messages = getattr(agent, "_session_messages", None)
+    if not isinstance(messages, list):
+        messages = []
+    boundary_owned = False
+    try:
+        shutdown = getattr(agent, "shutdown_memory_provider", None)
+        if callable(shutdown):
+            try:
+                parameters = inspect.signature(shutdown).parameters.values()
+                supports_finalize = any(
+                    parameter.name == "finalize"
+                    or parameter.kind == inspect.Parameter.VAR_KEYWORD
+                    for parameter in parameters
+                )
+            except (TypeError, ValueError):
+                # The real AIAgent method is modern. If an opaque callable
+                # cannot be inspected, fail through that authoritative
+                # contract rather than retrying after an internal TypeError.
+                supports_finalize = True
+            if supports_finalize:
+                shutdown(messages, finalize=True, reason=reason)
+            else:
+                # Compatibility for lightweight/plugin agents exposing the
+                # historical one-argument shutdown contract.
+                shutdown(messages)
+        boundary_owned = True
+
+        try:
+            from hermes_cli.plugins import invoke_hook
+
+            invoke_hook(
+                "on_session_finalize",
+                session_id=session_id or None,
+                platform="cli",
+                reason=reason,
+            )
+        except Exception:
+            pass
+
+        if session_db is not None and session_id:
+            end_session = getattr(session_db, "end_session", None)
+            if callable(end_session):
+                end_session(session_id, reason)
+    finally:
+        # ``AIAgent.close`` normally writes ``agent_close``.  That operational
+        # reason is recoverable, not a logical boundary, and must never mask a
+        # failed Cortex commit or race the explicit reason above.
+        try:
+            agent._end_session_on_close = False
+        except Exception:
+            pass
+        try:
+            close = getattr(agent, "close", None)
+            if callable(close):
+                close()
+        finally:
+            try:
+                close_db = getattr(session_db, "close", None)
+                if callable(close_db):
+                    close_db()
+            except Exception:
+                pass
+
+    if not boundary_owned:  # pragma: no cover - the failing call re-raises
+        raise RuntimeError("one-shot memory boundary was not completed")
 
 
 def _run_agent(
@@ -344,6 +443,7 @@ def _run_agent(
             # endpoints not in any catalog (local servers, custom proxies, etc.).
             try:
                 from hermes_cli import model_switch as _ms
+
                 _ms._ensure_direct_aliases()
                 direct = _ms.DIRECT_ALIASES.get(explicit_model.strip().lower())
             except Exception:
@@ -416,7 +516,26 @@ def _run_agent(
     agent.stream_delta_callback = None
     agent.tool_gen_callback = None
 
-    result = agent.run_conversation(prompt)
+    run_error: BaseException | None = None
+    result: dict = {}
+    try:
+        result = agent.run_conversation(prompt)
+    except BaseException as exc:  # preserve control-flow and provider errors
+        run_error = exc
+
+    try:
+        _finalize_oneshot_agent(
+            agent,
+            session_db,
+            reason="oneshot_complete" if run_error is None else "oneshot_failed",
+        )
+    except BaseException as finalize_error:
+        if run_error is not None:
+            raise run_error from finalize_error
+        raise
+
+    if run_error is not None:
+        raise run_error
     return (result.get("final_response") or "", result)
 
 

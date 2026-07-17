@@ -25,10 +25,13 @@ duplicate the user turn (#860 / #42039). This test locks in:
 
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from agent.codex_runtime import run_codex_app_server_turn
+from agent.memory_manager import MemoryDurabilityError
 from hermes_state import SessionDB
 from run_agent import AIAgent
 
@@ -59,6 +62,23 @@ def _make_agent(session_db=None, session_id="sess-codex"):
     agent._session_db_created = True
     agent.session_id = session_id
     return agent
+
+
+def _attach_real_memory_sync(agent):
+    """Bind the production sync helper to the otherwise-minimal mock agent."""
+    manager = MagicMock()
+    manager._tool_to_provider = {}
+    manager.get_all_tool_schemas.return_value = []
+    agent._memory_manager = manager
+    agent._current_turn_id = "codex-turn"
+    agent._current_task_id = "task-1"
+    agent._current_api_request_id = "request-1"
+    agent.platform = "test"
+    agent._sync_external_memory_for_turn = MethodType(
+        AIAgent._sync_external_memory_for_turn,
+        agent,
+    )
+    return manager
 
 
 def test_codex_success_flushes_and_reports_persisted():
@@ -116,14 +136,25 @@ def test_codex_turn_persists_each_message_exactly_once():
             original_user_message="USER_TURN",
             messages=messages,
             effective_task_id="task-1",
+            volatile_user_context=(
+                "<memory-context>\nVOLATILE_CORTEX_RECALL\n</memory-context>"
+            ),
         )
         assert result["agent_persisted"] is True
+
+        agent._codex_session.run_turn.assert_called_once_with(
+            user_input="USER_TURN",
+            untrusted_context=(
+                "<memory-context>\nVOLATILE_CORTEX_RECALL\n</memory-context>"
+            ),
+        )
 
         rows = db.get_messages(sid, include_inactive=True)
         contents = [r["content"] for r in rows]
         # Exactly one user turn, exactly one assistant turn — no duplicates.
         assert contents.count("USER_TURN") == 1, contents
         assert contents.count("CODEX_ASSISTANT") == 1, contents
+        assert all("VOLATILE_CORTEX_RECALL" not in content for content in contents)
         # session_search can now see the codex conversation.
         hits = {r["session_id"] for r in db.search_messages("CODEX_ASSISTANT")}
         assert sid in hits
@@ -131,6 +162,186 @@ def test_codex_turn_persists_each_message_exactly_once():
         import shutil
 
         shutil.rmtree(tmp)
+
+
+def test_codex_interrupted_turn_syncs_user_and_tools_without_partial_answer():
+    """Codex interrupt handling must match standard turn finalization."""
+    projected = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "terminal",
+                        "arguments": '{"command":"pytest"}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "terminal",
+            "tool_call_id": "call-1",
+            "content": "1 passed",
+        },
+        {"role": "assistant", "content": "PARTIAL ANSWER"},
+    ]
+    agent = _make_agent()
+    agent._codex_session.run_turn.return_value = SimpleNamespace(
+        interrupted=True,
+        error="user interrupted",
+        thread_id="thread-1",
+        turn_id="turn-1",
+        projected_messages=projected,
+        tool_iterations=1,
+        final_text="PARTIAL ANSWER",
+        should_retire=False,
+    )
+    manager = _attach_real_memory_sync(agent)
+    messages = [{"role": "user", "content": "run tests"}]
+
+    result = run_codex_app_server_turn(
+        agent,
+        user_message="run tests",
+        original_user_message="run tests",
+        messages=messages,
+        effective_task_id="task-1",
+    )
+
+    assert result["partial"] is True
+    sync_args, sync_kwargs = manager.sync_all.call_args
+    # The shared helper never promotes the partial Codex answer as assistant
+    # truth, while retaining the projected trajectory for completed tool
+    # call/result capture by Cortex.
+    assert sync_args == ("run tests", "")
+    assert sync_kwargs["messages"] is messages
+    assert projected[0] in messages
+    assert projected[1] in messages
+    manager.queue_prefetch_all.assert_not_called()
+
+
+def test_codex_error_result_syncs_as_interrupted():
+    """A returned Codex error is partial even if its interrupt flag is false."""
+    agent = _make_agent()
+    agent._codex_session.run_turn.return_value = SimpleNamespace(
+        interrupted=False,
+        error="app-server failed after tool completion",
+        thread_id="thread-1",
+        turn_id="turn-1",
+        projected_messages=[
+            {
+                "role": "tool",
+                "name": "terminal",
+                "tool_call_id": "call-1",
+                "content": "completed output",
+            }
+        ],
+        tool_iterations=1,
+        final_text="PARTIAL ANSWER",
+        should_retire=False,
+    )
+    manager = _attach_real_memory_sync(agent)
+    messages = [{"role": "user", "content": "inspect the repo"}]
+
+    result = run_codex_app_server_turn(
+        agent,
+        user_message="inspect the repo",
+        original_user_message="inspect the repo",
+        messages=messages,
+        effective_task_id="task-1",
+    )
+
+    assert result["partial"] is True
+    sync_args, sync_kwargs = manager.sync_all.call_args
+    assert sync_args == ("inspect the repo", "")
+    assert sync_kwargs["turn_metadata"]["interrupted"] is True
+    assert sync_kwargs["messages"] is messages
+    manager.queue_prefetch_all.assert_not_called()
+
+
+def test_codex_transport_exception_still_syncs_authoritative_user():
+    """A thrown transport error must not discard the accepted user turn."""
+    agent = _make_agent()
+    agent._codex_session.run_turn.side_effect = RuntimeError("subprocess died")
+    manager = _attach_real_memory_sync(agent)
+    messages = [{"role": "user", "content": "remember this attempt"}]
+
+    result = run_codex_app_server_turn(
+        agent,
+        user_message="remember this attempt",
+        original_user_message="remember this attempt",
+        messages=messages,
+        effective_task_id="task-1",
+    )
+
+    assert result["partial"] is True
+    sync_args, sync_kwargs = manager.sync_all.call_args
+    assert sync_args == ("remember this attempt", "")
+    assert sync_kwargs["turn_metadata"]["interrupted"] is True
+    assert sync_kwargs["messages"] is messages
+    manager.queue_prefetch_all.assert_not_called()
+
+
+def test_codex_completed_turn_surfaces_durable_capture_failure():
+    """Codex must not acknowledge a turn whose required Cortex write failed."""
+    agent = _make_agent()
+    manager = _attach_real_memory_sync(agent)
+    manager.sync_all.side_effect = MemoryDurabilityError("cortex", "turn sync")
+
+    with pytest.raises(MemoryDurabilityError, match="cortex"):
+        run_codex_app_server_turn(
+            agent,
+            user_message="persist this",
+            original_user_message="persist this",
+            messages=[{"role": "user", "content": "persist this"}],
+            effective_task_id="task-1",
+        )
+
+
+def test_codex_native_compaction_surfaces_precompress_durability_failure():
+    """Native auto-compaction cannot hide a failed Cortex boundary capture."""
+    agent = _make_agent()
+    turn = _make_turn()
+    turn.compacted = True
+    agent._codex_session.run_turn.return_value = turn
+    manager = _attach_real_memory_sync(agent)
+    manager.on_pre_compress.side_effect = MemoryDurabilityError(
+        "cortex", "pre-compression capture"
+    )
+
+    with pytest.raises(MemoryDurabilityError, match="cortex"):
+        run_codex_app_server_turn(
+            agent,
+            user_message="preserve this before compaction",
+            original_user_message="preserve this before compaction",
+            messages=[
+                {"role": "user", "content": "preserve this before compaction"}
+            ],
+            effective_task_id="task-1",
+        )
+
+    manager.on_pre_compress.assert_called_once()
+    manager.sync_all.assert_not_called()
+
+
+def test_codex_transport_error_surfaces_durable_user_capture_failure():
+    """Even an already-failed transport cannot hide loss of its user row."""
+    agent = _make_agent()
+    agent._codex_session.run_turn.side_effect = RuntimeError("subprocess died")
+    manager = _attach_real_memory_sync(agent)
+    manager.sync_all.side_effect = MemoryDurabilityError("cortex", "turn sync")
+
+    with pytest.raises(MemoryDurabilityError, match="cortex"):
+        run_codex_app_server_turn(
+            agent,
+            user_message="persist the attempt",
+            original_user_message="persist the attempt",
+            messages=[{"role": "user", "content": "persist the attempt"}],
+            effective_task_id="task-1",
+        )
 
 
 class TestGatewayPersistedResolution:

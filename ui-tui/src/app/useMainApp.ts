@@ -867,6 +867,7 @@ export function useMainApp(gw: GatewayClient) {
           guardBusySessionSwitch: session.guardBusySessionSwitch,
           newLiveSession: session.newLiveSession,
           newSession: session.newSession,
+          releaseSession: session.releaseSession,
           resetVisibleHistory: session.resetVisibleHistory,
           resumeById: session.resumeById,
           setSessionStartedAt

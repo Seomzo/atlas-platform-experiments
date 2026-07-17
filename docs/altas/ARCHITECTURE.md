@@ -107,8 +107,36 @@ sequenceDiagram
 - Builds immutable `ManagedContext` values.
 - Calls policy before connector or model use.
 - Dispatches named workflow implementations.
+- Converts a finalized-session Cortex job into an idempotent
+  `cortex.memory_maintenance` control-plane job carrying a strict provenance
+  envelope, binds its lease/claim to an exact static profile identity, matches
+  the claimed envelope to the exact next locally admitted job, and
+  transactionally leases only that memory job.
 - Reports job transitions and safe diagnostics.
-- Runs the fixture-backed fixed-ops workflow directly in this walking skeleton.
+- Runs the fixture-backed fixed-ops workflow and native Cortex maintenance
+  directly in this walking skeleton.
+
+### Cortex memory lifecycle
+
+Cortex separates durability from interpretation. Each completed user,
+assistant, or tool turn is synchronously appended to the profile store, but no
+memory model runs and no semantic job is enqueued from the turn path.
+Compression adds only a durability barrier and deterministic preservation note;
+every physical session produced by repeated compression retains the same
+logical-conversation lineage.
+
+Only an explicit logical finalization/reset creates the initial model-backed
+job. Cortex hashes the complete lineage and idempotently enqueues one
+`session_distill` chain, then wakes a dedicated asynchronous worker. That worker
+uses the cheap `atlas-cortex-memory` route, never the conversational model. It
+processes at most 100 due observations per job in bounded batches and emits a
+lineage-scoped continuation when overflow remains. Scheduled wakeups and the
+legacy-named 04:00 `dream_cycle` marker perform recovery, retention, and
+integrity work only; they may repair a missing canonical finalization job but
+do not create an independent nightly semantic pass. On a self-managed profile,
+a wake may resume the dedicated memory model for that exact previously admitted
+session-end chain after a crash or unavailable route; this is retry execution,
+not new semantic authority.
 
 ### Managed Hermes adapter
 
@@ -116,13 +144,37 @@ The current adapter surface contains:
 
 - An Atlas model-provider plugin for the server-side model gateway.
 - A mandatory managed policy guard before upstream tool dispatch.
+- Immutable request-local managed authorization; rotating job values never
+  enter process-global environment or the profile `.env`.
 - Focused tests proving managed mode cannot bypass that guard through skip
   flags or alternate dispatch paths.
 
-The next runtime milestone is an Atlas supervisor that starts one engine
-process per store/credential boundary with an isolated internal data directory,
-the Atlas provider profile, and a curated toolset. That process launch is not
-part of the current fixture-backed worker.
+The native Cortex runtime starts one profile-local managed maintenance
+supervisor whenever a complete device/store/agent binding is present. It keeps
+only the device credential needed to request work and obtains a fresh control-
+plane lease and exact `cortex.memory_maintenance` claim for every semantic
+unit. Gateway startup reattaches this supervisor for every served managed
+profile, so already-admitted session-end work resumes after a reboot without a
+foreground chat turn. Customers do not launch `atlas-control worker --watch`
+separately.
+
+The Cortex dispatch envelope contains only local job/admission/root IDs, a
+canonical input hash, attempt, due time, schema version, and dispatch-key
+commitment. The control plane persists it in the dedicated job payload;
+generic admin queue/requeue paths reject the Cortex capability. Claim and model
+paths require a matching dedicated admission ledger row and valid payload. The
+provider sends the exact envelope and key in request-local headers, and the
+model endpoint compares them with the persisted payload before and again
+during atomic usage reservation. Invalid legacy/tampered active jobs are
+quarantined rather than returned to the queue.
+
+This binds the shipped runtime path; it is not remote attestation. The server
+trusts an authenticated assigned device's statement that the opaque local IDs
+refer to its owner-controlled Cortex database. Hardware-backed attestation is
+required to prove that local database state to the server against a malicious
+or compromised device.
+Independent engine-process supervision for the broader curated tool runtime
+remains a later deployment milestone.
 
 Only the minimum fail-closed hook belongs in upstream execution code. Billing,
 Tekion behavior, customer UI, and product policy remain in Atlas modules.
@@ -195,9 +247,12 @@ its upstream provider credential. Chat completion requests must include the
 claimed running job in `X-Atlas-Job-ID`; idle or foreign jobs are denied. The
 job must explicitly declare `model.chat` as a static workflow dependency. The
 prototype defaults to eight requests and 4,096 requested output tokens per
-job. Each request is limited to one completion, 128 messages, 64 KiB per
-message, and 256 KiB total; unknown provider extensions are rejected. Quota
-configuration is documented in `.env.atlas.example`.
+ordinary job. The dedicated `cortex.memory_maintenance` job instead receives a
+separate, bounded 20-request/80,000-token allowance sized for the session-end
+batch and repair path; it cannot spend that allowance through the
+conversational model. Each request is limited to one completion, 128 messages,
+64 KiB per message, and 256 KiB total; unknown provider extensions are
+rejected. Quota configuration is documented in `.env.atlas.example`.
 
 ### Development admin surface
 

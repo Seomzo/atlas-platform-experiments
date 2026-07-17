@@ -324,26 +324,68 @@ def test_sessions_export_md_delete_after_verified_requires_yes(monkeypatch, tmp_
 
 
 def test_sessions_export_md_delete_after_verified_deletes_after_file_check(monkeypatch, tmp_path, capsys):
+    import altas.cortex.lifecycle as cortex_lifecycle
     import hermes_cli.main as main_mod
     import hermes_state
 
     captured = {}
+    calls = []
 
     class FakeDB:
         def resolve_session_id(self, session_id):
             return "s1"
 
-        def export_session(self, session_id):
-            return {"id": "s1", "title": "Delete", "message_count": 1, "messages": [{"role": "user", "content": "safe"}]}
+        def get_session_delete_closure(self, session_ids):
+            calls.append(("closure", tuple(session_ids)))
+            return ["s0", "s1", "delegate"]
 
-        def delete_session(self, session_id, **kwargs):
-            captured["deleted"] = session_id
-            return True
+        def get_compression_lineage(self, session_id):
+            if session_id in {"s0", "s1"}:
+                return ["s0", "s1"]
+            return ["delegate"]
+
+        def export_session_lineage(self, session_id):
+            calls.append(("export", session_id))
+            if session_id == "s1":
+                return {
+                    "id": "s1",
+                    "title": "Delete",
+                    "lineage_session_ids": ["s0", "s1"],
+                    "message_count": 2,
+                    "messages": [
+                        {"role": "user", "content": "root"},
+                        {"role": "assistant", "content": "tip"},
+                    ],
+                }
+            assert session_id == "delegate"
+            return {
+                "id": "delegate",
+                "title": "Delegate",
+                "lineage_session_ids": ["delegate"],
+                "message_count": 1,
+                "messages": [{"role": "assistant", "content": "result"}],
+            }
+
+        def delete_sessions(self, session_ids, **kwargs):
+            kwargs["before_delete"](tuple(session_ids))
+            calls.append(("delete", tuple(session_ids)))
+            captured["deleted"] = tuple(session_ids)
+            return len(session_ids)
 
         def close(self):
             pass
 
     monkeypatch.setattr(hermes_state, "SessionDB", lambda: FakeDB())
+
+    def _reconcile(_home, session_ids):
+        calls.append(("reconcile", tuple(session_ids)))
+        return tuple(session_ids)
+
+    monkeypatch.setattr(
+        cortex_lifecycle,
+        "reconcile_detached_session_deletions",
+        _reconcile,
+    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -363,9 +405,84 @@ def test_sessions_export_md_delete_after_verified_deletes_after_file_check(monke
 
     main_mod.main()
 
-    assert captured == {"deleted": "s1"}
-    assert len(list(tmp_path.glob("*.md"))) == 1
+    assert captured == {"deleted": ("s0", "s1", "delegate")}
+    assert calls == [
+        ("closure", ("s1",)),
+        ("export", "s1"),
+        ("export", "delegate"),
+        ("closure", ("s1",)),
+        ("reconcile", ("s0", "s1", "delegate")),
+        ("delete", ("s0", "s1", "delegate")),
+    ]
+    assert len(list(tmp_path.glob("*.md"))) == 2
     assert "Deleted exported session 's1'" in capsys.readouterr().out
+
+
+def test_sessions_export_md_delete_after_verified_keeps_transcript_on_cortex_failure(
+    monkeypatch, tmp_path, capsys
+):
+    import altas.cortex.lifecycle as cortex_lifecycle
+    import hermes_cli.main as main_mod
+    import hermes_state
+
+    class FakeDB:
+        def resolve_session_id(self, _session_id):
+            return "s1"
+
+        def get_session_delete_closure(self, session_ids):
+            assert session_ids == ["s1"]
+            return ["s1"]
+
+        def get_compression_lineage(self, _session_id):
+            return ["s1"]
+
+        def export_session_lineage(self, _session_id):
+            return {
+                "id": "s1",
+                "title": "Preserved",
+                "lineage_session_ids": ["s1"],
+                "messages": [{"role": "user", "content": "safe"}],
+            }
+
+        def delete_sessions(self, session_ids, **kwargs):
+            kwargs["before_delete"](tuple(session_ids))
+            raise AssertionError("verified transcript must remain on Cortex failure")
+
+        def close(self):
+            pass
+
+    def _fail_reconcile(_home, _session_ids):
+        raise RuntimeError("semantic job is still running")
+
+    monkeypatch.setattr(hermes_state, "SessionDB", lambda: FakeDB())
+    monkeypatch.setattr(
+        cortex_lifecycle,
+        "reconcile_detached_session_deletions",
+        _fail_reconcile,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "hermes",
+            "sessions",
+            "export",
+            "--format",
+            "md",
+            "--session-id",
+            "s1",
+            "--delete-after-verified",
+            "--yes",
+            str(tmp_path),
+        ],
+    )
+
+    main_mod.main()
+
+    assert len(list(tmp_path.glob("*.md"))) == 1
+    output = capsys.readouterr().out
+    assert "Exports verified, but deletion was aborted before transcript removal" in output
+    assert "semantic job is still running" in output
 
 
 def test_sessions_export_md_accepts_duration_age_grammar(monkeypatch, tmp_path, capsys):

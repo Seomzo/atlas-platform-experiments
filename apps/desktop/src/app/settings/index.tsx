@@ -3,11 +3,18 @@ import { useLocation, useNavigate } from 'react-router-dom'
 
 import { codiconIcon } from '@/components/ui/codicon'
 import { Tip } from '@/components/ui/tooltip'
-import { getHermesConfigDefaults, getHermesConfigRecord, saveHermesConfig } from '@/hermes'
+import {
+  getCortexMemoryModelOptions,
+  getHermesConfigDefaultsForProfile,
+  getHermesConfigRecord,
+  getHermesConfigRecordForProfile,
+  saveHermesConfigForProfile
+} from '@/hermes'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
 import { Archive, Bell, Download, Globe, Info, KeyRound, RefreshCw, Settings2, Upload, Wrench, Zap } from '@/lib/icons'
 import { notifyError } from '@/store/notifications'
+import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
 
 import { useRouteEnumParam } from '../hooks/use-route-enum-param'
 import { OverlayIconButton } from '../overlays/overlay-chrome'
@@ -19,6 +26,7 @@ import { AboutSettings } from './about-settings'
 import { AppearanceSettings } from './appearance-settings'
 import { ConfigSettings } from './config-settings'
 import { SECTIONS } from './constants'
+import { cortexSafeConfigDefaults } from './cortex-reset'
 import { GatewaySettings } from './gateway-settings'
 import { KEYS_VIEWS, KeysSettings, type KeysView } from './keys-settings'
 import { NotificationsSettings } from './notifications-settings'
@@ -105,7 +113,23 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
     }
 
     try {
-      await saveHermesConfig(await getHermesConfigDefaults())
+      const profile = normalizeProfileKey($activeGatewayProfile.get())
+
+      const [defaults, current, memoryModels] = await Promise.all([
+        getHermesConfigDefaultsForProfile(profile),
+        getHermesConfigRecordForProfile(profile),
+        getCortexMemoryModelOptions({ profile })
+      ])
+
+      if (normalizeProfileKey($activeGatewayProfile.get()) !== profile) {
+        throw new Error('The active profile changed while Atlas was preparing the reset. Try again in the new profile.')
+      }
+
+      if (memoryModels.current.valid !== true) {
+        throw new Error('Choose a valid Cortex memory model before resetting Atlas settings.')
+      }
+
+      await saveHermesConfigForProfile(cortexSafeConfigDefaults(defaults, current), profile)
       triggerHaptic('success')
       onConfigSaved?.()
     } catch (err) {

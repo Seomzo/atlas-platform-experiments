@@ -4,9 +4,7 @@ import { useState } from 'react'
 import { Codicon } from '@/components/ui/codicon'
 import type { SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
-import { notifyError } from '@/store/notifications'
-import { newSessionInProfile } from '@/store/profile'
-import { switchBranchInRepo } from '@/store/projects'
+import type { WorkspaceSessionTarget } from '@/store/projects'
 
 import { countLabel, SidebarRowStack } from '../chrome'
 import { SidebarLoadMoreRow } from '../load-more-row'
@@ -18,13 +16,20 @@ import { WorkspaceAddButton, WorkspaceHeader, WorkspaceMenu, WorkspaceShowMoreBu
 interface SidebarWorkspaceGroupProps {
   group: SidebarSessionGroup
   renderRows: (sessions: SessionInfo[]) => React.ReactNode
-  onNewSession?: (path: null | string) => void
+  onNewSessionInProfile?: (profile: string) => Promise<boolean> | void
+  onNewSession?: (target: WorkspaceSessionTarget, branch?: string) => boolean | Promise<boolean> | void
   // When set (linked worktree rows), shows a remove affordance that runs a real
   // `git worktree remove`.
   onRemove?: () => void
 }
 
-export function SidebarWorkspaceGroup({ group, renderRows, onNewSession, onRemove }: SidebarWorkspaceGroupProps) {
+export function SidebarWorkspaceGroup({
+  group,
+  renderRows,
+  onNewSession,
+  onNewSessionInProfile,
+  onRemove
+}: SidebarWorkspaceGroupProps) {
   const { t } = useI18n()
   const s = t.sidebar
   const isProfileGroup = group.mode === 'profile'
@@ -69,7 +74,7 @@ export function SidebarWorkspaceGroup({ group, renderRows, onNewSession, onRemov
 
   const handleNewSession = async () => {
     if (isProfileGroup) {
-      newSessionInProfile(group.id)
+      await onNewSessionInProfile?.(group.id)
 
       return
     }
@@ -78,29 +83,20 @@ export function SidebarWorkspaceGroup({ group, renderRows, onNewSession, onRemov
       return
     }
 
-    // Main-checkout lanes are branch-labeled views over the same repo root path.
-    // Clicking "+" on `main` should open on `main`, not whatever branch the root
-    // currently sits on (`test0`, etc.), so explicitly switch first.
-    if (group.isMain && group.path && group.label) {
-      try {
-        await switchBranchInRepo(group.path, group.label)
-      } catch (err) {
-        notifyError(err, t.statusStack.coding.switchFailed(group.label))
-
-        return
-      }
-    }
-
-    onNewSession(group.path)
+    // The controller owns the order: first confirm the old session's semantic
+    // memory boundary, then switch this repo's main checkout, then seed the new
+    // draft cwd. Passing the branch as intent prevents a rejected close from
+    // mutating the user's worktree before New Chat actually starts.
+    await onNewSession(group.path, group.isMain ? group.label : undefined)
   }
 
   return (
     <SidebarRowStack>
       <WorkspaceHeader
         action={
-          (onNewSession || isProfileGroup || onRemove) && (
+          (onNewSession || (isProfileGroup && onNewSessionInProfile) || onRemove) && (
             <div className="flex items-center">
-              {(onNewSession || isProfileGroup) && (
+              {(onNewSession || (isProfileGroup && onNewSessionInProfile)) && (
                 <WorkspaceAddButton
                   label={s.newSessionIn(group.label)}
                   // Profile groups start a fresh session in that profile but keep

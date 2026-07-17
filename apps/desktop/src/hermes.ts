@@ -10,6 +10,13 @@ import type {
   BackendUpdateCheckResponse,
   ComputerUseStatus,
   ConfigSchemaResponse,
+  CortexGraphResponse,
+  CortexHealthResponse,
+  CortexJobResponse,
+  CortexMemoryModelAssignmentRequest,
+  CortexMemoryModelAssignmentResponse,
+  CortexMemoryModelOptionsResponse,
+  CortexNodeDetailResponse,
   CronJob,
   CronJobCreatePayload,
   CronJobUpdates,
@@ -99,6 +106,18 @@ export type {
   ComputerUseStatus,
   ConfigFieldSchema,
   ConfigSchemaResponse,
+  CortexGraphCommunity,
+  CortexGraphEdge,
+  CortexGraphNode,
+  CortexGraphResponse,
+  CortexHealthResponse,
+  CortexJobResponse,
+  CortexMemoryModelAssignmentRequest,
+  CortexMemoryModelAssignmentResponse,
+  CortexMemoryModelCapability,
+  CortexMemoryModelOptionsResponse,
+  CortexNodeDetailResponse,
+  CortexNodeType,
   CronJob,
   CronJobCreatePayload,
   CronJobSchedule,
@@ -191,8 +210,10 @@ export function setApiRequestProfile(profile: null | string): void {
   _apiProfile = profile || null
 }
 
-function profileScoped(): { profile?: string } {
-  return _apiProfile ? { profile: _apiProfile } : {}
+function profileScoped(profile?: null | string): { profile?: string } {
+  const selected = profile === undefined ? _apiProfile : profile
+
+  return selected ? { profile: selected } : {}
 }
 
 export async function listSessions(
@@ -389,9 +410,24 @@ export function getHermesConfigRecord(): Promise<HermesConfigRecord> {
   })
 }
 
+export function getHermesConfigRecordForProfile(profile: string): Promise<HermesConfigRecord> {
+  return window.hermesDesktop.api<HermesConfigRecord>({
+    ...profileScoped(profile),
+    path: '/api/config'
+  })
+}
+
 export function getHermesConfigDefaults(): Promise<HermesConfigRecord> {
   return window.hermesDesktop.api<HermesConfigRecord>({
     ...profileScoped(),
+    path: '/api/config/defaults',
+    timeoutMs: STARTUP_REQUEST_TIMEOUT_MS
+  })
+}
+
+export function getHermesConfigDefaultsForProfile(profile: string): Promise<HermesConfigRecord> {
+  return window.hermesDesktop.api<HermesConfigRecord>({
+    ...profileScoped(profile),
     path: '/api/config/defaults',
     timeoutMs: STARTUP_REQUEST_TIMEOUT_MS
   })
@@ -407,6 +443,15 @@ export function getHermesConfigSchema(): Promise<ConfigSchemaResponse> {
 export function saveHermesConfig(config: HermesConfigRecord): Promise<{ ok: boolean }> {
   return window.hermesDesktop.api<{ ok: boolean }>({
     ...profileScoped(),
+    path: '/api/config',
+    method: 'PUT',
+    body: { config }
+  })
+}
+
+export function saveHermesConfigForProfile(config: HermesConfigRecord, profile: string): Promise<{ ok: boolean }> {
+  return window.hermesDesktop.api<{ ok: boolean }>({
+    ...profileScoped(profile),
     path: '/api/config',
     method: 'PUT',
     body: { config }
@@ -434,9 +479,9 @@ export function getEnvVars(): Promise<Record<string, EnvVarInfo>> {
   })
 }
 
-export function setEnvVar(key: string, value: string): Promise<{ ok: boolean }> {
+export function setEnvVar(key: string, value: string, opts?: { profile?: string }): Promise<{ ok: boolean }> {
   return window.hermesDesktop.api<{ ok: boolean }>({
-    ...profileScoped(),
+    ...profileScoped(opts?.profile),
     path: '/api/env',
     method: 'PUT',
     body: { key, value }
@@ -446,10 +491,11 @@ export function setEnvVar(key: string, value: string): Promise<{ ok: boolean }> 
 export function validateProviderCredential(
   key: string,
   value: string,
-  apiKey?: string
+  apiKey?: string,
+  opts?: { profile?: string }
 ): Promise<{ ok: boolean; reachable: boolean; message: string; models?: string[] }> {
   return window.hermesDesktop.api<{ ok: boolean; reachable: boolean; message: string; models?: string[] }>({
-    ...profileScoped(),
+    ...profileScoped(opts?.profile),
     path: '/api/providers/validate',
     method: 'POST',
     body: { key, value, api_key: apiKey ?? '' }
@@ -474,9 +520,9 @@ export function revealEnvVar(key: string): Promise<{ key: string; value: string 
   })
 }
 
-export function listOAuthProviders(): Promise<OAuthProvidersResponse> {
+export function listOAuthProviders(opts?: { profile?: string }): Promise<OAuthProvidersResponse> {
   return window.hermesDesktop.api<OAuthProvidersResponse>({
-    ...profileScoped(),
+    ...profileScoped(opts?.profile),
     path: '/api/providers/oauth'
   })
 }
@@ -553,6 +599,63 @@ export function getStarmapGraph(): Promise<StarmapGraph> {
     // now "star map". Renaming this would break against an un-upgraded backend.
     path: '/api/learning/graph'
   })
+}
+
+/** Native, privacy-safe Cortex projection. The overview contract intentionally
+ * has no evidence/document body field; source content is detail-only. */
+function cortexContract<T extends { version: string }>(value: T, expected: T['version']): T {
+  if (value.version !== expected) {
+    throw new Error(`Unsupported Atlas Cortex contract: ${value.version}`)
+  }
+
+  return value
+}
+
+export async function getCortexGraph(limit = 500): Promise<CortexGraphResponse> {
+  const value = await window.hermesDesktop.api<CortexGraphResponse>({
+    ...profileScoped(),
+    path: `/api/cognitive/graph?projection=growth&limit=${Math.max(1, Math.min(500, limit))}`
+  })
+
+  return cortexContract(value, 'atlas.cortex.graph.v1')
+}
+
+export async function getCortexHealth(): Promise<CortexHealthResponse> {
+  const value = await window.hermesDesktop.api<CortexHealthResponse>({
+    ...profileScoped(),
+    path: '/api/cognitive/health'
+  })
+
+  return cortexContract(value, 'atlas.cortex.health.v1')
+}
+
+export async function getCortexNode(id: string): Promise<CortexNodeDetailResponse> {
+  const value = await window.hermesDesktop.api<CortexNodeDetailResponse>({
+    ...profileScoped(),
+    path: `/api/cognitive/node/${encodeURIComponent(id)}`
+  })
+
+  return cortexContract(value, 'atlas.cortex.detail.v1')
+}
+
+export async function runCortexDream(): Promise<CortexJobResponse> {
+  const value = await window.hermesDesktop.api<CortexJobResponse>({
+    ...profileScoped(),
+    body: {},
+    method: 'POST',
+    path: '/api/cognitive/dream/run'
+  })
+
+  return cortexContract(value, 'atlas.cortex.job.v1')
+}
+
+export async function getCortexDream(jobId: string): Promise<CortexJobResponse> {
+  const value = await window.hermesDesktop.api<CortexJobResponse>({
+    ...profileScoped(),
+    path: `/api/cognitive/dream/${encodeURIComponent(jobId)}`
+  })
+
+  return cortexContract(value, 'atlas.cortex.job.v1')
 }
 
 export interface LearningNodeDetail {
@@ -873,6 +976,7 @@ export function getGlobalModelOptions(opts?: {
   refresh?: boolean
   includeUnconfigured?: boolean
   explicitOnly?: boolean
+  profile?: string
 }): Promise<ModelOptionsResponse> {
   const params = new URLSearchParams()
 
@@ -889,7 +993,7 @@ export function getGlobalModelOptions(opts?: {
   }
 
   return window.hermesDesktop.api<ModelOptionsResponse>({
-    ...profileScoped(),
+    ...profileScoped(opts?.profile),
     path: params.size > 0 ? `/api/model/options?${params.toString()}` : '/api/model/options',
     timeoutMs: STARTUP_REQUEST_TIMEOUT_MS
   })
@@ -935,6 +1039,31 @@ export function getAuxiliaryModels(): Promise<AuxiliaryModelsResponse> {
   })
 }
 
+export function getCortexMemoryModelOptions(opts?: {
+  refresh?: boolean
+  profile?: string
+}): Promise<CortexMemoryModelOptionsResponse> {
+  const suffix = opts?.refresh ? '?refresh=1' : ''
+
+  return window.hermesDesktop.api<CortexMemoryModelOptionsResponse>({
+    ...profileScoped(opts?.profile),
+    path: `/api/model/cortex-memory/options${suffix}`,
+    timeoutMs: STARTUP_REQUEST_TIMEOUT_MS
+  })
+}
+
+export function setCortexMemoryModelAssignment(
+  body: CortexMemoryModelAssignmentRequest,
+  opts?: { profile?: string }
+): Promise<CortexMemoryModelAssignmentResponse> {
+  return window.hermesDesktop.api<CortexMemoryModelAssignmentResponse>({
+    ...profileScoped(opts?.profile),
+    path: '/api/model/cortex-memory',
+    method: 'PUT',
+    body
+  })
+}
+
 export function getMoaModels(): Promise<MoaConfigResponse> {
   return window.hermesDesktop.api<MoaConfigResponse>({
     ...profileScoped(),
@@ -951,9 +1080,12 @@ export function saveMoaModels(body: MoaConfigResponse): Promise<MoaConfigRespons
   })
 }
 
-export function setModelAssignment(body: ModelAssignmentRequest): Promise<ModelAssignmentResponse> {
+export function setModelAssignment(
+  body: ModelAssignmentRequest,
+  opts?: { profile?: string }
+): Promise<ModelAssignmentResponse> {
   return window.hermesDesktop.api<ModelAssignmentResponse>({
-    ...profileScoped(),
+    ...profileScoped(opts?.profile),
     path: '/api/model/set',
     method: 'POST',
     body

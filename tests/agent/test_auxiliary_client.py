@@ -342,6 +342,89 @@ class TestBuildCallKwargsMaxTokens:
         )
         assert kwargs["max_tokens"] == 4096
 
+    @pytest.mark.parametrize("provider", ["altas", "altas-gateway", "altas-managed"])
+    @pytest.mark.parametrize("bounded_output", [False, True])
+    def test_keeps_explicit_max_tokens_for_atlas_control_plane(
+        self, provider, bounded_output
+    ):
+        from agent.auxiliary_client import _build_call_kwargs
+
+        kwargs = _build_call_kwargs(
+            provider=provider,
+            model="atlas-cortex",
+            messages=[{"role": "user", "content": "classify"}],
+            max_tokens=4000,
+            bounded_output=bounded_output,
+            base_url="https://control.atlas.example/v1",
+        )
+
+        assert kwargs["max_tokens"] == 4000
+        assert "max_completion_tokens" not in kwargs
+
+    def test_bounded_output_uses_openrouter_max_tokens_for_openai_slug(self):
+        kwargs = _build_call_kwargs(
+            provider="openrouter",
+            model="openai/gpt-5.4",
+            messages=[{"role": "user", "content": "classify"}],
+            max_tokens=4000,
+            bounded_output=True,
+            base_url="https://openrouter.ai/api/v1",
+        )
+
+        assert kwargs["max_tokens"] == 4000
+        assert "max_completion_tokens" not in kwargs
+
+    @pytest.mark.parametrize(
+        "provider,model,base_url",
+        [
+            (
+                "openrouter",
+                "openai/gpt-5.4",
+                "https://openrouter.ai/api/v1",
+            ),
+            (
+                "altas-managed",
+                "atlas-cortex",
+                "https://control.atlas.example/v1",
+            ),
+        ],
+    )
+    def test_call_llm_wires_bounded_output_to_request(
+        self, provider, model, base_url
+    ):
+        client = MagicMock()
+        client.base_url = base_url
+        response = MagicMock()
+        client.chat.completions.create.return_value = response
+
+        with patch(
+            "agent.auxiliary_client._resolve_task_provider_model",
+            return_value=(
+                provider,
+                model,
+                base_url,
+                "test-key",
+                None,
+            ),
+        ), patch(
+            "agent.auxiliary_client._get_cached_client",
+            return_value=(client, model),
+        ):
+            result = call_llm(
+                task="cortex_triage",
+                provider=provider,
+                model=model,
+                messages=[{"role": "user", "content": "classify"}],
+                max_tokens=4000,
+                bounded_output=True,
+                fallback_policy="none",
+            )
+
+        assert result is response
+        wire_kwargs = client.chat.completions.create.call_args.kwargs
+        assert wire_kwargs["max_tokens"] == 4000
+        assert "max_completion_tokens" not in wire_kwargs
+
 
 class TestNousTagsScoping:
     def test_tags_injected_when_provider_is_nous(self, monkeypatch):

@@ -33,6 +33,7 @@ def test_verification_flags_registered_as_ephemeral(tmp_path, monkeypatch):
 
     assert "_verification_stop_synthetic" in ra._EPHEMERAL_SCAFFOLDING_FLAGS
     assert "_pre_verify_synthetic" in ra._EPHEMERAL_SCAFFOLDING_FLAGS
+    assert "_intent_ack_synthetic" in ra._EPHEMERAL_SCAFFOLDING_FLAGS
 
     # The central classifier drives both persistence sinks.
     assert ra._is_ephemeral_scaffolding(
@@ -40,6 +41,13 @@ def test_verification_flags_registered_as_ephemeral(tmp_path, monkeypatch):
     )
     assert ra._is_ephemeral_scaffolding(
         {"role": "user", "content": "[System: run tests]", "_pre_verify_synthetic": True}
+    )
+    assert ra._is_ephemeral_scaffolding(
+        {
+            "role": "user",
+            "content": "[System: continue]",
+            "_intent_ack_synthetic": True,
+        }
     )
     # Real messages are not scaffolding.
     assert not ra._is_ephemeral_scaffolding({"role": "user", "content": "hi"})
