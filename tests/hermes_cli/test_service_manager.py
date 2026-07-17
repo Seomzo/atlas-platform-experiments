@@ -439,6 +439,14 @@ def test_s6_manager_kind_and_supports_registration() -> None:
 def test_seed_supervise_skeleton_creates_expected_layout(tmp_path) -> None:
     """Verifies the dirs + FIFO + modes the helper lays down."""
     import stat
+    import sys
+
+    if sys.platform == "darwin":
+        pytest.skip(
+            "macOS strips the setgid bit (02000) on non-root chmod of "
+            "0o3730 dirs; s6 supervise trees are Linux-container-only "
+            "(live verification: tests/docker/)"
+        )
 
     from hermes_cli.service_manager import _seed_supervise_skeleton
 
@@ -481,6 +489,14 @@ def test_seed_supervise_skeleton_handles_log_subservice(tmp_path) -> None:
     slot's supervise/ was hermes-owned.
     """
     import stat
+    import sys
+
+    if sys.platform == "darwin":
+        pytest.skip(
+            "macOS strips the setgid bit (02000) on non-root chmod of "
+            "0o3730 dirs; s6 supervise trees are Linux-container-only "
+            "(live verification: tests/docker/)"
+        )
 
     from hermes_cli.service_manager import _seed_supervise_skeleton
 

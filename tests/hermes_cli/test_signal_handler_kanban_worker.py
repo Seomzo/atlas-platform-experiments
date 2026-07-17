@@ -154,7 +154,11 @@ def test_sigterm_with_kanban_task_env_terminates_quickly():
         # is immediate. Give generous headroom for slow CI runners.
         deadline = t0 + 2.0
         while time.time() < deadline:
-            if not _is_alive_like_dispatcher(proc.pid):
+            # Reap the child if it already exited — on macOS a zombie
+            # still passes os.kill(pid, 0), and the /proc State: Z check
+            # in _is_alive_like_dispatcher is Linux-only. poll() waits
+            # the zombie so the aliveness probe sees a real exit.
+            if proc.poll() is not None or not _is_alive_like_dispatcher(proc.pid):
                 elapsed = time.time() - t0
                 assert elapsed < 2.0
                 return
