@@ -26,8 +26,20 @@ def _clean_inference_env(monkeypatch):
         "CLAUDE_CODE_OAUTH_TOKEN",
         "NOUS_API_KEY",
         "HERMES_INFERENCE_PROVIDER",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_PROFILE",
+        "AWS_BEARER_TOKEN_BEDROCK",
     ):
         monkeypatch.delenv(key, raising=False)
+    # Auto-detect also walks boto3's FILE-based chain (~/.aws/credentials),
+    # which exists on developer machines and makes bedrock resolve — point
+    # both boto3 config sources at paths that cannot exist.
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", "/dev/null/nonexistent-credentials")
+    monkeypatch.setenv("AWS_CONFIG_FILE", "/dev/null/nonexistent-config")
+    # Never let the fallback chain wait on EC2 metadata (IMDS) probing.
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
 
 
 def _seed_openrouter_pool(token: str = "sk-or-FAKEKEY123") -> None:

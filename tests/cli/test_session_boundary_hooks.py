@@ -37,8 +37,15 @@ def test_session_finalize_on_reset(mock_invoke_hook):
 
 
 @patch("hermes_cli.plugins.invoke_hook")
-def test_session_finalize_on_cleanup(mock_invoke_hook):
-    """Verify on_session_finalize fires during CLI exit cleanup."""
+def test_cleanup_does_not_invent_session_finalize(mock_invoke_hook):
+    """_run_cleanup must NOT emit on_session_finalize on its own.
+
+    Cortex lifecycle contract (see _run_cleanup docstring): explicit
+    interactive/one-shot exit paths own logical finalization BEFORE calling
+    cleanup. Atexit/signal/teardown paths reach _run_cleanup too, and a
+    synthesized finalize here would admit spurious Cortex semantic
+    consolidation for a session that didn't logically end.
+    """
     import cli as cli_mod
 
     mock_agent = MagicMock()
@@ -48,13 +55,10 @@ def test_session_finalize_on_cleanup(mock_invoke_hook):
 
     cli_mod._run_cleanup()
 
-    assert any(
+    assert not any(
         c.args == ("on_session_finalize",)
-        and c.kwargs["session_id"] == "cleanup-session-id"
-        and c.kwargs["platform"] == "cli"
-        and c.kwargs["reason"] == "shutdown"
         for c in mock_invoke_hook.call_args_list
-    )
+    ), "_run_cleanup must not emit on_session_finalize (Cortex boundary is owned by explicit exit paths)"
 
 
 @patch("hermes_cli.plugins.invoke_hook")

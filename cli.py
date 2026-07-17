@@ -7070,7 +7070,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         is_running = bool(getattr(self, "_agent_running", False))
 
         lines = [
-            f"{product_name()} CLI Status",
+            "Atlas CLI Status" if is_atlas_branded() else "Hermes CLI Status",
             "",
             f"Session ID: {self.session_id}",
             f"Path: {display_hermes_home()}",

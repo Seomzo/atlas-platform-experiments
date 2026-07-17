@@ -656,7 +656,11 @@ class TestHandleResumeCommandRecap:
 
         assert cli.session_id == "target_session"
         assert cli.conversation_history == messages
-        mock_db.end_session.assert_called_once_with("current_session", "resumed_other")
+        # Cortex lifecycle: /resume is a topology switch, NOT proof the old
+        # conversation ended — end_session would create a spurious Cortex
+        # distillation admission (see _handle_resume_command in
+        # cli_commands_mixin.py). Old session must be left open.
+        mock_db.end_session.assert_not_called()
         mock_db.reopen_session.assert_called_once_with("target_session")
         display_mock.assert_called_once_with()
 
