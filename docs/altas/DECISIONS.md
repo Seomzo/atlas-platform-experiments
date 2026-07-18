@@ -99,6 +99,10 @@ the answer for Omar and Joe.
 - A mobile companion app (phone → Control Plane relay → worker) for talking to
   Atlas remotely, text and voice. Captured July 18, 2026; blocked by WS-05 and
   the Phase 1 Control Plane. See [`MOBILE_COMPANION.md`](MOBILE_COMPANION.md).
+- Slack-inspired multi-agent channels in Atlas Desktop: group chats with
+  per-channel context, multiple agents/profiles as members, and visual profile
+  management. Captured July 18, 2026. See
+  [`MULTI_AGENT_CHANNELS.md`](MULTI_AGENT_CHANNELS.md).
 
 These are preserved in [`SETUP_DEFAULTS.md`](SETUP_DEFAULTS.md) for the future
 decision session. They do not override ADR-004.
