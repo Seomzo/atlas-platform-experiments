@@ -13690,6 +13690,20 @@ class ProfileSoulUpdate(BaseModel):
     content: str
 
 
+_PROFILE_AVATAR_TYPES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+}
+_PROFILE_AVATAR_MEDIA_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
+_MAX_PROFILE_AVATAR_BYTES = 5 * 1024 * 1024
+
+
 class ProfileActiveUpdate(BaseModel):
     name: str
 
@@ -13714,10 +13728,30 @@ def _profile_attr(info, name: str, default: Any = None) -> Any:
         return default
 
 
+def _profile_identity_summary(profile_home: Path, profile_name: str) -> Dict[str, Any]:
+    from hermes_cli.profile_identity import has_profile_avatar, load_profile_identity
+
+    try:
+        identity = load_profile_identity(profile_home, profile_name)
+        return {
+            "display_name": identity["display_name"],
+            "role": identity["role"],
+            "has_avatar": has_profile_avatar(profile_home, identity),
+        }
+    except Exception:
+        return {
+            "display_name": profile_name,
+            "role": "",
+            "has_avatar": False,
+        }
+
+
 def _profile_to_dict(info) -> Dict[str, Any]:
+    name = _profile_attr(info, "name", "")
+    profile_home = Path(_profile_attr(info, "path", ""))
     return {
-        "name": _profile_attr(info, "name", ""),
-        "path": str(_profile_attr(info, "path", "")),
+        "name": name,
+        "path": str(profile_home),
         "is_default": bool(_profile_attr(info, "is_default", False)),
         "model": _profile_attr(info, "model"),
         "provider": _profile_attr(info, "provider"),
@@ -13730,6 +13764,7 @@ def _profile_to_dict(info) -> Dict[str, Any]:
         "distribution_version": _profile_attr(info, "distribution_version"),
         "distribution_source": _profile_attr(info, "distribution_source"),
         "has_alias": _profile_attr(info, "alias_path") is not None,
+        **_profile_identity_summary(profile_home, name),
     }
 
 
@@ -13759,6 +13794,7 @@ def _fallback_profile_dicts(profiles_mod) -> List[Dict[str, Any]]:
             "distribution_version": None,
             "distribution_source": None,
             "has_alias": False,
+            **_profile_identity_summary(default_home, "default"),
         })
 
     profiles_root = profiles_mod._get_profiles_root()
@@ -13782,6 +13818,7 @@ def _fallback_profile_dicts(profiles_mod) -> List[Dict[str, Any]]:
                 "distribution_version": None,
                 "distribution_source": None,
                 "has_alias": False,
+                **_profile_identity_summary(entry, entry.name),
             })
 
     return profiles
@@ -14197,6 +14234,119 @@ async def update_profile_soul(name: str, body: ProfileSoulUpdate):
         _log.exception("PUT /api/profiles/%s/soul failed", name)
         raise HTTPException(status_code=500, detail=f"Could not write SOUL.md: {e}")
     return {"ok": True}
+
+
+@app.get("/api/profiles/{name}/identity")
+async def get_profile_identity_endpoint(name: str):
+    from hermes_cli.profile_identity import load_profile_identity
+
+    profile_dir = _resolve_profile_dir(name)
+    return load_profile_identity(profile_dir, name)
+
+
+@app.patch("/api/profiles/{name}/identity")
+async def update_profile_identity_endpoint(name: str, body: Dict[str, Any]):
+    from hermes_cli.profile_identity import (
+        load_profile_identity,
+        save_profile_identity,
+        validate_identity_update,
+    )
+
+    profile_dir = _resolve_profile_dir(name)
+    try:
+        update = validate_identity_update(body)
+        identity = load_profile_identity(profile_dir, name)
+        identity.update(update)
+        return save_profile_identity(profile_dir, name, identity)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except OSError as e:
+        _log.exception("PATCH /api/profiles/%s/identity failed", name)
+        raise HTTPException(status_code=500, detail=f"Could not write identity: {e}")
+
+
+@app.put("/api/profiles/{name}/avatar")
+async def update_profile_avatar_endpoint(
+    name: str,
+    file: UploadFile = File(...),
+):
+    from hermes_cli.profile_identity import load_profile_identity, save_profile_identity
+
+    profile_dir = _resolve_profile_dir(name)
+    content_type = (file.content_type or "").split(";", 1)[0].strip().lower()
+    suffix = _PROFILE_AVATAR_TYPES.get(content_type)
+    tmp_path: Path | None = None
+    renamed = False
+    try:
+        if suffix is None:
+            raise HTTPException(status_code=415, detail="Unsupported avatar media type")
+
+        avatar_dir = profile_dir / "avatars"
+        avatar_dir.mkdir(parents=True, exist_ok=True)
+        target = avatar_dir / f"avatar{suffix}"
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            prefix=".avatar.",
+            suffix=".upload",
+            dir=str(avatar_dir),
+        )
+        tmp_path = Path(tmp_name)
+
+        total = 0
+        with os.fdopen(tmp_fd, "wb") as out:
+            while True:
+                chunk = await file.read(_UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _MAX_PROFILE_AVATAR_BYTES:
+                    raise HTTPException(status_code=413, detail="Avatar is too large")
+                out.write(chunk)
+
+        os.replace(tmp_path, target)
+        renamed = True
+
+        identity = load_profile_identity(profile_dir, name)
+        identity["avatar"] = f"avatars/{target.name}"
+        identity = save_profile_identity(profile_dir, name, identity)
+
+        for old_suffix in _PROFILE_AVATAR_MEDIA_TYPES:
+            old_path = avatar_dir / f"avatar{old_suffix}"
+            if old_path != target:
+                old_path.unlink(missing_ok=True)
+
+        return {"ok": True, "identity": identity}
+    except HTTPException:
+        raise
+    except OSError as e:
+        _log.exception("PUT /api/profiles/%s/avatar failed", name)
+        raise HTTPException(status_code=500, detail=f"Could not write avatar: {e}")
+    finally:
+        if tmp_path is not None and not renamed:
+            tmp_path.unlink(missing_ok=True)
+        await file.close()
+
+
+@app.get("/api/profiles/{name}/avatar")
+async def get_profile_avatar_endpoint(name: str):
+    from hermes_cli.profile_identity import (
+        load_profile_identity,
+        resolve_profile_avatar_path,
+    )
+
+    profile_dir = _resolve_profile_dir(name)
+    identity = load_profile_identity(profile_dir, name)
+    avatar_path = resolve_profile_avatar_path(profile_dir, identity)
+    if avatar_path is None or not avatar_path.is_file():
+        raise HTTPException(status_code=404, detail="Profile avatar is not set")
+
+    media_type = _PROFILE_AVATAR_MEDIA_TYPES.get(avatar_path.suffix.lower())
+    if media_type is None:
+        raise HTTPException(status_code=404, detail="Profile avatar is not set")
+    return FileResponse(
+        avatar_path,
+        media_type=media_type,
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
 
 
 @app.put("/api/profiles/{name}/description")
