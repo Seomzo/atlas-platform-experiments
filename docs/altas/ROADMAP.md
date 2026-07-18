@@ -63,6 +63,9 @@ defaults. It is the current product directive.
 - Managed MFA and session-renewal workflow.
 - Resource quotas, autoscaling, canaries, and provider fallback.
 - Multi-store and enterprise deployment controls.
+- Mobile companion app: talk to your worker from a phone via the Control
+  Plane relay (see `MOBILE_COMPANION.md`; earliest Phase 3+, placed here as
+  the default slot).
 
 ## Phase 6 — Workflow marketplace
 

@@ -96,6 +96,9 @@ the answer for Omar and Joe.
 - Desktop, Slack, and email as the first managed delivery surfaces.
 - Read/navigation/draft actions allowed first; submits, exports, messages, and
   mutations approval-gated.
+- A mobile companion app (phone → Control Plane relay → worker) for talking to
+  Atlas remotely, text and voice. Captured July 18, 2026; blocked by WS-05 and
+  the Phase 1 Control Plane. See [`MOBILE_COMPANION.md`](MOBILE_COMPANION.md).
 
 These are preserved in [`SETUP_DEFAULTS.md`](SETUP_DEFAULTS.md) for the future
 decision session. They do not override ADR-004.
