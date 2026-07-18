@@ -754,13 +754,23 @@ export interface ProfileCreatePayload {
 }
 
 export interface ProfileInfo {
+  display_name: string
   has_env: boolean
+  has_avatar: boolean
   is_default: boolean
   model: null | string
   name: string
   path: string
   provider: null | string
+  role: string
   skill_count: number
+}
+
+export interface ProfileIdentity {
+  avatar: null | string
+  display_name: string
+  role: string
+  tagline: string
 }
 
 export interface ProfileSetupCommand {

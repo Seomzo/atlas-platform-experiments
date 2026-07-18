@@ -46,6 +46,7 @@ import type {
   OAuthSubmitResponse,
   PaginatedSessions,
   ProfileCreatePayload,
+  ProfileIdentity,
   ProfileSetupCommand,
   ProfileSoul,
   ProfilesResponse,
@@ -153,6 +154,7 @@ export type {
   ModelOptionsResponse,
   PaginatedSessions,
   ProfileCreatePayload,
+  ProfileIdentity,
   ProfileInfo,
   ProfileSetupCommand,
   ProfileSoul,
@@ -943,6 +945,90 @@ export function deleteProfile(name: string): Promise<{ ok: boolean; path: string
     path: `/api/profiles/${encodeURIComponent(name)}`,
     method: 'DELETE'
   })
+}
+
+interface ProfileAvatarResponse {
+  identity: ProfileIdentity
+  ok: boolean
+}
+
+const PROFILE_AVATAR_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp'])
+
+export const PROFILE_AVATAR_MAX_BYTES = 5 * 1024 * 1024
+
+export function getProfileIdentity(name: string): Promise<ProfileIdentity> {
+  return window.hermesDesktop.api<ProfileIdentity>({
+    path: `/api/profiles/${encodeURIComponent(name)}/identity`
+  })
+}
+
+export function updateProfileIdentity(
+  name: string,
+  identity: Partial<Pick<ProfileIdentity, 'display_name' | 'role' | 'tagline'>>
+): Promise<ProfileIdentity> {
+  return window.hermesDesktop.api<ProfileIdentity>({
+    path: `/api/profiles/${encodeURIComponent(name)}/identity`,
+    method: 'PATCH',
+    body: identity
+  })
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  const chunkSize = 0x8000
+
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize))
+  }
+
+  return btoa(binary)
+}
+
+export async function uploadProfileAvatar(name: string, file: File): Promise<ProfileIdentity> {
+  if (!PROFILE_AVATAR_TYPES.has(file.type)) {
+    throw new Error('unsupported_avatar_type')
+  }
+
+  if (file.size > PROFILE_AVATAR_MAX_BYTES) {
+    throw new Error('avatar_too_large')
+  }
+
+  const data = new Uint8Array(await file.arrayBuffer())
+
+  const response = await window.hermesDesktop.api<ProfileAvatarResponse>({
+    path: `/api/profiles/${encodeURIComponent(name)}/avatar`,
+    method: 'PUT',
+    body: {
+      content_type: file.type,
+      data_base64: bytesToBase64(data)
+    }
+  })
+
+  return response.identity
+}
+
+export async function generateProfileAvatar(name: string, prompt: string): Promise<ProfileIdentity> {
+  const response = await window.hermesDesktop.api<ProfileAvatarResponse>({
+    path: `/api/profiles/${encodeURIComponent(name)}/avatar/generate`,
+    method: 'POST',
+    body: { prompt }
+  })
+
+  return response.identity
+}
+
+export async function avatarUrl(name: string, lastUpdatedAt = 0): Promise<string> {
+  const connection = await window.hermesDesktop.getConnection()
+  const baseUrl = connection.baseUrl.endsWith('/') ? connection.baseUrl : `${connection.baseUrl}/`
+  const url = new URL(`api/profiles/${encodeURIComponent(name)}/avatar`, baseUrl)
+
+  url.searchParams.set('v', String(lastUpdatedAt))
+
+  if (connection.token) {
+    url.searchParams.set('token', connection.token)
+  }
+
+  return url.toString()
 }
 
 export function getProfileSoul(name: string): Promise<ProfileSoul> {

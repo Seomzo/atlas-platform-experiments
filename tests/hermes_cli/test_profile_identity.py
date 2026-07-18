@@ -1,7 +1,9 @@
 """Behavior tests for per-profile worker identity and avatar APIs."""
 
+import base64
 import json
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -171,6 +173,26 @@ def test_avatar_get_returns_404_when_unset(client, profile_env):
     assert response.status_code == 404
 
 
+def test_avatar_get_accepts_query_token_for_image_elements(client, profile_env):
+    from hermes_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN
+
+    _profile_home(profile_env, "writer")
+    image = b"worker-avatar"
+    assert client.put(
+        "/api/profiles/writer/avatar",
+        files={"file": ("portrait.webp", image, "image/webp")},
+    ).status_code == 200
+
+    del client.headers[_SESSION_HEADER_NAME]
+    response = client.get(
+        "/api/profiles/writer/avatar",
+        params={"token": _SESSION_TOKEN, "v": "1"},
+    )
+
+    assert response.status_code == 200
+    assert response.content == image
+
+
 def test_avatar_upload_rejects_unsupported_type_and_oversize(client, profile_env):
     home = _profile_home(profile_env, "writer")
 
@@ -205,6 +227,115 @@ def test_avatar_upload_replaces_a_previous_extension(client, profile_env):
     assert not (home / "avatars" / "avatar.png").exists()
     assert (home / "avatars" / "avatar.jpg").read_bytes() == b"jpeg"
     assert client.get("/api/profiles/writer/identity").json()["avatar"] == "avatars/avatar.jpg"
+
+
+def test_avatar_upload_accepts_desktop_json_transport(client, profile_env):
+    home = _profile_home(profile_env, "writer")
+    content = b"desktop-worker-avatar"
+
+    response = client.put(
+        "/api/profiles/writer/avatar",
+        json={
+            "content_type": "image/png",
+            "data_base64": base64.b64encode(content).decode("ascii"),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["identity"]["avatar"] == "avatars/avatar.png"
+    assert (home / "avatars" / "avatar.png").read_bytes() == content
+
+
+def test_avatar_generate_uses_active_provider_and_persists_result(
+    client,
+    profile_env,
+    monkeypatch,
+    tmp_path,
+):
+    home = _profile_home(profile_env, "writer")
+    generated = tmp_path / "generated.webp"
+    generated.write_bytes(b"generated-worker-avatar")
+    provider = Mock()
+    provider.generate.return_value = {
+        "success": True,
+        "image": str(generated),
+        "provider": "test",
+    }
+
+    import agent.image_gen_registry as registry
+    import hermes_cli.plugins as plugins
+
+    monkeypatch.setattr(plugins, "_ensure_plugins_discovered", Mock())
+    monkeypatch.setattr(registry, "get_active_provider", lambda: provider)
+
+    response = client.post(
+        "/api/profiles/writer/avatar/generate",
+        json={"prompt": "A warm, professional service advisor portrait"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["identity"]["avatar"] == "avatars/avatar.webp"
+    assert (home / "avatars" / "avatar.webp").read_bytes() == b"generated-worker-avatar"
+    assert json.loads((home / "identity.json").read_text(encoding="utf-8"))["avatar"] == (
+        "avatars/avatar.webp"
+    )
+    provider.generate.assert_called_once_with(
+        prompt="A warm, professional service advisor portrait",
+        aspect_ratio="square",
+    )
+
+
+def test_avatar_generate_returns_409_without_provider(client, profile_env, monkeypatch):
+    home = _profile_home(profile_env, "writer")
+
+    import agent.image_gen_registry as registry
+    import hermes_cli.plugins as plugins
+
+    monkeypatch.setattr(plugins, "_ensure_plugins_discovered", Mock())
+    monkeypatch.setattr(registry, "get_active_provider", lambda: None)
+
+    response = client.post(
+        "/api/profiles/writer/avatar/generate",
+        json={"prompt": "A dealership concierge"},
+    )
+
+    assert response.status_code == 409
+    assert "image generation provider" in response.json()["detail"].lower()
+    assert not (home / "identity.json").exists()
+
+
+def test_avatar_generate_returns_404_for_unknown_profile(client, monkeypatch):
+    provider = Mock()
+
+    import agent.image_gen_registry as registry
+
+    monkeypatch.setattr(registry, "get_active_provider", lambda: provider)
+
+    response = client.post(
+        "/api/profiles/missing/avatar/generate",
+        json={"prompt": "A dealership concierge"},
+    )
+
+    assert response.status_code == 404
+    provider.generate.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"prompt": ""},
+        {"prompt": "   "},
+        {"prompt": 42},
+        {"prompt": ["not", "text"]},
+    ],
+)
+def test_avatar_generate_rejects_bad_payload(client, profile_env, payload):
+    _profile_home(profile_env, "writer")
+
+    response = client.post("/api/profiles/writer/avatar/generate", json=payload)
+
+    assert response.status_code == 400
 
 
 def test_profile_listing_includes_identity_summary(client, profile_env):

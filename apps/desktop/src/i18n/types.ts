@@ -1035,6 +1035,7 @@ export interface Translations {
   profiles: {
     close: string
     nameHint: string
+    namePlaceholder: string
     title: string
     count: (count: number) => string
     search: string
@@ -1055,6 +1056,7 @@ export interface Translations {
     refreshing: string
     default: string
     skills: (count: number) => string
+    skillsShort: (count: number) => string
     env: string
     defaultBadge: string
     rename: string
@@ -1065,6 +1067,39 @@ export interface Translations {
     modelLabel: string
     skillsLabel: string
     notSet: string
+    identitySection: string
+    identityDesc: string
+    loadingIdentity: string
+    displayNameLabel: string
+    displayNamePlaceholder: string
+    roleLabel: string
+    rolePlaceholder: string
+    taglineLabel: string
+    taglinePlaceholder: string
+    characterCount: (count: number, limit: number) => string
+    identityFieldTooLong: (label: string, limit: number) => string
+    saveIdentity: string
+    identitySaved: string
+    failedLoadIdentity: string
+    failedSaveIdentity: string
+    avatarLabel: string
+    avatarDesc: string
+    uploadAvatar: string
+    replaceAvatar: string
+    uploadingAvatar: string
+    avatarInvalidType: string
+    avatarTooLarge: string
+    avatarUploaded: string
+    failedUploadAvatar: string
+    generateAvatar: string
+    generateAvatarDesc: string
+    generatePromptPlaceholder: string
+    generatePromptRequired: string
+    generateAction: string
+    regenerateAvatar: string
+    generatingAvatar: string
+    avatarGenerated: string
+    failedGenerateAvatar: string
     soulDesc: string
     soulOptional: string
     soulPlaceholder: (mode: string) => string
@@ -1081,6 +1116,8 @@ export interface Translations {
     deleteDescSuffix: string
     deleting: string
     createDesc: string
+    createIdentityDesc: string
+    workerIdLabel: string
     nameLabel: string
     cloneFrom: string
     cloneFromNone: string
@@ -1091,6 +1128,8 @@ export interface Translations {
     nameRequired: string
     creating: string
     createAction: string
+    next: string
+    back: string
     renameTitle: string
     renameDescPrefix: string
     renameDescSuffix: string

@@ -20,8 +20,15 @@ vi.mock('@/lib/query-client', () => ({ queryClient: { invalidateQueries: vi.fn()
 vi.mock('@/store/notifications', () => ({ notify }))
 vi.mock('@/store/starmap', () => ({ resetStarmapGraph }))
 
-const { $activeGatewayProfile, $profiles, ensureGatewayProfile, refreshProfiles, selectProfile } =
-  await import('./profile')
+const {
+  $activeGatewayProfile,
+  $profileAvatarUpdates,
+  $profiles,
+  ensureGatewayProfile,
+  markProfileAvatarUpdated,
+  refreshProfiles,
+  selectProfile
+} = await import('./profile')
 
 const { $connection } = await import('./session')
 const { $workspaceMutationActive } = await import('./workspace-handoff')
@@ -29,12 +36,15 @@ const { queryClient } = await import('@/lib/query-client')
 const { getProfiles } = await import('@/hermes')
 
 const profile = (name: string, isDefault = false): ProfileInfo => ({
+  display_name: name,
+  has_avatar: false,
   has_env: false,
   is_default: isDefault,
   model: null,
   name,
   path: `/tmp/hermes/${name}`,
   provider: null,
+  role: '',
   skill_count: 0
 })
 
@@ -52,6 +62,7 @@ beforeEach(() => {
   $gateway.set({ id: 'live-socket' })
   $activeGatewayProfile.set('default')
   $connection.set(localConn())
+  $profileAvatarUpdates.set({})
   $profiles.set([])
   $workspaceMutationActive.set(false)
   vi.stubGlobal('window', { hermesDesktop: { getConnection } })
@@ -119,6 +130,14 @@ describe('profile-scoped cache invalidation', () => {
 
     expect(queryClient.invalidateQueries).toHaveBeenCalled()
     expect(resetStarmapGraph).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('worker avatar cache revisions', () => {
+  it('stores a monotonic cache buster for each normalized profile name', () => {
+    expect(markProfileAvatarUpdated(' service_writer ', 100)).toBe(100)
+    expect(markProfileAvatarUpdated('service_writer', 100)).toBe(101)
+    expect($profileAvatarUpdates.get()).toEqual({ service_writer: 101 })
   })
 })
 

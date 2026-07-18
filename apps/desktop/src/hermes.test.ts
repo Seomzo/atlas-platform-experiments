@@ -1,18 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  avatarUrl,
+  generateProfileAvatar,
   getCortexMemoryModelOptions,
   getCronJobs,
   getGlobalModelInfo,
   getGlobalModelOptions,
   getHermesConfig,
   getHermesConfigDefaults,
+  getProfileIdentity,
   getProfiles,
   getSessionMessages,
   getStatus,
   listAllProfileSessions,
   listSessions,
-  setCortexMemoryModelAssignment
+  PROFILE_AVATAR_MAX_BYTES,
+  setCortexMemoryModelAssignment,
+  updateProfileIdentity,
+  uploadProfileAvatar
 } from './hermes'
 import { refreshActiveProfile } from './store/profile'
 
@@ -30,7 +36,13 @@ describe('Atlas REST session helpers', () => {
     api = vi.fn().mockResolvedValue(emptySessionsResponse)
     Object.defineProperty(window, 'hermesDesktop', {
       configurable: true,
-      value: { api }
+      value: {
+        api,
+        getConnection: vi.fn().mockResolvedValue({
+          baseUrl: 'http://127.0.0.1:9119',
+          token: 'desktop-token'
+        })
+      }
     })
   })
 
@@ -71,6 +83,76 @@ describe('Atlas REST session helpers', () => {
         path: '/api/profiles',
         timeoutMs: 60_000
       })
+    )
+  })
+
+  it('maps worker identity reads and partial updates to the profile endpoints', async () => {
+    const identity = {
+      avatar: null,
+      display_name: 'Riley',
+      role: 'Service Advisor',
+      tagline: 'Keeps every repair order moving.'
+    }
+
+    api.mockResolvedValue(identity)
+
+    await expect(getProfileIdentity('service_writer')).resolves.toEqual(identity)
+    expect(api).toHaveBeenLastCalledWith({
+      path: '/api/profiles/service_writer/identity'
+    })
+
+    await expect(updateProfileIdentity('service_writer', { role: 'Senior Advisor' })).resolves.toEqual(identity)
+    expect(api).toHaveBeenLastCalledWith({
+      path: '/api/profiles/service_writer/identity',
+      method: 'PATCH',
+      body: { role: 'Senior Advisor' }
+    })
+  })
+
+  it('uploads supported avatar bytes through the JSON desktop bridge', async () => {
+    const identity = { avatar: 'avatars/avatar.png', display_name: 'Riley', role: '', tagline: '' }
+
+    const file = {
+      arrayBuffer: vi.fn().mockResolvedValue(Uint8Array.from([1, 2, 3]).buffer),
+      size: 3,
+      type: 'image/png'
+    } as unknown as File
+
+    api.mockResolvedValue({ identity, ok: true })
+
+    await expect(uploadProfileAvatar('service_writer', file)).resolves.toEqual(identity)
+    expect(api).toHaveBeenCalledWith({
+      path: '/api/profiles/service_writer/avatar',
+      method: 'PUT',
+      body: {
+        content_type: 'image/png',
+        data_base64: 'AQID'
+      }
+    })
+  })
+
+  it('rejects invalid avatar files before calling the backend', async () => {
+    const invalidType = { size: 3, type: 'image/gif' } as File
+    const oversize = { size: PROFILE_AVATAR_MAX_BYTES + 1, type: 'image/webp' } as File
+
+    await expect(uploadProfileAvatar('writer', invalidType)).rejects.toThrow('unsupported_avatar_type')
+    await expect(uploadProfileAvatar('writer', oversize)).rejects.toThrow('avatar_too_large')
+    expect(api).not.toHaveBeenCalled()
+  })
+
+  it('generates avatars and builds authenticated cache-busted avatar URLs', async () => {
+    const identity = { avatar: 'avatars/avatar.webp', display_name: 'Avery', role: '', tagline: '' }
+    api.mockResolvedValue({ identity, ok: true })
+
+    await expect(generateProfileAvatar('advisor', 'A confident dealership advisor')).resolves.toEqual(identity)
+    expect(api).toHaveBeenCalledWith({
+      path: '/api/profiles/advisor/avatar/generate',
+      method: 'POST',
+      body: { prompt: 'A confident dealership advisor' }
+    })
+
+    await expect(avatarUrl('advisor', 1721312345678)).resolves.toBe(
+      'http://127.0.0.1:9119/api/profiles/advisor/avatar?v=1721312345678&token=desktop-token'
     )
   })
 

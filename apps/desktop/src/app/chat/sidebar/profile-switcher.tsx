@@ -58,6 +58,7 @@ import type { ProfileInfo } from '@/types/hermes'
 import { CreateProfileDialog } from '../../profiles/create-profile-dialog'
 import { DeleteProfileDialog } from '../../profiles/delete-profile-dialog'
 import { RenameProfileDialog } from '../../profiles/rename-profile-dialog'
+import { WorkerAvatar } from '../../profiles/worker-avatar'
 import { PROFILES_ROUTE } from '../../routes'
 
 const RAIL_GAP = 4 // px — matches gap-1 between squares.
@@ -216,7 +217,7 @@ export function ProfileRail() {
   }, [createRequest])
 
   return (
-    <div aria-label="Profiles" className="flex items-center gap-0.5" data-slot="profile-rail" role="tablist">
+    <div aria-label={p.title} className="flex items-center gap-0.5" data-slot="profile-rail" role="tablist">
       {/* One button toggles default ↔ all: home face when scoped to a profile,
           layers face when showing everything. Pinned left like Manage is right.
           Hidden until a second profile exists. */}
@@ -229,6 +230,7 @@ export function ProfileRail() {
             glyph={isAll ? 'layers' : 'home'}
             label={onDefault ? p.showAllProfiles : p.switchToProfile(defaultProfile.name)}
             onSelect={() => (onDefault ? setShowAllProfiles(true) : selectProfile(defaultProfile.name))}
+            profile={!isAll ? defaultProfile : undefined}
           />
         ) : (
           <ProfilePill active={isAll} glyph="layers" label={p.allProfiles} onSelect={() => setShowAllProfiles(true)} />
@@ -239,8 +241,9 @@ export function ProfileRail() {
         <ProfilePill
           active
           glyph="home"
-          label={defaultProfile.name}
+          label={defaultProfile.display_name || defaultProfile.name}
           onSelect={() => selectProfile(defaultProfile.name)}
+          profile={defaultProfile}
         />
       )}
 
@@ -251,7 +254,6 @@ export function ProfileRail() {
         <div className="flex min-w-0 flex-1 items-center gap-1">
           <ProfileDropdown
             activeKey={isAll ? null : activeKey}
-            colors={colors}
             onSelect={selectProfile}
             profiles={named}
           />
@@ -280,12 +282,12 @@ export function ProfileRail() {
                       active={!isAll && normalizeProfileKey(profile.name) === activeKey}
                       color={resolveProfileColor(profile.name, colors)}
                       key={profile.name}
-                      label={profile.name}
                       onDelete={() => setPendingDelete(profile)}
                       onEditSoul={() => setPendingSoul(profile.name)}
                       onRecolor={color => setProfileColor(profile.name, color)}
                       onRename={() => setPendingRename(profile)}
                       onSelect={() => selectProfile(profile.name)}
+                      profile={profile}
                     />
                   ))}
                 </div>
@@ -432,12 +434,10 @@ function AddProfileButton({ label, onClick }: { label: string; onClick: () => vo
 // falls back to the placeholder since the left toggle pill carries that state.
 function ProfileDropdown({
   activeKey,
-  colors,
   onSelect,
   profiles
 }: {
   activeKey: null | string
-  colors: Record<string, string>
   onSelect: (name: string) => void
   profiles: ProfileInfo[]
 }) {
@@ -452,25 +452,17 @@ function ProfileDropdown({
         <SelectValue placeholder={p.title} />
       </SelectTrigger>
       <SelectContent collisionPadding={{ bottom: 44, left: 8, right: 8, top: 8 }} side="top">
-        {profiles.map(profile => {
-          const color = resolveProfileColor(profile.name, colors)
-          const hue = color ?? 'var(--ui-text-quaternary)'
-
-          return (
-            <SelectItem key={profile.name} value={profile.name}>
-              <span className="flex min-w-0 items-center gap-1.5">
-                <span
-                  aria-hidden="true"
-                  className="grid size-4 shrink-0 place-items-center rounded-[3px] text-[0.5rem] font-semibold uppercase leading-none"
-                  style={{ backgroundColor: profileColorSoft(hue, 22), color: color ?? undefined }}
-                >
-                  {profile.name.replace(/[^a-z0-9]/gi, '').charAt(0) || '?'}
-                </span>
-                <span className="truncate">{profile.name}</span>
-              </span>
-            </SelectItem>
-          )
-        })}
+        {profiles.map(profile => (
+          <SelectItem key={profile.name} value={profile.name}>
+            <span className="flex min-w-0 items-center gap-1.5">
+              <WorkerAvatar className="size-4 rounded-[3px] text-[0.5rem]" profile={profile} />
+              <span className="truncate">{profile.display_name || profile.name}</span>
+              {profile.role ? (
+                <span className="max-w-24 truncate text-[0.62rem] text-muted-foreground">{profile.role}</span>
+              ) : null}
+            </span>
+          </SelectItem>
+        ))}
       </SelectContent>
     </Select>
   )
@@ -482,9 +474,10 @@ interface ProfilePillProps {
   glyph: string
   label: string
   onSelect: () => void
+  profile?: ProfileInfo
 }
 
-function ProfilePill({ active, glyph, label, onSelect }: ProfilePillProps) {
+function ProfilePill({ active, glyph, label, onSelect, profile }: ProfilePillProps) {
   return (
     <Tip label={label}>
       <Button
@@ -499,7 +492,11 @@ function ProfilePill({ active, glyph, label, onSelect }: ProfilePillProps) {
         type="button"
         variant="ghost"
       >
-        <Codicon name={glyph} size="0.875rem" />
+        {profile?.has_avatar ? (
+          <WorkerAvatar className="size-4 rounded-[3px] text-[0.5rem]" profile={profile} />
+        ) : (
+          <Codicon name={glyph} size="0.875rem" />
+        )}
       </Button>
     </Tip>
   )
@@ -508,12 +505,12 @@ function ProfilePill({ active, glyph, label, onSelect }: ProfilePillProps) {
 interface ProfileSquareProps {
   active: boolean
   color: null | string
-  label: string
   onSelect: () => void
   onRecolor: (color: null | string) => void
   onRename: () => void
   onEditSoul: () => void
   onDelete: () => void
+  profile: ProfileInfo
 }
 
 // Hold this long without moving (a drag would have started first) to open the
@@ -530,22 +527,23 @@ const LONG_PRESS_MS = 450
 function ProfileSquare({
   active,
   color,
-  label,
   onDelete,
   onEditSoul,
   onRecolor,
   onRename,
-  onSelect
+  onSelect,
+  profile
 }: ProfileSquareProps) {
   const { t } = useI18n()
   const p = t.profiles
   const hue = color ?? 'var(--ui-text-quaternary)'
+  const label = profile.display_name || profile.name
   const [pickerOpen, setPickerOpen] = useState(false)
   const pressTimer = useRef<null | number>(null)
   const suppressClick = useRef(false)
 
   const { attributes, isDragging, listeners, setNodeRef, transform, transition } = useSortable({
-    id: label,
+    id: profile.name,
     transition: RAIL_TRANSITION
   })
 
@@ -591,9 +589,7 @@ function ProfileSquare({
                     )}
                     ref={setNodeRef}
                     style={{
-                      backgroundColor: profileColorSoft(hue, active ? 30 : 22),
                       boxShadow: [ring, lift].filter(Boolean).join(', ') || undefined,
-                      color: color ?? undefined,
                       // Glide the dragged square between snapped cells with a little
                       // overshoot (no scale — the overflow-x strip would clip it).
                       transform: base,
@@ -635,7 +631,11 @@ function ProfileSquare({
                     onPointerLeave={clearPress}
                     onPointerUp={clearPress}
                   >
-                    {label.replace(/[^a-z0-9]/gi, '').charAt(0) || '?'}
+                    <WorkerAvatar
+                      className="size-5 rounded-[3px] text-[0.5625rem]"
+                      profile={profile}
+                      style={{ backgroundColor: profileColorSoft(hue, active ? 30 : 22) }}
+                    />
                   </button>
                 </TooltipTrigger>
               </ContextMenuTrigger>

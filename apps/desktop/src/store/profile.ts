@@ -36,6 +36,20 @@ export const $activeProfile = atom<string>('default')
 // re-fetches on open so a profile created elsewhere shows up.
 export const $profiles = atom<ProfileInfo[]>([])
 
+// Per-worker avatar revisions. Updating an avatar bumps its monotonic timestamp
+// so every mounted portrait asks avatarUrl() for a fresh cache-busted URL.
+export const $profileAvatarUpdates = atom<Record<string, number>>({})
+
+export function markProfileAvatarUpdated(name: string, updatedAt = Date.now()): number {
+  const key = normalizeProfileKey(name)
+  const current = $profileAvatarUpdates.get()
+  const next = Math.max(updatedAt, (current[key] ?? 0) + 1)
+
+  $profileAvatarUpdates.set({ ...current, [key]: next })
+
+  return next
+}
+
 export function setActiveProfile(name: string): void {
   $activeProfile.set(name || 'default')
 }

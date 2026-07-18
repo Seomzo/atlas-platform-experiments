@@ -39,10 +39,10 @@ import threading
 import time
 import urllib.error
 import urllib.parse
+import urllib.request
 import zipfile
 
 from hermes_cli._subprocess_compat import windows_detach_flags, windows_hide_flags
-import urllib.request
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Literal, Mapping, Optional, Tuple
 
@@ -348,7 +348,11 @@ _QUERY_TOKEN_API_PATHS: frozenset[str] = frozenset({"/api/files/download"})
 
 
 def _has_valid_query_token(request: Request, path: str) -> bool:
-    if path not in _QUERY_TOKEN_API_PATHS:
+    is_profile_avatar = request.method == "GET" and re.fullmatch(
+        r"/api/profiles/[a-z0-9][a-z0-9_-]{0,63}/avatar",
+        path,
+    )
+    if path not in _QUERY_TOKEN_API_PATHS and not is_profile_avatar:
         return False
     token = request.query_params.get("token", "")
     return bool(token) and hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode())
@@ -13721,6 +13725,75 @@ class ProfileDescribeAuto(BaseModel):
     overwrite: bool = False
 
 
+def _save_profile_avatar_bytes(
+    profile_dir: Path,
+    profile_name: str,
+    content: bytes,
+    suffix: str,
+) -> Dict[str, Any]:
+    """Atomically replace a profile avatar and update its identity record."""
+    from hermes_cli.profile_identity import load_profile_identity, save_profile_identity
+
+    if suffix not in _PROFILE_AVATAR_MEDIA_TYPES:
+        raise ValueError("Unsupported avatar image format")
+
+    avatar_dir = profile_dir / "avatars"
+    avatar_dir.mkdir(parents=True, exist_ok=True)
+    target = avatar_dir / f"avatar{suffix}"
+    tmp_fd, tmp_name = tempfile.mkstemp(
+        prefix=".avatar.",
+        suffix=".upload",
+        dir=str(avatar_dir),
+    )
+    tmp_path = Path(tmp_name)
+    replaced = False
+    try:
+        with os.fdopen(tmp_fd, "wb") as out:
+            out.write(content)
+
+        os.replace(tmp_path, target)
+        replaced = True
+
+        identity = load_profile_identity(profile_dir, profile_name)
+        identity["avatar"] = f"avatars/{target.name}"
+        identity = save_profile_identity(profile_dir, profile_name, identity)
+
+        for old_suffix in _PROFILE_AVATAR_MEDIA_TYPES:
+            old_path = avatar_dir / f"avatar{old_suffix}"
+            if old_path != target:
+                old_path.unlink(missing_ok=True)
+
+        return identity
+    finally:
+        if not replaced:
+            tmp_path.unlink(missing_ok=True)
+
+
+def _read_generated_profile_avatar(image_ref: str) -> Tuple[bytes, str]:
+    """Materialize a provider image result and infer an allowed avatar suffix."""
+    if image_ref.startswith(("http://", "https://")):
+        request = urllib.request.Request(image_ref, headers={"User-Agent": "Atlas Desktop"})
+        with urllib.request.urlopen(request, timeout=60) as response:
+            content_type = (response.headers.get_content_type() or "").lower()
+            suffix = _PROFILE_AVATAR_TYPES.get(content_type)
+            if suffix is None:
+                suffix = Path(urllib.parse.urlparse(image_ref).path).suffix.lower()
+            content = response.read(_MAX_PROFILE_AVATAR_BYTES + 1)
+    else:
+        path = Path(image_ref).expanduser()
+        suffix = path.suffix.lower()
+        with path.open("rb") as source:
+            content = source.read(_MAX_PROFILE_AVATAR_BYTES + 1)
+
+    if suffix not in _PROFILE_AVATAR_MEDIA_TYPES:
+        raise ValueError("Generated image must be PNG, JPEG, or WebP")
+    if len(content) > _MAX_PROFILE_AVATAR_BYTES:
+        raise ValueError("Generated avatar is larger than 5 MB")
+    if not content:
+        raise ValueError("Image provider returned an empty image")
+    return content, suffix
+
+
 def _profile_attr(info, name: str, default: Any = None) -> Any:
     try:
         return getattr(info, name)
@@ -14268,52 +14341,38 @@ async def update_profile_identity_endpoint(name: str, body: Dict[str, Any]):
 @app.put("/api/profiles/{name}/avatar")
 async def update_profile_avatar_endpoint(
     name: str,
-    file: UploadFile = File(...),
+    request: Request,
+    file: Optional[UploadFile] = File(None),
 ):
-    from hermes_cli.profile_identity import load_profile_identity, save_profile_identity
-
     profile_dir = _resolve_profile_dir(name)
-    content_type = (file.content_type or "").split(";", 1)[0].strip().lower()
-    suffix = _PROFILE_AVATAR_TYPES.get(content_type)
-    tmp_path: Path | None = None
-    renamed = False
     try:
-        if suffix is None:
-            raise HTTPException(status_code=415, detail="Unsupported avatar media type")
-
-        avatar_dir = profile_dir / "avatars"
-        avatar_dir.mkdir(parents=True, exist_ok=True)
-        target = avatar_dir / f"avatar{suffix}"
-        tmp_fd, tmp_name = tempfile.mkstemp(
-            prefix=".avatar.",
-            suffix=".upload",
-            dir=str(avatar_dir),
-        )
-        tmp_path = Path(tmp_name)
-
-        total = 0
-        with os.fdopen(tmp_fd, "wb") as out:
+        if file is not None:
+            content_type = (file.content_type or "").split(";", 1)[0].strip().lower()
+            content = bytearray()
             while True:
                 chunk = await file.read(_UPLOAD_CHUNK_BYTES)
                 if not chunk:
                     break
-                total += len(chunk)
-                if total > _MAX_PROFILE_AVATAR_BYTES:
+                content.extend(chunk)
+                if len(content) > _MAX_PROFILE_AVATAR_BYTES:
                     raise HTTPException(status_code=413, detail="Avatar is too large")
-                out.write(chunk)
+        else:
+            try:
+                body = await request.json()
+                content_type = str(body.get("content_type") or "").split(";", 1)[0].strip().lower()
+                encoded = body.get("data_base64")
+                if not isinstance(encoded, str) or not encoded:
+                    raise ValueError("Avatar image data is required")
+                content = bytearray(base64.b64decode(encoded, validate=True))
+            except (ValueError, TypeError, binascii.Error, json.JSONDecodeError):
+                raise HTTPException(status_code=400, detail="Invalid avatar image data")
+            if len(content) > _MAX_PROFILE_AVATAR_BYTES:
+                raise HTTPException(status_code=413, detail="Avatar is too large")
 
-        os.replace(tmp_path, target)
-        renamed = True
-
-        identity = load_profile_identity(profile_dir, name)
-        identity["avatar"] = f"avatars/{target.name}"
-        identity = save_profile_identity(profile_dir, name, identity)
-
-        for old_suffix in _PROFILE_AVATAR_MEDIA_TYPES:
-            old_path = avatar_dir / f"avatar{old_suffix}"
-            if old_path != target:
-                old_path.unlink(missing_ok=True)
-
+        suffix = _PROFILE_AVATAR_TYPES.get(content_type)
+        if suffix is None:
+            raise HTTPException(status_code=415, detail="Unsupported avatar media type")
+        identity = _save_profile_avatar_bytes(profile_dir, name, bytes(content), suffix)
         return {"ok": True, "identity": identity}
     except HTTPException:
         raise
@@ -14321,9 +14380,65 @@ async def update_profile_avatar_endpoint(
         _log.exception("PUT /api/profiles/%s/avatar failed", name)
         raise HTTPException(status_code=500, detail=f"Could not write avatar: {e}")
     finally:
-        if tmp_path is not None and not renamed:
-            tmp_path.unlink(missing_ok=True)
-        await file.close()
+        if file is not None:
+            await file.close()
+
+
+@app.post("/api/profiles/{name}/avatar/generate")
+async def generate_profile_avatar_endpoint(name: str, body: Dict[str, Any]):
+    profile_dir = _resolve_profile_dir(name)
+    prompt = body.get("prompt") if isinstance(body, dict) else None
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise HTTPException(status_code=400, detail="Avatar prompt must be a non-empty string")
+    prompt = prompt.strip()
+
+    def _generate() -> Dict[str, Any]:
+        from agent.image_gen_registry import get_active_provider
+        from hermes_cli.plugins import _ensure_plugins_discovered
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+        token = set_hermes_home_override(str(profile_dir))
+        try:
+            _ensure_plugins_discovered()
+            provider = get_active_provider()
+            if provider is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "No image generation provider is configured. "
+                        "Configure one in Atlas Tools, then try again."
+                    ),
+                )
+            result = provider.generate(prompt=prompt, aspect_ratio="square")
+        finally:
+            reset_hermes_home_override(token)
+
+        if not isinstance(result, dict):
+            raise HTTPException(status_code=502, detail="Image provider returned an invalid response")
+        if not result.get("success"):
+            detail = result.get("error")
+            raise HTTPException(
+                status_code=502,
+                detail=detail if isinstance(detail, str) and detail else "Image generation failed",
+            )
+
+        image_ref = result.get("image")
+        if not isinstance(image_ref, str) or not image_ref.strip():
+            raise HTTPException(status_code=502, detail="Image provider returned no image")
+        try:
+            content, suffix = _read_generated_profile_avatar(image_ref.strip())
+            identity = _save_profile_avatar_bytes(profile_dir, name, content, suffix)
+        except (OSError, ValueError, urllib.error.URLError) as e:
+            raise HTTPException(status_code=502, detail=f"Could not save generated avatar: {e}")
+        return {"ok": True, "identity": identity}
+
+    try:
+        return await asyncio.to_thread(_generate)
+    except HTTPException:
+        raise
+    except Exception as e:
+        _log.exception("POST /api/profiles/%s/avatar/generate failed", name)
+        raise HTTPException(status_code=502, detail=f"Image generation failed: {e}")
 
 
 @app.get("/api/profiles/{name}/avatar")

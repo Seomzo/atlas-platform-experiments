@@ -1,11 +1,9 @@
-import { useStore } from '@nanostores/react'
 import type * as React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { CodeEditor } from '@/components/chat/code-editor'
 import { PageLoader } from '@/components/page-loader'
 import { Button } from '@/components/ui/button'
-import { Codicon } from '@/components/ui/codicon'
 import {
   Dialog,
   DialogContent,
@@ -15,9 +13,7 @@ import {
   DialogTitle
 } from '@/components/ui/dialog'
 import { SanitizedInput } from '@/components/ui/sanitized-input'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import {
-  createProfile,
   deleteProfile,
   getProfileSoul,
   type ProfileInfo,
@@ -26,12 +22,11 @@ import {
 } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { AlertTriangle, Save } from '@/lib/icons'
-import { profileColorSoft, resolveProfileColor } from '@/lib/profile-color'
 import { slug } from '@/lib/sanitize'
 import { normalize } from '@/lib/text'
 import { cn } from '@/lib/utils'
 import { notify, notifyError } from '@/store/notifications'
-import { $profileColors, refreshProfiles } from '@/store/profile'
+import { refreshProfiles } from '@/store/profile'
 
 import { useRefreshHotkey } from '../hooks/use-refresh-hotkey'
 import {
@@ -48,6 +43,10 @@ import {
   PanelRowMenu,
   PanelSectionLabel
 } from '../overlays/panel'
+
+import { CreateProfileDialog } from './create-profile-dialog'
+import { IdentityEditor } from './identity-editor'
+import { WorkerAvatar } from './worker-avatar'
 
 const PROFILE_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
 
@@ -107,26 +106,10 @@ export function ProfilesView({ onClose }: ProfilesViewProps) {
       return profiles ?? []
     }
 
-    return profiles.filter(
-      profile => profile.name.toLowerCase().includes(q) || (profile.model ?? '').toLowerCase().includes(q)
+    return profiles.filter(profile =>
+      [profile.name, profile.display_name, profile.role, profile.model ?? ''].some(value => value.toLowerCase().includes(q))
     )
   }, [profiles, query])
-
-  const handleCreate = useCallback(
-    async (name: string, cloneFrom: null | string) => {
-      const trimmed = name.trim()
-
-      if (!isValidProfileName(trimmed)) {
-        throw new Error(p.nameHint)
-      }
-
-      await createProfile({ name: trimmed, clone_from: cloneFrom })
-      notify({ kind: 'success', title: p.created, message: trimmed })
-      setSelectedName(trimmed)
-      await refresh()
-    },
-    [p, refresh]
-  )
 
   const handleRename = useCallback(
     async (from: string, to: string): Promise<void> => {
@@ -222,7 +205,7 @@ export function ProfilesView({ onClose }: ProfilesViewProps) {
             </PanelList>
 
             {selected ? (
-              <ProfileDetail key={selected.name} profile={selected} />
+              <ProfileDetail key={selected.name} onUpdated={refresh} profile={selected} />
             ) : (
               <PanelEmpty description={p.selectPrompt} icon="account" />
             )}
@@ -244,7 +227,10 @@ export function ProfilesView({ onClose }: ProfilesViewProps) {
 
       <CreateProfileDialog
         onClose={() => setCreateOpen(false)}
-        onCreate={async (name, cloneFrom) => handleCreate(name, cloneFrom)}
+        onCreated={async name => {
+          setSelectedName(name)
+          await refresh()
+        }}
         open={createOpen}
         profiles={profiles ?? []}
       />
@@ -290,70 +276,60 @@ function ProfileRow({
   onSelect: () => void
   profile: ProfileInfo
 }) {
-  const colors = useStore($profileColors)
+  const { t } = useI18n()
+  const p = t.profiles
+  const displayName = profile.display_name.trim() || profile.name
+
+  const metadata = [profile.model, profile.skill_count > 0 ? p.skillsShort(profile.skill_count) : null]
+    .filter(Boolean)
+    .join(' · ')
 
   return (
     <PanelListRow
       active={active}
-      lead={
-        <ProfileGlyph
-          color={resolveProfileColor(profile.name, colors)}
-          isDefault={profile.is_default}
-          name={profile.name}
-        />
-      }
+      lead={<WorkerAvatar className="size-5 rounded-[4px] text-[0.56rem]" profile={profile} />}
       menu={menu}
+      meta={metadata || undefined}
       onSelect={onSelect}
       rowKey={profile.name}
-      title={profile.name}
+      title={
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="truncate">{displayName}</span>
+          {profile.role ? (
+            <span className="max-w-20 shrink truncate rounded-full bg-foreground/10 px-1.5 py-0.5 text-[0.56rem] font-medium text-muted-foreground">
+              {profile.role}
+            </span>
+          ) : null}
+        </span>
+      }
     />
   )
 }
 
-// Leading glyph for a profile row, mirroring the sidebar rail: the default
-// profile gets the `home` icon; named profiles get a soft color-tinted square
-// with their initial in the profile's color.
-function ProfileGlyph({ color, isDefault, name }: { color: null | string; isDefault: boolean; name: string }) {
-  if (isDefault) {
-    return <Codicon className="shrink-0 text-muted-foreground/70" name="home" size="0.9rem" />
-  }
-
-  const hue = color ?? 'var(--ui-text-quaternary)'
-
-  const initial =
-    name
-      .replace(/[^a-z0-9]/gi, '')
-      .charAt(0)
-      .toUpperCase() || '?'
-
-  return (
-    <span
-      aria-hidden="true"
-      className="grid size-4 shrink-0 place-items-center rounded-[3px] text-[0.5rem] font-semibold uppercase leading-none"
-      style={{ backgroundColor: profileColorSoft(hue, 22), color: color ?? undefined }}
-    >
-      {initial}
-    </span>
-  )
-}
-
-function ProfileDetail({ profile }: { profile: ProfileInfo }) {
+function ProfileDetail({ onUpdated, profile }: { onUpdated: () => Promise<void>; profile: ProfileInfo }) {
   const { t } = useI18n()
   const p = t.profiles
+  const displayName = profile.display_name.trim() || profile.name
 
   return (
     <PanelDetail>
       <header className="space-y-3">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <h3 className="text-[0.95rem] font-semibold tracking-tight text-foreground">{profile.name}</h3>
-            {profile.is_default && <PanelPill tone="good">{p.defaultBadge}</PanelPill>}
-            {profile.has_env && <PanelPill tone="muted">.env</PanelPill>}
+        <div className="flex min-w-0 items-center gap-3">
+          <WorkerAvatar className="size-12 rounded-xl text-base" profile={profile} />
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="text-[0.95rem] font-semibold tracking-tight text-foreground">{displayName}</h3>
+              {profile.role ? <PanelPill>{profile.role}</PanelPill> : null}
+              {profile.is_default && <PanelPill tone="good">{p.defaultBadge}</PanelPill>}
+              {profile.has_env && <PanelPill tone="muted">.env</PanelPill>}
+            </div>
+            <p className="mt-0.5 font-mono text-[0.66rem] text-muted-foreground/55">{profile.name}</p>
           </div>
-          <p className="mt-1 truncate font-mono text-[0.66rem] text-muted-foreground/55" title={profile.path}>
-            {profile.path}
-          </p>
         </div>
+
+        <p className="truncate font-mono text-[0.66rem] text-muted-foreground/55" title={profile.path}>
+          {profile.path}
+        </p>
 
         <PanelMeta
           rows={[
@@ -373,6 +349,7 @@ function ProfileDetail({ profile }: { profile: ProfileInfo }) {
         />
       </header>
 
+      <IdentityEditor onUpdated={onUpdated} profile={profile} />
       <SoulEditor profileName={profile.name} />
     </PanelDetail>
   )
@@ -471,131 +448,6 @@ function SoulEditor({ profileName }: { profileName: string }) {
         </Button>
       </div>
     </section>
-  )
-}
-
-function CreateProfileDialog({
-  onClose,
-  onCreate,
-  open,
-  profiles
-}: {
-  onClose: () => void
-  onCreate: (name: string, cloneFrom: null | string) => Promise<void>
-  open: boolean
-  profiles: ProfileInfo[]
-}) {
-  const { t } = useI18n()
-  const p = t.profiles
-  const [name, setName] = useState('')
-  const [cloneFrom, setCloneFrom] = useState<null | string>('default')
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<null | string>(null)
-
-  useEffect(() => {
-    if (!open) {
-      return
-    }
-
-    setName('')
-    setCloneFrom('default')
-    setError(null)
-    setSaving(false)
-  }, [open])
-
-  const trimmed = name.trim()
-  const invalid = trimmed !== '' && !isValidProfileName(trimmed)
-
-  async function handleSubmit(event: React.FormEvent) {
-    event.preventDefault()
-
-    if (!trimmed || invalid) {
-      setError(invalid ? p.invalidName(p.nameHint) : p.nameRequired)
-
-      return
-    }
-
-    setSaving(true)
-    setError(null)
-
-    try {
-      await onCreate(trimmed, cloneFrom)
-      onClose()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : p.failedCreate)
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <Dialog onOpenChange={value => !value && !saving && onClose()} open={open}>
-      <DialogContent className="max-w-md">
-        <DialogHeader>
-          <DialogTitle>{p.newProfile}</DialogTitle>
-          <DialogDescription>{p.createDesc}</DialogDescription>
-        </DialogHeader>
-
-        <form className="grid gap-4" onSubmit={handleSubmit}>
-          <div className="grid gap-1.5">
-            <label className="text-xs font-medium" htmlFor="new-profile-name">
-              {p.nameLabel}
-            </label>
-            <SanitizedInput
-              aria-invalid={invalid}
-              autoFocus
-              id="new-profile-name"
-              onValueChange={setName}
-              placeholder="my-profile"
-              sanitize={slug}
-              value={name}
-            />
-            <p className={cn('text-[0.66rem] leading-4', invalid ? 'text-destructive' : 'text-muted-foreground')}>
-              {p.nameHint}
-            </p>
-          </div>
-
-          <div className="grid gap-1.5">
-            <label className="text-xs font-medium" htmlFor="new-profile-clone-from">
-              {p.cloneFrom}
-            </label>
-            <Select
-              onValueChange={value => setCloneFrom(value === '__none__' ? null : value)}
-              value={cloneFrom ?? '__none__'}
-            >
-              <SelectTrigger className="h-9 rounded-md" id="new-profile-clone-from">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__none__">{p.cloneFromNone}</SelectItem>
-                {profiles.map(profile => (
-                  <SelectItem key={profile.name} value={profile.name}>
-                    {profile.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">{p.cloneFromDesc}</p>
-          </div>
-
-          {error && (
-            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-              <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-              <span>{error}</span>
-            </div>
-          )}
-
-          <DialogFooter>
-            <Button disabled={saving} onClick={onClose} type="button" variant="outline">
-              {t.common.cancel}
-            </Button>
-            <Button disabled={saving || !trimmed || invalid} type="submit">
-              {saving ? p.creating : p.createAction}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
   )
 }
 
