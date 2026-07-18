@@ -321,7 +321,7 @@ class CortexDreamWorker:
                     self.store.fail_job(
                         job_id,
                         owner=self.owner,
-                        error=type(exc).__name__,
+                        error=f"{type(exc).__name__}: {exc}"[:300],
                         retry=True,
                     )
                 except Exception:

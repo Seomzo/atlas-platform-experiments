@@ -642,6 +642,10 @@ def _iso_or_none(value: Any, *, field_name: str) -> str | None:
 def _required_string(
     value: Any, field_name: str, *, maximum: int, allow_empty: bool = False
 ) -> str:
+    if value is None and allow_empty:
+        # Cheap models emit null where the contract wants "" — identical
+        # meaning for an optional field, so normalize instead of failing.
+        value = ""
     if not isinstance(value, str):
         raise CortexOutputError(f"{field_name} must be a string")
     result = " ".join(value.split()).strip()
@@ -663,8 +667,17 @@ def _validate_entities(value: Any) -> tuple[TriageEntity, ...]:
         if not isinstance(item, Mapping) or set(item) != {"name", "type", "aliases"}:
             raise CortexOutputError("entity has an invalid shape")
         name = _required_string(item.get("name"), "entity.name", maximum=500)
+        raw_type = item.get("type")
+        if (
+            isinstance(raw_type, list)
+            and len(raw_type) == 1
+            and isinstance(raw_type[0], str)
+        ):
+            # The prompt contract lists the allowed type values; cheap models
+            # copy that list shape for a single value. Unwrapping is lossless.
+            raw_type = raw_type[0]
         entity_type = _required_string(
-            item.get("type"), "entity.type", maximum=100
+            raw_type, "entity.type", maximum=100
         ).lower()
         if entity_type not in ENTITY_TYPES:
             raise CortexOutputError("entity.type is not in the Cortex vocabulary")
@@ -735,6 +748,17 @@ def validate_triage_output(
         payload = json.loads(text)
     except (TypeError, json.JSONDecodeError) as exc:
         raise CortexOutputError("model output is not one exact JSON document") from exc
+    if isinstance(payload, list):
+        # Cheap triage models routinely emit the operations array without the
+        # wrapper object. Wrapping it is deterministic and lossless: every
+        # operation below still passes the full executable contract.
+        payload = {"schema_version": TRIAGE_SCHEMA_VERSION, "operations": payload}
+    elif isinstance(payload, Mapping) and set(payload) == {"operations"}:
+        # Same failure family: the envelope with schema_version omitted.
+        payload = {
+            "schema_version": TRIAGE_SCHEMA_VERSION,
+            "operations": payload["operations"],
+        }
     if not isinstance(payload, Mapping) or set(payload) != {
         "schema_version",
         "operations",
@@ -1490,11 +1514,36 @@ class DreamProcessor:
                 )
             repaired = self._call_route(route, repair_prompt)
             usage.add_response(repaired)
-            operations = validate_triage_output(
-                self._response_text(repaired),
-                candidates,
-                allowed_actions=allowed_actions,
-            )
+            try:
+                operations = validate_triage_output(
+                    self._response_text(repaired),
+                    candidates,
+                    allowed_actions=allowed_actions,
+                )
+            except CortexOutputError:
+                if len(candidates) <= 1:
+                    raise
+                # A batch whose full response exceeds the route's output
+                # token budget truncates mid-document and can never repair
+                # (the repair re-emits the same oversized document). Halving
+                # the batch halves the required output, so recursion always
+                # terminates at single-candidate batches.
+                middle = len(candidates) // 2
+                left, label = self._call_and_validate(
+                    route,
+                    candidates[:middle],
+                    usage,
+                    allowed_actions=allowed_actions,
+                    review=review,
+                )
+                right, _ = self._call_and_validate(
+                    route,
+                    candidates[middle:],
+                    usage,
+                    allowed_actions=allowed_actions,
+                    review=review,
+                )
+                return (*left, *right), label
         response_model = str(_object_value(response, "model", "") or route.model)
         return operations, f"{route.provider}:{response_model}"
 

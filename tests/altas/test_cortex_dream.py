@@ -13,12 +13,15 @@ import pytest
 
 from altas.cortex.config import CortexConfig
 from altas.cortex.dream import (
+    ACTIONS,
     CortexDreamError,
+    CortexModelRoute,
     CortexOutputError,
     CortexRouteError,
     DreamCandidate,
     DreamProcessor,
     TRIAGE_SCHEMA_VERSION,
+    UsageTotals,
     resolve_model_route,
     validate_triage_output,
 )
@@ -723,6 +726,144 @@ def test_triage_rejects_unbounded_or_ungrounded_relation_shape(
                 "operations": [operation],
             }),
             [candidate],
+        )
+
+
+def test_triage_accepts_bare_operations_array_as_wrapped_document() -> None:
+    """Cheap triage models emit the operations array without the wrapper;
+    validation must treat it identically to the canonical envelope."""
+    evidence_id = "evidence-1"
+    observation_id = "observation-1"
+    operation = _operation(observation_id, evidence_id)
+    candidate = DreamCandidate(
+        observation_id=observation_id,
+        session_id="session-1",
+        knowledge_space="personal",
+        kind="preference",
+        text="The customer prefers email follow-ups.",
+        evidence=(
+            {
+                "id": evidence_id,
+                "source_type": "user_message",
+                "content": "The customer prefers email follow-ups.",
+                "occurred_at": "2026-07-14T00:00:00Z",
+                "sensitivity": "private",
+            },
+        ),
+        authoritative_evidence_ids=frozenset({evidence_id}),
+        allowed_evidence_ids=frozenset({evidence_id}),
+        assistant_evidence_ids=frozenset(),
+        related_memories=(),
+        valid_from=None,
+        valid_until=None,
+    )
+
+    bare = validate_triage_output(json.dumps([operation]), [candidate])
+    unversioned = validate_triage_output(
+        json.dumps({"operations": [operation]}), [candidate]
+    )
+    wrapped = validate_triage_output(
+        json.dumps({
+            "schema_version": TRIAGE_SCHEMA_VERSION,
+            "operations": [operation],
+        }),
+        [candidate],
+    )
+    assert bare == unversioned == wrapped
+
+    # Other top-level shapes remain rejected.
+    for payload in ({"ops": [operation]}, "operations", 7):
+        with pytest.raises(CortexOutputError, match="top-level shape"):
+            validate_triage_output(json.dumps(payload), [candidate])
+
+
+def _candidate(observation_id: str, evidence_id: str) -> DreamCandidate:
+    return DreamCandidate(
+        observation_id=observation_id,
+        session_id="session-1",
+        knowledge_space="personal",
+        kind="preference",
+        text="The customer prefers email follow-ups.",
+        evidence=(
+            {
+                "id": evidence_id,
+                "source_type": "user_message",
+                "content": "The customer prefers email follow-ups.",
+                "occurred_at": "2026-07-14T00:00:00Z",
+                "sensitivity": "private",
+            },
+        ),
+        authoritative_evidence_ids=frozenset({evidence_id}),
+        allowed_evidence_ids=frozenset({evidence_id}),
+        assistant_evidence_ids=frozenset(),
+        related_memories=(),
+        valid_from=None,
+        valid_until=None,
+    )
+
+
+def test_truncated_batch_output_splits_batch_instead_of_failing(
+    tmp_path: Path,
+) -> None:
+    """When a batch response truncates (output token budget) and the one
+    repair also fails, the processor must split the batch and recover
+    instead of burning the job attempt."""
+    store, config, raw = _runtime(tmp_path)
+    candidates = [
+        _candidate("observation-1", "evidence-1"),
+        _candidate("observation-2", "evidence-2"),
+    ]
+    full = [
+        _operation("observation-1", "evidence-1"),
+        _operation("observation-2", "evidence-2"),
+    ]
+    truncated = json.dumps({
+        "schema_version": TRIAGE_SCHEMA_VERSION,
+        "operations": full,
+    })[:120]
+    llm = _FakeLLM(
+        _response(truncated),  # initial batch call: cut mid-document
+        _response(truncated),  # repair call: same truncation
+        _response({
+            "schema_version": TRIAGE_SCHEMA_VERSION,
+            "operations": [full[0]],
+        }),  # left half
+        _response({
+            "schema_version": TRIAGE_SCHEMA_VERSION,
+            "operations": [full[1]],
+        }),  # right half
+    )
+    processor = DreamProcessor(store, config, raw_config=raw, llm_call=llm)
+    route = CortexModelRoute(
+        task="cortex_triage", provider="openrouter", model="cheap-memory-model"
+    )
+
+    operations, _ = processor._call_and_validate(
+        route,
+        candidates,
+        UsageTotals(),
+        allowed_actions=ACTIONS,
+        review=False,
+    )
+
+    assert [op.observation_id for op in operations] == [
+        "observation-1",
+        "observation-2",
+    ]
+    assert len(llm.calls) == 4
+
+    # A single candidate that still fails after repair must raise.
+    llm_single = _FakeLLM(_response(truncated), _response(truncated))
+    processor_single = DreamProcessor(
+        store, config, raw_config=raw, llm_call=llm_single
+    )
+    with pytest.raises(CortexOutputError):
+        processor_single._call_and_validate(
+            route,
+            candidates[:1],
+            UsageTotals(),
+            allowed_actions=ACTIONS,
+            review=False,
         )
 
 
