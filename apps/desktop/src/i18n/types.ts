@@ -1032,6 +1032,62 @@ export interface Translations {
     platformIntro: Record<string, string>
   }
 
+  channels: {
+    title: string
+    sidebarTitle: string
+    channelsLabel: string
+    directMessages: string
+    newChannel: string
+    emptyChannels: string
+    emptyDms: string
+    createTitle: string
+    createDescription: string
+    kindLabel: string
+    kindChannel: string
+    kindChannelDescription: string
+    kindDm: string
+    kindDmDescription: string
+    nameLabel: string
+    namePlaceholder: string
+    nameRequired: string
+    membersLabel: string
+    membersHint: string
+    dmMemberHint: string
+    membersRequired: string
+    loadingWorkers: string
+    failedLoadWorkers: string
+    noWorkers: string
+    workerFallbackRole: string
+    createAction: string
+    createDmAction: string
+    userName: string
+    userAvatarLabel: string
+    memberCount: (count: number) => string
+    transcriptLabel: string
+    scaffoldBadge: string
+    routingInactiveTitle: string
+    routingInactiveDescription: string
+    dmReadyTitle: string
+    dmReadyDescription: (worker: string) => string
+    openWorkerChat: (worker: string) => string
+    mentionWorker: string
+    composerPlaceholder: (channel: string) => string
+    composerPending: string
+    dmComposerPending: string
+    sendUnavailable: string
+    settings: string
+    settingsDescription: string
+    turnPolicy: string
+    turnPolicyMentionOnly: string
+    turnPolicyMentionOnlyDescription: string
+    turnPolicyAllMembers: string
+    turnPolicyAllMembersDescription: string
+    archive: string
+    notFoundTitle: string
+    notFoundDescription: string
+    backToChat: string
+  }
+
   profiles: {
     close: string
     nameHint: string

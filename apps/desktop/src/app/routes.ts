@@ -9,11 +9,13 @@ export const CRON_ROUTE = '/cron'
 export const PROFILES_ROUTE = '/profiles'
 export const AGENTS_ROUTE = '/agents'
 export const STARMAP_ROUTE = '/starmap'
+export const CHANNELS_ROUTE = '/channels'
 
 export type AppView =
   | 'agents'
   | 'artifacts'
   | 'chat'
+  | 'channels'
   | 'command-center'
   | 'cron'
   | 'messaging'
@@ -25,6 +27,7 @@ export type AppView =
 export type AppRouteId =
   | 'agents'
   | 'artifacts'
+  | 'channels'
   | 'command-center'
   | 'cron'
   | 'messaging'
@@ -50,7 +53,8 @@ export const APP_ROUTES = [
   { id: 'cron', path: CRON_ROUTE, view: 'cron' },
   { id: 'profiles', path: PROFILES_ROUTE, view: 'profiles' },
   { id: 'agents', path: AGENTS_ROUTE, view: 'agents' },
-  { id: 'starmap', path: STARMAP_ROUTE, view: 'starmap' }
+  { id: 'starmap', path: STARMAP_ROUTE, view: 'starmap' },
+  { id: 'channels', path: CHANNELS_ROUTE, view: 'channels' }
 ] as const satisfies readonly AppRoute[]
 
 const APP_VIEW_BY_PATH = new Map<string, AppView>(APP_ROUTES.map(route => [route.path, route.view]))
@@ -89,7 +93,27 @@ export function sessionRoute(sessionId: string): string {
   return `${SESSION_ROUTE_PREFIX}${encodeURIComponent(sessionId)}`
 }
 
+export function routeChannelId(pathname: string): string | null {
+  const prefix = `${CHANNELS_ROUTE}/`
+
+  if (!pathname.startsWith(prefix)) {
+    return null
+  }
+
+  const id = pathname.slice(prefix.length)
+
+  return id && !id.includes('/') ? decodeURIComponent(id) : null
+}
+
+export function channelRoute(channelId: string): string {
+  return `${CHANNELS_ROUTE}/${encodeURIComponent(channelId)}`
+}
+
 export function appViewForPath(pathname: string): AppView {
+  if (routeChannelId(pathname)) {
+    return 'channels'
+  }
+
   if (isNewChatRoute(pathname) || routeSessionId(pathname)) {
     return 'chat'
   }
