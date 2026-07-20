@@ -101,6 +101,7 @@ import { type AppView, ARTIFACTS_ROUTE, MESSAGING_ROUTE, SKILLS_ROUTE, STARMAP_R
 import { publicCronJobs } from '../../starmap/system-job'
 import type { SidebarNavItem } from '../../types'
 
+import { SidebarChannelsSection } from './channels-section'
 import { countLabel } from './chrome'
 import { SidebarCronJobsSection } from './cron-jobs-section'
 import { SidebarLoadMoreRow } from './load-more-row'
@@ -1162,6 +1163,8 @@ export function ChatSidebar({
               />
             )}
 
+            {!trimmedQuery && <SidebarChannelsSection />}
+
             {!trimmedQuery && (
               <SidebarSessionsSection
                 activeSessionId={activeSidebarSessionId}
@@ -1402,7 +1405,12 @@ export function ChatSidebar({
           </div>
         )}
 
-        {contentVisible && !showSessionSections && <SidebarBlankState onNewProject={openProjectCreate} />}
+        {contentVisible && !showSessionSections && (
+          <div className="flex min-h-0 flex-1 flex-col pb-1.75">
+            <SidebarChannelsSection />
+            <SidebarBlankState onNewProject={openProjectCreate} />
+          </div>
+        )}
 
         {contentVisible && (
           <div className="shrink-0 px-0.5 pb-1 pt-0.5">
