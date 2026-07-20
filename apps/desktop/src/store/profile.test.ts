@@ -37,6 +37,7 @@ const { getProfiles } = await import('@/hermes')
 
 const profile = (name: string, isDefault = false): ProfileInfo => ({
   display_name: name,
+  gateway_running: false,
   has_avatar: false,
   has_env: false,
   is_default: isDefault,

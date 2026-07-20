@@ -249,7 +249,6 @@ export function DesktopController() {
     openAgents,
     openCommandCenterSection,
     openStarmap,
-    profilesOpen,
     settingsOpen,
     starmapOpen,
     toggleCommandCenter
@@ -1363,12 +1362,6 @@ export function DesktopController() {
         </Suspense>
       )}
 
-      {profilesOpen && (
-        <Suspense fallback={null}>
-          <ProfilesView onClose={closeOverlayToPreviousRoute} />
-        </Suspense>
-      )}
-
       {starmapOpen && (
         <Suspense fallback={null}>
           <StarmapView onClose={closeOverlayToPreviousRoute} />
@@ -1582,8 +1575,15 @@ export function DesktopController() {
             }
             path="artifacts"
           />
+          <Route
+            element={
+              <Suspense fallback={null}>
+                <ProfilesView />
+              </Suspense>
+            }
+            path="profiles"
+          />
           <Route element={null} path="cron" />
-          <Route element={null} path="profiles" />
           <Route element={null} path="settings" />
           <Route element={null} path="command-center" />
           <Route element={null} path="agents" />

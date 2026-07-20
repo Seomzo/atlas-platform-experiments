@@ -1,64 +1,33 @@
+import { useStore } from '@nanostores/react'
 import type * as React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { CodeEditor } from '@/components/chat/code-editor'
 import { PageLoader } from '@/components/page-loader'
+import { StatusDot, type StatusTone } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle
-} from '@/components/ui/dialog'
-import { SanitizedInput } from '@/components/ui/sanitized-input'
-import {
-  deleteProfile,
-  getProfileSoul,
-  type ProfileInfo,
-  renameProfile,
-  updateProfileSoul
-} from '@/hermes'
+import { Codicon } from '@/components/ui/codicon'
+import { RowButton } from '@/components/ui/row-button'
+import { getProfileSoul, type ProfileInfo, updateProfileSoul } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { AlertTriangle, Save } from '@/lib/icons'
-import { slug } from '@/lib/sanitize'
 import { normalize } from '@/lib/text'
 import { cn } from '@/lib/utils'
 import { notify, notifyError } from '@/store/notifications'
-import { refreshProfiles } from '@/store/profile'
+import { $activeGatewayProfile, normalizeProfileKey, refreshProfiles } from '@/store/profile'
 
 import { useRefreshHotkey } from '../hooks/use-refresh-hotkey'
-import {
-  Panel,
-  PanelAddButton,
-  PanelBody,
-  PanelDetail,
-  PanelEmpty,
-  PanelHeader,
-  PanelList,
-  PanelListRow,
-  PanelMeta,
-  PanelPill,
-  PanelRowMenu,
-  PanelSectionLabel
-} from '../overlays/panel'
+import { DetailColumn, ListColumn, ListStrip, MasterDetail } from '../master-detail'
+import { PanelEmpty, PanelMeta, PanelPill, PanelRowMenu, PanelSectionLabel } from '../overlays/panel'
+import { PageSearchShell } from '../page-search-shell'
 
 import { CreateProfileDialog } from './create-profile-dialog'
+import { DeleteProfileDialog } from './delete-profile-dialog'
 import { IdentityEditor } from './identity-editor'
+import { RenameProfileDialog } from './rename-profile-dialog'
 import { WorkerAvatar } from './worker-avatar'
 
-const PROFILE_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
-
-function isValidProfileName(name: string): boolean {
-  return PROFILE_NAME_RE.test(name.trim())
-}
-
-interface ProfilesViewProps {
-  onClose: () => void
-}
-
-export function ProfilesView({ onClose }: ProfilesViewProps) {
+export function ProfilesView(props: React.ComponentProps<'section'>) {
   const { t } = useI18n()
   const p = t.profiles
   const [profiles, setProfiles] = useState<null | ProfileInfo[]>(null)
@@ -67,7 +36,7 @@ export function ProfilesView({ onClose }: ProfilesViewProps) {
   const [createOpen, setCreateOpen] = useState(false)
   const [pendingRename, setPendingRename] = useState<null | ProfileInfo>(null)
   const [pendingDelete, setPendingDelete] = useState<null | ProfileInfo>(null)
-  const [deleting, setDeleting] = useState(false)
+  const activeProfile = useStore($activeGatewayProfile)
 
   const refresh = useCallback(async () => {
     try {
@@ -107,52 +76,27 @@ export function ProfilesView({ onClose }: ProfilesViewProps) {
     }
 
     return profiles.filter(profile =>
-      [profile.name, profile.display_name, profile.role, profile.model ?? ''].some(value => value.toLowerCase().includes(q))
+      [profile.name, profile.display_name, profile.role, profile.model ?? ''].some(value =>
+        value.toLowerCase().includes(q)
+      )
     )
   }, [profiles, query])
 
-  const handleRename = useCallback(
-    async (from: string, to: string): Promise<void> => {
-      const target = to.trim()
-
-      if (target === from) {
-        return
-      }
-
-      if (!isValidProfileName(target)) {
-        throw new Error(p.nameHint)
-      }
-
-      await renameProfile(from, target)
-      notify({ kind: 'success', title: p.renamed, message: `${from} → ${target}` })
-      setSelectedName(target)
-      await refresh()
-    },
-    [p, refresh]
-  )
-
-  const handleConfirmDelete = useCallback(async () => {
-    if (!pendingDelete) {
-      return
-    }
-
-    setDeleting(true)
-
-    try {
-      await deleteProfile(pendingDelete.name)
-      notify({ kind: 'success', title: p.deleted, message: pendingDelete.name })
-      setPendingDelete(null)
-      setSelectedName(null)
-      await refresh()
-    } catch (err) {
-      notifyError(err, p.failedDelete)
-    } finally {
-      setDeleting(false)
-    }
-  }, [p, pendingDelete, refresh])
-
   return (
-    <Panel closeLabel={p.close} onClose={onClose}>
+    <PageSearchShell
+      {...props}
+      onSearchChange={setQuery}
+      searchHidden={(profiles?.length ?? 0) === 0}
+      searchHints={profiles?.slice(0, 5).map(profile => p.searchHint(profile.display_name || profile.name))}
+      searchPlaceholder={p.search}
+      searchTrailingAction={
+        <Button onClick={() => setCreateOpen(true)} size="sm">
+          <Codicon name="add" size="0.875rem" />
+          {p.newProfile}
+        </Button>
+      }
+      searchValue={query}
+    >
       {!profiles ? (
         <PageLoader label={p.loading} />
       ) : profiles.length === 0 ? (
@@ -167,18 +111,23 @@ export function ProfilesView({ onClose }: ProfilesViewProps) {
           title={p.noProfiles}
         />
       ) : (
-        <>
-          <PanelHeader subtitle={p.count(profiles.length)} title={p.title} />
-          <PanelBody>
-            <PanelList
-              onSearchChange={setQuery}
-              searchLabel={p.search}
-              searchPlaceholder={p.search}
-              searchValue={query}
-            >
+        <MasterDetail>
+          <ListColumn
+            header={
+              <ListStrip
+                left={
+                  <span className="text-[0.68rem] font-medium text-muted-foreground/70">
+                    {p.count(profiles.length)}
+                  </span>
+                }
+              />
+            }
+          >
+            <div className="space-y-1">
               {visibleProfiles.map(profile => (
-                <ProfileRow
+                <WorkerRow
                   active={selected?.name === profile.name}
+                  current={normalizeProfileKey(profile.name) === normalizeProfileKey(activeProfile)}
                   key={profile.name}
                   menu={
                     <PanelRowMenu
@@ -193,34 +142,42 @@ export function ProfilesView({ onClose }: ProfilesViewProps) {
                                 onSelect: () => setPendingDelete(profile),
                                 tone: 'danger'
                               }
-                            ]
+                          ]
                       }
+                      label={p.actionsFor(profile.display_name || profile.name)}
                     />
                   }
                   onSelect={() => setSelectedName(profile.name)}
                   profile={profile}
                 />
               ))}
-              <PanelAddButton label={p.newProfile} onClick={() => setCreateOpen(true)} />
-            </PanelList>
+              {visibleProfiles.length === 0 ? (
+                <p className="px-2 py-6 text-center text-xs text-muted-foreground/65">{p.noSearchResults(query)}</p>
+              ) : null}
+            </div>
+          </ListColumn>
 
+          <DetailColumn>
             {selected ? (
-              <ProfileDetail key={selected.name} onUpdated={refresh} profile={selected} />
+              <ProfileDetail
+                current={normalizeProfileKey(selected.name) === normalizeProfileKey(activeProfile)}
+                key={selected.name}
+                onUpdated={refresh}
+                profile={selected}
+              />
             ) : (
               <PanelEmpty description={p.selectPrompt} icon="account" />
             )}
-          </PanelBody>
-        </>
+          </DetailColumn>
+        </MasterDetail>
       )}
 
       <RenameProfileDialog
         currentName={pendingRename?.name ?? ''}
         onClose={() => setPendingRename(null)}
-        onRename={async newName => {
-          if (pendingRename) {
-            await handleRename(pendingRename.name, newName)
-            setPendingRename(null)
-          }
+        onRenamed={async name => {
+          setSelectedName(name)
+          await refresh()
         }}
         open={pendingRename !== null}
       />
@@ -235,43 +192,28 @@ export function ProfilesView({ onClose }: ProfilesViewProps) {
         profiles={profiles ?? []}
       />
 
-      <Dialog onOpenChange={open => !open && !deleting && setPendingDelete(null)} open={pendingDelete !== null}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>{p.deleteTitle}</DialogTitle>
-            <DialogDescription>
-              {pendingDelete ? (
-                <>
-                  {p.deleteDescPrefix}
-                  <span className="font-medium text-foreground">{pendingDelete.name}</span>
-                  {p.deleteDescMid}
-                  <span className="font-mono text-xs">{pendingDelete.path}</span>
-                  {p.deleteDescSuffix}
-                </>
-              ) : null}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button disabled={deleting} onClick={() => setPendingDelete(null)} variant="outline">
-              {t.common.cancel}
-            </Button>
-            <Button disabled={deleting} onClick={() => void handleConfirmDelete()} variant="destructive">
-              {deleting ? p.deleting : t.common.delete}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </Panel>
+      <DeleteProfileDialog
+        onClose={() => setPendingDelete(null)}
+        onDeleted={async () => {
+          setSelectedName(null)
+          await refresh()
+        }}
+        open={pendingDelete !== null}
+        profile={pendingDelete}
+      />
+    </PageSearchShell>
   )
 }
 
-function ProfileRow({
+function WorkerRow({
   active,
+  current,
   menu,
   onSelect,
   profile
 }: {
   active: boolean
+  current: boolean
   menu?: React.ReactNode
   onSelect: () => void
   profile: ProfileInfo
@@ -280,59 +222,96 @@ function ProfileRow({
   const p = t.profiles
   const displayName = profile.display_name.trim() || profile.name
 
-  const metadata = [profile.model, profile.skill_count > 0 ? p.skillsShort(profile.skill_count) : null]
-    .filter(Boolean)
-    .join(' · ')
+  const state = current
+    ? { label: p.currentBadge, tone: 'good' as StatusTone }
+    : profile.gateway_running
+      ? { label: p.onlineBadge, tone: 'good' as StatusTone }
+      : { label: p.standbyBadge, tone: 'muted' as StatusTone }
 
   return (
-    <PanelListRow
-      active={active}
-      lead={<WorkerAvatar className="size-5 rounded-[4px] text-[0.56rem]" profile={profile} />}
-      menu={menu}
-      meta={metadata || undefined}
-      onSelect={onSelect}
-      rowKey={profile.name}
-      title={
-        <span className="flex min-w-0 items-center gap-1.5">
-          <span className="truncate">{displayName}</span>
-          {profile.role ? (
-            <span className="max-w-20 shrink truncate rounded-full bg-foreground/10 px-1.5 py-0.5 text-[0.56rem] font-medium text-muted-foreground">
-              {profile.role}
-            </span>
-          ) : null}
+    <div
+      className={cn(
+        'group/row row-hover flex min-h-13 w-full items-center rounded-lg pr-1 transition-colors hover:text-foreground',
+        active ? 'bg-(--ui-row-active-background) text-foreground' : 'text-(--ui-text-secondary)'
+      )}
+      data-worker-row={profile.name}
+    >
+      <RowButton
+        className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2 py-1.5 text-left"
+        onClick={onSelect}
+      >
+        <WorkerAvatar className="size-9 rounded-lg text-[0.7rem] ring-1 ring-white/5" profile={profile} />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[0.78rem] font-medium text-foreground/90">{displayName}</span>
+          <span className="block truncate text-[0.65rem] text-muted-foreground/60">{profile.role || p.roleNotSet}</span>
         </span>
-      }
-    />
+        <span className="flex shrink-0 items-center gap-1 text-[0.6rem] font-medium text-muted-foreground/60">
+          <StatusDot tone={state.tone} />
+          {state.label}
+        </span>
+      </RowButton>
+      {menu ? <div className="shrink-0">{menu}</div> : null}
+    </div>
   )
 }
 
-function ProfileDetail({ onUpdated, profile }: { onUpdated: () => Promise<void>; profile: ProfileInfo }) {
+function ProfileDetail({
+  current,
+  onUpdated,
+  profile
+}: {
+  current: boolean
+  onUpdated: () => Promise<void>
+  profile: ProfileInfo
+}) {
   const { t } = useI18n()
   const p = t.profiles
   const displayName = profile.display_name.trim() || profile.name
 
+  const state = current
+    ? { label: p.currentBadge, tone: 'good' as const }
+    : profile.gateway_running
+      ? { label: p.onlineBadge, tone: 'good' as const }
+      : { label: p.standbyBadge, tone: 'muted' as const }
+
   return (
-    <PanelDetail>
-      <header className="space-y-3">
-        <div className="flex min-w-0 items-center gap-3">
-          <WorkerAvatar className="size-12 rounded-xl text-base" profile={profile} />
+    <div className="space-y-5">
+      <header className="relative overflow-hidden rounded-xl bg-(--ui-bg-quaternary) p-4">
+        <span aria-hidden="true" className="absolute inset-y-0 left-0 w-px bg-primary/70" />
+        <div className="flex min-w-0 items-center gap-4">
+          <WorkerAvatar className="size-16 rounded-xl text-xl ring-1 ring-white/8" profile={profile} />
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <h3 className="text-[0.95rem] font-semibold tracking-tight text-foreground">{displayName}</h3>
-              {profile.role ? <PanelPill>{profile.role}</PanelPill> : null}
+              <h2 className="text-base font-semibold tracking-tight text-foreground">{displayName}</h2>
+              <PanelPill tone={state.tone}>
+                <StatusDot className="mr-1" tone={state.tone} />
+                {state.label}
+              </PanelPill>
               {profile.is_default && <PanelPill tone="good">{p.defaultBadge}</PanelPill>}
-              {profile.has_env && <PanelPill tone="muted">.env</PanelPill>}
             </div>
-            <p className="mt-0.5 font-mono text-[0.66rem] text-muted-foreground/55">{profile.name}</p>
+            <p className="mt-1 text-xs text-muted-foreground">{profile.role || p.roleNotSet}</p>
+            <p className="mt-1 font-mono text-[0.64rem] text-muted-foreground/45">{profile.name}</p>
           </div>
         </div>
+      </header>
 
-        <p className="truncate font-mono text-[0.66rem] text-muted-foreground/55" title={profile.path}>
-          {profile.path}
-        </p>
-
+      <section className="space-y-2.5">
+        <div>
+          <PanelSectionLabel className="text-[0.7rem] tracking-[0.14em]">{p.runtimeSection}</PanelSectionLabel>
+          <p className="text-xs text-muted-foreground">{p.runtimeDesc}</p>
+        </div>
         <PanelMeta
+          className="grid-cols-[6.5rem_1fr] rounded-lg bg-foreground/[0.025] p-3"
           rows={[
+            {
+              label: p.statusLabel,
+              value: (
+                <span className="inline-flex items-center gap-1.5">
+                  <StatusDot tone={state.tone} />
+                  {state.label}
+                </span>
+              )
+            },
             {
               label: p.modelLabel,
               value: profile.model ? (
@@ -344,14 +323,22 @@ function ProfileDetail({ onUpdated, profile }: { onUpdated: () => Promise<void>;
                 <span className="text-muted-foreground/55">{p.notSet}</span>
               )
             },
-            { label: p.skillsLabel, value: profile.skill_count }
+            { label: p.skillsLabel, value: p.skills(profile.skill_count) },
+            {
+              label: p.workerHomeLabel,
+              value: (
+                <span className="break-all font-mono text-[0.66rem] text-foreground/70" title={profile.path}>
+                  {profile.path}
+                </span>
+              )
+            }
           ]}
         />
-      </header>
+      </section>
 
       <IdentityEditor onUpdated={onUpdated} profile={profile} />
       <SoulEditor profileName={profile.name} />
-    </PanelDetail>
+    </div>
   )
 }
 
@@ -448,114 +435,5 @@ function SoulEditor({ profileName }: { profileName: string }) {
         </Button>
       </div>
     </section>
-  )
-}
-
-function RenameProfileDialog({
-  currentName,
-  onClose,
-  onRename,
-  open
-}: {
-  currentName: string
-  onClose: () => void
-  onRename: (newName: string) => Promise<void>
-  open: boolean
-}) {
-  const { t } = useI18n()
-  const p = t.profiles
-  const [name, setName] = useState(currentName)
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<null | string>(null)
-
-  useEffect(() => {
-    if (!open) {
-      return
-    }
-
-    setName(currentName)
-    setError(null)
-    setSaving(false)
-  }, [currentName, open])
-
-  const trimmed = name.trim()
-  const unchanged = trimmed === currentName
-  const invalid = trimmed !== '' && !unchanged && !isValidProfileName(trimmed)
-
-  async function handleSubmit(event: React.FormEvent) {
-    event.preventDefault()
-
-    if (unchanged) {
-      onClose()
-
-      return
-    }
-
-    if (!trimmed || invalid) {
-      setError(invalid ? p.invalidName(p.nameHint) : p.nameRequired)
-
-      return
-    }
-
-    setSaving(true)
-    setError(null)
-
-    try {
-      await onRename(trimmed)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : p.failedRename)
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <Dialog onOpenChange={value => !value && !saving && onClose()} open={open}>
-      <DialogContent className="max-w-md">
-        <DialogHeader>
-          <DialogTitle>{p.renameTitle}</DialogTitle>
-          <DialogDescription>
-            {p.renameDescPrefix}
-            <span className="font-mono">~/.local/bin</span>
-            {p.renameDescSuffix}
-          </DialogDescription>
-        </DialogHeader>
-
-        <form className="grid gap-3" onSubmit={handleSubmit}>
-          <div className="grid gap-1.5">
-            <label className="text-xs font-medium" htmlFor="rename-profile-name">
-              {p.newNameLabel}
-            </label>
-            <SanitizedInput
-              aria-invalid={invalid}
-              autoFocus
-              id="rename-profile-name"
-              onValueChange={setName}
-              sanitize={slug}
-              value={name}
-            />
-            <p className={cn('text-[0.66rem] leading-4', invalid ? 'text-destructive' : 'text-muted-foreground')}>
-              {p.nameHint}
-            </p>
-          </div>
-
-          {error && (
-            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-              <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-              <span>{error}</span>
-            </div>
-          )}
-
-          <DialogFooter>
-            <Button disabled={saving} onClick={onClose} type="button" variant="outline">
-              {t.common.cancel}
-            </Button>
-            <Button disabled={saving || invalid || unchanged} type="submit">
-              {saving ? p.renaming : p.rename}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
   )
 }

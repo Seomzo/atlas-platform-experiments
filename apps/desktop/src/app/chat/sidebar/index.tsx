@@ -97,7 +97,14 @@ import {
   setCurrentCwd
 } from '@/store/session'
 
-import { type AppView, ARTIFACTS_ROUTE, MESSAGING_ROUTE, SKILLS_ROUTE, STARMAP_ROUTE } from '../../routes'
+import {
+  type AppView,
+  ARTIFACTS_ROUTE,
+  MESSAGING_ROUTE,
+  PROFILES_ROUTE,
+  SKILLS_ROUTE,
+  STARMAP_ROUTE
+} from '../../routes'
 import { publicCronJobs } from '../../starmap/system-job'
 import type { SidebarNavItem } from '../../types'
 
@@ -148,7 +155,8 @@ const SIDEBAR_NAV: SidebarNavItem[] = [
   },
   { id: 'messaging', label: '', icon: props => <Codicon name="comment" {...props} />, route: MESSAGING_ROUTE },
   { id: 'artifacts', label: '', icon: props => <Codicon name="files" {...props} />, route: ARTIFACTS_ROUTE },
-  { id: 'starmap', label: '', icon: Starmap, route: STARMAP_ROUTE }
+  { id: 'starmap', label: '', icon: Starmap, route: STARMAP_ROUTE },
+  { id: 'workers', label: '', icon: props => <Codicon name="organization" {...props} />, route: PROFILES_ROUTE }
 ]
 
 // Two modes via the `compact` height variant (styles.css):
@@ -1062,7 +1070,8 @@ export function ChatSidebar({
                   (item.id === 'skills' && currentView === 'skills') ||
                   (item.id === 'messaging' && currentView === 'messaging') ||
                   (item.id === 'artifacts' && currentView === 'artifacts') ||
-                  (item.id === 'starmap' && currentView === 'starmap')
+                  (item.id === 'starmap' && currentView === 'starmap') ||
+                  (item.id === 'workers' && currentView === 'profiles')
 
                 const isNewSession = item.id === 'new-session'
 

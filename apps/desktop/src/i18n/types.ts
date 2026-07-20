@@ -1039,6 +1039,8 @@ export interface Translations {
     title: string
     count: (count: number) => string
     search: string
+    searchHint: (name: string) => string
+    noSearchResults: (query: string) => string
     loading: string
     newProfile: string
     allProfiles: string
@@ -1059,6 +1061,10 @@ export interface Translations {
     skillsShort: (count: number) => string
     env: string
     defaultBadge: string
+    currentBadge: string
+    onlineBadge: string
+    standbyBadge: string
+    roleNotSet: string
     rename: string
     renameMenu: string
     editSoul: string
@@ -1066,6 +1072,10 @@ export interface Translations {
     copying: string
     modelLabel: string
     skillsLabel: string
+    runtimeSection: string
+    runtimeDesc: string
+    statusLabel: string
+    workerHomeLabel: string
     notSet: string
     identitySection: string
     identityDesc: string
