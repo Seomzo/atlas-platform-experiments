@@ -63,7 +63,6 @@ export const OVERLAY_VIEWS: ReadonlySet<AppView> = new Set([
   'agents',
   'command-center',
   'cron',
-  'profiles',
   'settings',
   'starmap'
 ])

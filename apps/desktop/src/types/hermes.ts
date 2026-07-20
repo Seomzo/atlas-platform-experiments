@@ -755,6 +755,7 @@ export interface ProfileCreatePayload {
 
 export interface ProfileInfo {
   display_name: string
+  gateway_running: boolean
   has_env: boolean
   has_avatar: boolean
   is_default: boolean
