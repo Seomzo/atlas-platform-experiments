@@ -2,9 +2,17 @@ import { useStore } from '@nanostores/react'
 import { useEffect, useState } from 'react'
 
 import { PageLoader } from '@/components/page-loader'
+import { getProfiles } from '@/hermes'
 import { useI18n } from '@/i18n'
-import { $starmapError, $starmapGraph, $starmapLoading, loadStarmapGraph } from '@/store/starmap'
-import type { StarmapGraph } from '@/types/hermes'
+import {
+  $starmapBrainProfile,
+  $starmapError,
+  $starmapGraph,
+  $starmapLoading,
+  loadStarmapGraph,
+  selectStarmapBrain
+} from '@/store/starmap'
+import type { ProfileInfo, StarmapGraph } from '@/types/hermes'
 
 import { Panel, PanelEmpty } from '../overlays/panel'
 
@@ -21,15 +29,21 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
   const graph = useStore($starmapGraph)
   const loading = useStore($starmapLoading)
   const error = useStore($starmapError)
+  const brainProfile = useStore($starmapBrainProfile)
 
   // A pasted share code populates the map with someone else's (or an exported)
   // graph, overriding the live profile scan. Cleared by "back to my map" and
   // whenever a fresh profile graph loads in.
   const [imported, setImported] = useState<StarmapGraph | null>(null)
   const [selectedCortexNode, setSelectedCortexNode] = useState<null | string>(null)
+  const [profiles, setProfiles] = useState<ProfileInfo[]>([])
 
   useEffect(() => {
     void loadStarmapGraph()
+    void getProfiles().then(
+      result => setProfiles(result.profiles),
+      () => setProfiles([])
+    )
   }, [])
 
   // Drop a stale import when the underlying profile graph changes out from under it.
@@ -59,7 +73,18 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
       ) : shown && shown.nodes.length === 0 && !imported && !cortex ? (
         <PanelEmpty description={t.starmap.emptyDesc} icon="lightbulb" title={t.starmap.emptyTitle} />
       ) : shown && cortex ? (
-        <CortexWorkspace graph={shown} onSelectNode={setSelectedCortexNode} selectedNodeId={selectedCortexNode} />
+        <CortexWorkspace
+          brainProfile={brainProfile}
+          graph={shown}
+          onBrainChange={profile => {
+            setImported(null)
+            setSelectedCortexNode(null)
+            void selectStarmapBrain(profile)
+          }}
+          onSelectNode={setSelectedCortexNode}
+          profiles={profiles}
+          selectedNodeId={selectedCortexNode}
+        />
       ) : shown ? (
         <div className="flex min-h-0 flex-1">
           <div className="relative min-w-0 flex-1">

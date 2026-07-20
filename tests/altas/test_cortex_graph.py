@@ -88,6 +88,7 @@ def populated_store(tmp_path):
     )
 
     document_id = new_id("document")
+    community_id = new_id("community")
     document_body = "PRIVATE-GRAPHRAG-BODY: internal Tekion workflow source text"
     with store.transaction() as connection:
         index_id = new_id("graphrag")
@@ -124,6 +125,23 @@ def populated_store(tmp_path):
                 "{}",
             ),
         )
+        connection.execute(
+            "INSERT INTO communities(id, brain_id, knowledge_space_id, level, label, "
+            "report, algorithm_version, member_ids_json, stale, generated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                community_id,
+                store.brain_id,
+                store.space_id("personal", connection=connection),
+                0,
+                "Customer vehicle context",
+                "Connected customer and vehicle entities.",
+                "test:fixture:v1",
+                json.dumps([customer_id, vehicle_id]),
+                0,
+                utc_now(),
+            ),
+        )
 
     return {
         "store": store,
@@ -135,6 +153,7 @@ def populated_store(tmp_path):
         "relation_id": relation_id,
         "tool_entity_id": tool_entity_id,
         "document_id": document_id,
+        "community_id": community_id,
         "document_body": document_body,
     }
 
@@ -156,6 +175,15 @@ def test_graph_overview_is_stable_typed_bounded_and_body_free(populated_store):
     node_ids = {node["id"] for node in first["nodes"]}
     assert populated_store["evidence_id"] in node_ids
     assert populated_store["document_id"] in node_ids
+    assert populated_store["community_id"] in node_ids
+    assert {node["type"] for node in first["nodes"]} == {
+        "community",
+        "document",
+        "entity",
+        "evidence",
+        "memory",
+        "session",
+    }
     assert all(len(node["summary"]) <= 420 for node in first["nodes"])
     assert all(edge["direction"] == "directed" for edge in first["edges"])
     assert populated_store["relation_id"] in {edge["id"] for edge in first["edges"]}
@@ -176,6 +204,61 @@ def test_graph_overview_is_stable_typed_bounded_and_body_free(populated_store):
     assert {node["id"] for node in page_one["nodes"]}.isdisjoint({
         node["id"] for node in page_two["nodes"]
     })
+
+
+def test_graph_overview_first_page_keeps_small_memory_layer_complete(tmp_path):
+    store = CortexStore(
+        tmp_path / "stratified" / "cortex.db",
+        owner_customer_id="customer-stratified-graph",
+    )
+    store.initialize()
+    store.ensure_session("session-stratified")
+    support_id = store.append_evidence(
+        "session-stratified",
+        EvidenceInput(
+            source_type="manual",
+            content="Shared support for durable memories",
+            source_locator="test:stratified:support",
+        ),
+    )
+    memory_ids = {
+        store.promote_memory(
+            statement=f"Durable memory {index}",
+            kind="fact",
+            evidence_ids=[support_id],
+        )[0]
+        for index in range(40)
+    }
+    for index in range(300):
+        store.append_evidence(
+            "session-stratified",
+            EvidenceInput(
+                source_type="manual",
+                content=f"Newer high-volume evidence {index}",
+                source_locator=f"test:stratified:evidence:{index}",
+            ),
+        )
+
+    first_page = build_graph_overview(store, limit=100)
+
+    returned_memory_ids = {
+        node["id"] for node in first_page["nodes"] if node["type"] == "memory"
+    }
+    assert returned_memory_ids == memory_ids
+    assert any(node["type"] == "evidence" for node in first_page["nodes"])
+
+    seen_ids: set[str] = set()
+    cursor = None
+    while True:
+        page = build_graph_overview(store, limit=37, cursor=cursor)
+        page_ids = {str(node["id"]) for node in page["nodes"]}
+        assert seen_ids.isdisjoint(page_ids)
+        seen_ids.update(page_ids)
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+
+    assert memory_ids.issubset(seen_ids)
 
 
 def test_node_detail_loads_selected_source_only_and_enforces_brain_scope(
@@ -520,7 +603,8 @@ def test_cognitive_routes_use_requested_profile_and_never_client_brain_id(
     default_home = get_hermes_home()
     profiles_root = default_home / "profiles"
     worker_home = profiles_root / "worker_graph"
-    for home in (default_home, worker_home):
+    empty_worker_home = profiles_root / "worker_empty"
+    for home in (default_home, worker_home, empty_worker_home):
         home.mkdir(parents=True, exist_ok=True)
         (home / "config.yaml").write_text(
             "cortex:\n  enabled: true\n",
@@ -534,6 +618,84 @@ def test_cognitive_routes_use_requested_profile_and_never_client_brain_id(
         worker_home, "WORKER-PROFILE-MEMORY"
     )
     assert default_store.brain_id != worker_store.brain_id
+    worker_evidence_id = worker_store.append_evidence(
+        "session_api",
+        EvidenceInput(
+            source_type="manual",
+            content="Worker graph relationship source",
+            source_locator="test:worker:relationship",
+        ),
+    )
+    worker_person_id, _ = worker_store.upsert_entity(
+        entity_type="person",
+        canonical_name="Worker Person",
+        evidence_id=worker_evidence_id,
+    )
+    worker_vehicle_id, _ = worker_store.upsert_entity(
+        entity_type="vehicle",
+        canonical_name="Worker Vehicle",
+        evidence_id=worker_evidence_id,
+    )
+    worker_store.upsert_relation(
+        subject_entity_id=worker_person_id,
+        predicate="owns",
+        object_entity_id=worker_vehicle_id,
+        evidence_ids=[worker_evidence_id],
+    )
+    worker_community_id = new_id("community")
+    with worker_store.transaction() as connection:
+        worker_index_id = new_id("graphrag")
+        now = utc_now()
+        connection.execute(
+            "INSERT INTO graphrag_indexes(id, brain_id, version, path, manifest_hash, state, "
+            "document_count, published_at, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                worker_index_id,
+                worker_store.brain_id,
+                "worker-fixture-v1",
+                "fixture/worker-index",
+                "worker-fixture-hash",
+                "active",
+                1,
+                now,
+                now,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO graphrag_documents(id, brain_id, index_id, knowledge_space_id, "
+            "document_id, title, text, source_uri, entity_ids_json, community_ids_json, "
+            "metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                new_id("document"),
+                worker_store.brain_id,
+                worker_index_id,
+                worker_store.space_id("tekion", connection=connection),
+                "worker-doc",
+                "Worker document",
+                "Private worker document body",
+                "atlas://fixture/worker-doc",
+                json.dumps([worker_vehicle_id]),
+                "[]",
+                "{}",
+            ),
+        )
+        connection.execute(
+            "INSERT INTO communities(id, brain_id, knowledge_space_id, level, label, "
+            "report, algorithm_version, member_ids_json, stale, generated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                worker_community_id,
+                worker_store.brain_id,
+                worker_store.space_id("personal", connection=connection),
+                0,
+                "Worker community",
+                "Connected worker entities",
+                "test:worker:v1",
+                json.dumps([worker_person_id, worker_vehicle_id]),
+                0,
+                now,
+            ),
+        )
 
     client = TestClient(app)
     client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
@@ -543,7 +705,6 @@ def test_cognitive_routes_use_requested_profile_and_never_client_brain_id(
         "/api/cognitive/graph",
         params={
             "profile": "worker_graph",
-            "types": "memory",
             "brain_id": default_store.brain_id,
         },
     )
@@ -553,6 +714,20 @@ def test_cognitive_routes_use_requested_profile_and_never_client_brain_id(
     assert "WORKER-PROFILE-MEMORY" in serialized
     assert "DEFAULT-PROFILE-MEMORY" not in serialized
     assert default_store.brain_id not in serialized
+    assert {node["type"] for node in payload["nodes"]} == {
+        "community",
+        "document",
+        "entity",
+        "evidence",
+        "memory",
+        "session",
+    }
+
+    empty_graph = client.get(
+        "/api/cognitive/graph", params={"profile": "worker_empty"}
+    )
+    assert empty_graph.status_code == 200
+    assert empty_graph.json()["nodes"] == []
 
     detail = client.get(
         f"/api/cognitive/node/{worker_memory_id}",

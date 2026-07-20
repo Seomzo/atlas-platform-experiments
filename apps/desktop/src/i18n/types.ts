@@ -792,6 +792,24 @@ export interface Translations {
     importSuccess: (nodes: number) => string
     importedBadge: string
     resetToMine: string
+    cortex: {
+      brainLabel: string
+      clearFilters: string
+      defaultBrain: string
+      emptyBrainDescription: (brain: string) => string
+      emptyBrainTitle: string
+      noMatchesDescription: string
+      noMatchesTitle: string
+      nodeTypes: {
+        community: string
+        document: string
+        entity: string
+        evidence: string
+        memory: string
+        session: string
+      }
+      typeFilterLabel: string
+    }
   }
   agents: {
     close: string

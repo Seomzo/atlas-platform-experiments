@@ -1088,7 +1088,25 @@ export const zh: Translations = {
     importEmpty: '粘贴图谱代码以加载。',
     importSuccess: nodes => `已加载包含 ${nodes} 个节点的图谱。`,
     importedBadge: '导入的图谱',
-    resetToMine: '返回我的图谱'
+    resetToMine: '返回我的图谱',
+    cortex: {
+      brainLabel: '大脑',
+      clearFilters: '清除筛选',
+      defaultBrain: '默认大脑',
+      emptyBrainDescription: brain => `${brain} 暂无 Cortex 数据。工作过程中产生的记忆和图谱结构会显示在这里。`,
+      emptyBrainTitle: '这个大脑还是空的',
+      noMatchesDescription: '请尝试其他关键词、节点类型或知识域。',
+      noMatchesTitle: '没有匹配的节点',
+      nodeTypes: {
+        community: '社区',
+        document: '文档',
+        entity: '实体',
+        evidence: '证据',
+        memory: '记忆',
+        session: '会话'
+      },
+      typeFilterLabel: '节点类型'
+    }
   },
   agents: {
     close: '关闭代理',

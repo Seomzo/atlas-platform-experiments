@@ -2,6 +2,7 @@ import { useStore } from '@nanostores/react'
 import { useEffect, useMemo, useState } from 'react'
 
 import { Codicon } from '@/components/ui/codicon'
+import { useI18n } from '@/i18n'
 import { $cronJobs } from '@/store/cron'
 import {
   $cortexDreamJob,
@@ -12,17 +13,21 @@ import {
   refreshCortexHealth,
   runCortexDreamNow
 } from '@/store/starmap'
-import type { StarmapGraph, StarmapNode } from '@/types/hermes'
+import type { CortexNodeType, ProfileInfo, StarmapGraph, StarmapNode } from '@/types/hermes'
 
-import { cortexNodeAriaLabel } from './cortex'
+import { CORTEX_NODE_VISUALS } from './constants'
+import { CORTEX_NODE_TYPES, cortexNodeAriaLabel, filterCortexNodes } from './cortex'
 import { CortexDetail } from './cortex-detail'
 import { domainColor } from './domain-color'
 import { StarMap } from './star-map'
 import { isCortexSystemJob } from './system-job'
 
 interface CortexWorkspaceProps {
+  brainProfile: string
   graph: StarmapGraph
+  onBrainChange: (profile: string) => void
   onSelectNode: (id: null | string) => void
+  profiles: ProfileInfo[]
   selectedNodeId: null | string
 }
 
@@ -51,37 +56,62 @@ function relativeTime(value: null | string | undefined, now: number, future = fa
   return future ? `in ${amount} ${unit}${amount === 1 ? '' : 's'}` : `${amount} ${unit}${amount === 1 ? '' : 's'} ago`
 }
 
-function nodeSearchText(node: StarmapNode): string {
-  return [node.label, node.summary, node.category, node.cortexType, node.state, ...(node.badges ?? [])]
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase()
+function glyphShape(type: CortexNodeType): string {
+  const shape = CORTEX_NODE_VISUALS[type].shape
+
+  if (shape === 'diamond') {
+    return 'rotate-45 rounded-[2px]'
+  }
+
+  if (shape === 'triangle') {
+    return '[clip-path:polygon(50%_0,100%_100%,0_100%)]'
+  }
+
+  if (shape === 'hexagon') {
+    return '[clip-path:polygon(25%_7%,75%_7%,100%_50%,75%_93%,25%_93%,0_50%)]'
+  }
+
+  if (shape === 'star') {
+    return '[clip-path:polygon(50%_0,61%_35%,98%_35%,68%_57%,79%_94%,50%_72%,21%_94%,32%_57%,2%_35%,39%_35%)]'
+  }
+
+  return shape === 'circle' ? 'rounded-full' : 'rounded-[2px]'
 }
 
 function NodeGlyph({ node }: { node: StarmapNode }) {
-  const color = node.cortexType === 'memory' ? '#f5b85b' : domainColor(node.category)
+  const type = node.cortexType ?? 'entity'
 
-  const shape =
-    node.cortexType === 'memory'
-      ? 'rotate-45 rounded-[3px]'
-      : node.cortexType === 'evidence'
-        ? '[clip-path:polygon(50%_0,100%_100%,0_100%)]'
-        : node.cortexType === 'document'
-          ? 'rounded-[2px]'
-          : node.cortexType === 'community' || node.cortexType === 'session'
-            ? '[clip-path:polygon(25%_7%,75%_7%,100%_50%,75%_93%,25%_93%,0_50%)]'
-            : 'rounded-full'
-
-  return <span aria-hidden="true" className={`block size-2.5 shrink-0 ${shape}`} style={{ backgroundColor: color }} />
+  return <TypeGlyph type={type} />
 }
 
-export function CortexWorkspace({ graph, onSelectNode, selectedNodeId }: CortexWorkspaceProps) {
+function TypeGlyph({ type }: { type: CortexNodeType }) {
+  const visual = CORTEX_NODE_VISUALS[type]
+
+  return (
+    <span
+      aria-hidden="true"
+      className={`block size-2.5 shrink-0 ${glyphShape(type)}`}
+      style={{ backgroundColor: visual.color }}
+    />
+  )
+}
+
+export function CortexWorkspace({
+  brainProfile,
+  graph,
+  onBrainChange,
+  onSelectNode,
+  profiles,
+  selectedNodeId
+}: CortexWorkspaceProps) {
+  const { t } = useI18n()
   const health = useStore($cortexHealth)
   const dream = useStore($cortexDreamJob)
   const statusError = useStore($cortexStatusError)
   const cronJobs = useStore($cronJobs)
   const [query, setQuery] = useState('')
   const [domain, setDomain] = useState<string | null>(null)
+  const [hiddenTypes, setHiddenTypes] = useState<Set<CortexNodeType>>(() => new Set())
   const [running, setRunning] = useState(false)
   const [now, setNow] = useState(() => Date.now())
 
@@ -90,6 +120,12 @@ export function CortexWorkspace({ graph, onSelectNode, selectedNodeId }: CortexW
 
     return () => window.clearInterval(interval)
   }, [])
+
+  useEffect(() => {
+    setQuery('')
+    setDomain(null)
+    setHiddenTypes(new Set())
+  }, [brainProfile])
 
   const activeJob = dream?.job
 
@@ -113,16 +149,33 @@ export function CortexWorkspace({ graph, onSelectNode, selectedNodeId }: CortexW
     return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
   }, [graph.nodes])
 
-  const matchingNodes = useMemo(() => {
-    const needle = query.trim().toLowerCase()
+  const brains = useMemo(() => {
+    const named = profiles
+      .filter(profile => !profile.is_default && profile.name !== 'default')
+      .sort((a, b) => a.display_name.localeCompare(b.display_name) || a.name.localeCompare(b.name))
 
-    return graph.nodes.filter(
-      node => (!domain || node.category === domain) && (!needle || nodeSearchText(node).includes(needle))
-    )
-  }, [domain, graph.nodes, query])
+    return named
+  }, [profiles])
+
+  const typeCounts = useMemo(() => {
+    const counts = new Map<CortexNodeType, number>()
+
+    for (const node of graph.nodes) {
+      if (node.cortexType) {
+        counts.set(node.cortexType, (counts.get(node.cortexType) ?? 0) + 1)
+      }
+    }
+
+    return counts
+  }, [graph.nodes])
+
+  const matchingNodes = useMemo(
+    () => filterCortexNodes(graph.nodes, { domain, hiddenTypes, query }),
+    [domain, graph.nodes, hiddenTypes, query]
+  )
 
   const visibleGraph = useMemo<StarmapGraph>(() => {
-    if (!domain && !query.trim()) {
+    if (!domain && !query.trim() && hiddenTypes.size === 0) {
       return graph
     }
 
@@ -136,7 +189,7 @@ export function CortexWorkspace({ graph, onSelectNode, selectedNodeId }: CortexW
         .filter(([category]) => !domain || category === domain)
         .map(([category, count]) => ({ category, count }))
     }
-  }, [domain, domains, graph, matchingNodes, query])
+  }, [domain, domains, graph, hiddenTypes.size, matchingNodes, query])
 
   useEffect(() => {
     if (selectedNodeId && !visibleGraph.nodes.some(node => node.id === selectedNodeId)) {
@@ -204,6 +257,27 @@ export function CortexWorkspace({ graph, onSelectNode, selectedNodeId }: CortexW
             ))}
           </dl>
 
+          <label className="flex h-9 max-w-48 shrink-0 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.045] px-2.5 text-[#8da4ba] transition focus-within:border-[#56c8ff]/55">
+            <Codicon name="server-environment" size="0.8rem" />
+            <span className="sr-only">{t.starmap.cortex.brainLabel}</span>
+            <select
+              aria-label={t.starmap.cortex.brainLabel}
+              className="min-w-0 flex-1 bg-transparent text-[0.68rem] text-[#c5d8e9] outline-none"
+              onChange={event => onBrainChange(event.target.value)}
+              value={brainProfile}
+            >
+              <option value="default">{t.starmap.cortex.defaultBrain}</option>
+              {brainProfile !== 'default' && !brains.some(profile => profile.name === brainProfile) ? (
+                <option value={brainProfile}>{brainProfile}</option>
+              ) : null}
+              {brains.map(profile => (
+                <option key={profile.name} value={profile.name}>
+                  {profile.display_name || profile.name}
+                </option>
+              ))}
+            </select>
+          </label>
+
           <label className="group flex h-9 w-56 shrink-0 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.045] px-3 transition focus-within:border-[#56c8ff]/55 focus-within:bg-white/[0.065] xl:w-64">
             <Codicon className="text-[#6f879f] group-focus-within:text-[#56c8ff]" name="search" size="0.85rem" />
             <input
@@ -258,6 +332,45 @@ export function CortexWorkspace({ graph, onSelectNode, selectedNodeId }: CortexW
             </button>
           ))}
         </nav>
+
+        <nav
+          aria-label={t.starmap.cortex.typeFilterLabel}
+          className="mt-2 flex items-center gap-1.5 overflow-x-auto pr-8 [scrollbar-width:none]"
+        >
+          <span className="mr-1 shrink-0 text-[0.55rem] font-semibold uppercase tracking-[0.15em] text-[#597087]">
+            {t.starmap.cortex.typeFilterLabel}
+          </span>
+          {CORTEX_NODE_TYPES.map(type => {
+            const visible = !hiddenTypes.has(type)
+
+            return (
+              <button
+                aria-label={t.starmap.cortex.nodeTypes[type]}
+                aria-pressed={visible}
+                className="flex shrink-0 items-center gap-1.5 rounded-full border border-white/8 bg-white/[0.02] px-2.5 py-1 text-[0.62rem] text-[#657d94] opacity-55 transition hover:border-white/20 hover:text-white aria-pressed:border-white/16 aria-pressed:bg-white/[0.06] aria-pressed:text-[#bed3e5] aria-pressed:opacity-100"
+                key={type}
+                onClick={() =>
+                  setHiddenTypes(current => {
+                    const next = new Set(current)
+
+                    if (next.has(type)) {
+                      next.delete(type)
+                    } else {
+                      next.add(type)
+                    }
+
+                    return next
+                  })
+                }
+                type="button"
+              >
+                <TypeGlyph type={type} />
+                {t.starmap.cortex.nodeTypes[type]}
+                <span className="font-mono text-[0.55rem] opacity-55">{typeCounts.get(type) ?? 0}</span>
+              </button>
+            )
+          })}
+        </nav>
       </header>
 
       <div className="flex min-h-0 flex-1">
@@ -276,25 +389,34 @@ export function CortexWorkspace({ graph, onSelectNode, selectedNodeId }: CortexW
           ) : (
             <div className="relative z-10 m-auto max-w-sm text-center">
               <div className="mx-auto mb-4 grid size-14 place-items-center rounded-full border border-[#56c8ff]/20 bg-[#56c8ff]/8 text-[#56c8ff]">
-                <Codicon name="search" size="1.25rem" />
+                <Codicon name={graph.nodes.length ? 'search' : 'database'} size="1.25rem" />
               </div>
-              <h2 className="text-sm font-medium text-white">No matching memories</h2>
+              <h2 className="text-sm font-medium text-white">
+                {graph.nodes.length ? t.starmap.cortex.noMatchesTitle : t.starmap.cortex.emptyBrainTitle}
+              </h2>
               <p className="mt-1 text-xs leading-relaxed text-[#71879e]">
-                Try another phrase or return to all knowledge domains.
+                {graph.nodes.length
+                  ? t.starmap.cortex.noMatchesDescription
+                  : t.starmap.cortex.emptyBrainDescription(
+                      brainProfile === 'default' ? t.starmap.cortex.defaultBrain : brainProfile
+                    )}
               </p>
-              <button
-                className="mt-4 rounded-md border border-white/12 px-3 py-1.5 text-xs text-[#aac0d5] hover:bg-white/5 hover:text-white"
-                onClick={() => {
-                  setQuery('')
-                  setDomain(null)
-                }}
-                type="button"
-              >
-                Clear filters
-              </button>
+              {graph.nodes.length ? (
+                <button
+                  className="mt-4 rounded-md border border-white/12 px-3 py-1.5 text-xs text-[#aac0d5] hover:bg-white/5 hover:text-white"
+                  onClick={() => {
+                    setQuery('')
+                    setDomain(null)
+                    setHiddenTypes(new Set())
+                  }}
+                  type="button"
+                >
+                  {t.starmap.cortex.clearFilters}
+                </button>
+              ) : null}
             </div>
           )}
-          {(query || domain) && visibleGraph.nodes.length ? (
+          {(query || domain || hiddenTypes.size > 0) && visibleGraph.nodes.length ? (
             <div className="pointer-events-none absolute left-4 top-4 z-20 rounded-full border border-[#56c8ff]/15 bg-[#07121f]/85 px-3 py-1.5 text-[0.63rem] text-[#8ea5bc] shadow-lg backdrop-blur-md">
               Showing <span className="font-mono text-[#d9f3ff]">{visibleGraph.nodes.length}</span> of{' '}
               {graph.nodes.length} nodes
@@ -304,7 +426,12 @@ export function CortexWorkspace({ graph, onSelectNode, selectedNodeId }: CortexW
 
         <aside className="relative z-20 flex w-[18.5rem] shrink-0 flex-col border-l border-white/8 bg-[#08111d]/96 shadow-[-18px_0_50px_rgba(0,0,0,0.22)] min-[1180px]:w-[20rem]">
           {selectedNodeId ? (
-            <CortexDetail immersive nodeId={selectedNodeId} onClose={() => onSelectNode(null)} />
+            <CortexDetail
+              brainProfile={brainProfile}
+              immersive
+              nodeId={selectedNodeId}
+              onClose={() => onSelectNode(null)}
+            />
           ) : (
             <>
               <div className="border-b border-white/8 px-4 pb-4 pt-4">
@@ -428,7 +555,8 @@ export function CortexWorkspace({ graph, onSelectNode, selectedNodeId }: CortexW
                               {node.label}
                             </span>
                             <span className="mt-0.5 block truncate text-[0.57rem] text-[#62788e]">
-                              {node.cortexType} · {node.category.replaceAll('_', ' ')}
+                              {node.cortexType ? t.starmap.cortex.nodeTypes[node.cortexType] : node.kind} ·{' '}
+                              {node.category.replaceAll('_', ' ')}
                             </span>
                             {node.summary ? (
                               <span className="mt-1 line-clamp-2 block text-[0.58rem] leading-relaxed text-[#6f8499]">

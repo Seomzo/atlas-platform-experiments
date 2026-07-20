@@ -2,8 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { CortexGraphResponse, CortexHealthResponse, StarmapGraph } from '@/types/hermes'
 
-const getCortexGraph = vi.fn<() => Promise<CortexGraphResponse>>()
-const getCortexHealth = vi.fn<() => Promise<CortexHealthResponse>>()
+const getCortexGraph = vi.fn<(limit?: number, profile?: null | string) => Promise<CortexGraphResponse>>()
+const getCortexHealth = vi.fn<(profile?: null | string) => Promise<CortexHealthResponse>>()
 const getCortexDream = vi.fn()
 const getStarmapGraph = vi.fn<() => Promise<StarmapGraph>>()
 const runCortexDream = vi.fn()
@@ -91,6 +91,8 @@ describe('starmap Cortex loading', () => {
 
     expect(store.$starmapGraph.get()?.source).toBe('cortex')
     expect(store.$starmapGraph.get()?.nodes[0]?.label).toBe('native')
+    expect(getCortexGraph).toHaveBeenCalledWith(500, 'default')
+    expect(getCortexHealth).toHaveBeenCalledWith('default')
     expect(getStarmapGraph).not.toHaveBeenCalled()
   })
 
@@ -142,5 +144,38 @@ describe('starmap Cortex loading', () => {
     await oldLoad
 
     expect(store.$starmapGraph.get()?.nodes[0]?.label).toBe('new-profile')
+  })
+
+  it('selects an independent worker brain and never masks it with legacy data', async () => {
+    getCortexGraph.mockResolvedValueOnce(cortex('worker-memory'))
+
+    await store.selectStarmapBrain('worker_graph')
+
+    expect(store.$starmapBrainProfile.get()).toBe('worker_graph')
+    expect(getCortexGraph).toHaveBeenCalledWith(500, 'worker_graph')
+    expect(getCortexHealth).toHaveBeenCalledWith('worker_graph')
+    expect(store.$starmapGraph.get()?.nodes[0]?.label).toBe('worker-memory')
+    expect(getStarmapGraph).not.toHaveBeenCalled()
+
+    getCortexGraph.mockRejectedValueOnce(Object.assign(new Error('404: not found'), { statusCode: 404 }))
+    await store.selectStarmapBrain('empty_worker')
+
+    expect(store.$starmapError.get()).toContain('404')
+    expect(getStarmapGraph).not.toHaveBeenCalled()
+  })
+
+  it('prevents a slow previous brain from overwriting the selected brain', async () => {
+    const oldBrain = deferred<CortexGraphResponse>()
+    getCortexGraph.mockReturnValueOnce(oldBrain.promise)
+    const oldLoad = store.selectStarmapBrain('slow-worker')
+
+    getCortexGraph.mockResolvedValueOnce(cortex('current-worker'))
+    await store.selectStarmapBrain('current-worker')
+
+    oldBrain.resolve(cortex('slow-worker'))
+    await oldLoad
+
+    expect(store.$starmapBrainProfile.get()).toBe('current-worker')
+    expect(store.$starmapGraph.get()?.nodes[0]?.label).toBe('current-worker')
   })
 })

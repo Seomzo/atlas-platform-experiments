@@ -1,5 +1,6 @@
 import { darken, luminance, mixRgb, rgba } from './color'
 import {
+  CORTEX_NODE_VISUALS,
   LIT_BAND_ALPHA,
   nodeShape,
   ORB_DARKEN,
@@ -9,7 +10,6 @@ import {
   WHITE,
   WHITEISH_SHEEN
 } from './constants'
-import { domainRgb } from './domain-color'
 import { clamp, fitScale, nodeRadius, recencyInk, shapePath } from './geometry'
 import { countLabel, ellipsize, metaBadges, nodeFooter, wrapText } from './text'
 import type {
@@ -544,17 +544,7 @@ export function drawScene(scene: Scene): DrawResult {
 
     ctx.globalAlpha = vis
 
-    const cortexInk = n.cortexType
-      ? n.cortexType === 'memory'
-        ? { b: 91, g: 184, r: 245 }
-        : n.cortexType === 'evidence'
-          ? mixRgb(domainRgb(n.category), base, 0.3)
-          : n.cortexType === 'document'
-            ? mixRgb(domainRgb(n.category), base, 0.12)
-            : n.cortexType === 'community' || n.cortexType === 'session'
-              ? mixRgb(domainRgb(n.category), base, 0.2)
-              : domainRgb(n.category)
-      : null
+    const cortexInk = n.cortexType ? CORTEX_NODE_VISUALS[n.cortexType].ink : null
 
     const nodeInk = nodeHigh
       ? mixRgb(cortexInk ?? base, base, 0.45)

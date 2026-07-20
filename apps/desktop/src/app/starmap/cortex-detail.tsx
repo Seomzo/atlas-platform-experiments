@@ -8,10 +8,12 @@ import type { CortexNodeDetailResponse } from '@/types/hermes'
 import { useOnProfileSwitch } from '../hooks/use-on-profile-switch'
 
 export function CortexDetail({
+  brainProfile,
   immersive = false,
   nodeId,
   onClose
 }: {
+  brainProfile: string
   immersive?: boolean
   nodeId: string
   onClose: () => void
@@ -33,7 +35,7 @@ export function CortexDetail({
     setDetail(null)
     setError(null)
 
-    void getCortexNode(nodeId).then(
+    void getCortexNode(nodeId, brainProfile).then(
       value => request.current === id && setDetail(value),
       reason => request.current === id && setError(reason instanceof Error ? reason.message : String(reason))
     )
@@ -41,7 +43,7 @@ export function CortexDetail({
     return () => {
       request.current += 1
     }
-  }, [nodeId])
+  }, [brainProfile, nodeId])
 
   return (
     <aside
