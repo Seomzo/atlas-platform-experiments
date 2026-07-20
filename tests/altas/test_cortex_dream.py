@@ -14,6 +14,7 @@ import pytest
 from altas.cortex.config import CortexConfig
 from altas.cortex.dream import (
     ACTIONS,
+    COMMUNITY_ALGORITHM_VERSION,
     CortexDreamError,
     CortexModelRoute,
     CortexOutputError,
@@ -1668,6 +1669,90 @@ def test_daily_recovery_marker_never_performs_semantic_processing(
     assert memory_count == 1
     assert observation["processing_state"] == "pending"
     assert second_evidence_id
+
+
+def test_dream_cycle_builds_stable_connected_component_communities(
+    tmp_path: Path,
+) -> None:
+    store, config, raw = _runtime(tmp_path)
+    store.ensure_session("session-community")
+    evidence_id = store.append_evidence(
+        "session-community",
+        EvidenceInput(
+            source_type="manual",
+            content="Jordan owns the Atlas while Casey is a separate contact.",
+            source_locator="test:community:source",
+        ),
+    )
+    jordan_id, _ = store.upsert_entity(
+        entity_type="person",
+        canonical_name="Jordan",
+        evidence_id=evidence_id,
+    )
+    atlas_id, _ = store.upsert_entity(
+        entity_type="vehicle",
+        canonical_name="Atlas",
+        evidence_id=evidence_id,
+    )
+    casey_id, _ = store.upsert_entity(
+        entity_type="person",
+        canonical_name="Casey",
+        evidence_id=evidence_id,
+    )
+    store.upsert_relation(
+        subject_entity_id=jordan_id,
+        predicate="owns",
+        object_entity_id=atlas_id,
+        evidence_ids=[evidence_id],
+    )
+    store.enqueue_job(
+        "dream_cycle",
+        input_hash=stable_hash("community-dream", "first"),
+        input_data={"scheduled_slot": "2026-07-20T04:00:00Z"},
+    )
+    llm = _FakeLLM()
+    worker = CortexDreamWorker(
+        store, config, raw_config=raw, llm_call=llm, owner="worker-community"
+    )
+
+    assert worker.run_once().status == "succeeded"
+    assert llm.calls == []
+    with store.connect() as connection:
+        first_rows = connection.execute(
+            "SELECT id, member_ids_json FROM communities WHERE brain_id=? "
+            "AND algorithm_version=? ORDER BY id",
+            (store.brain_id, COMMUNITY_ALGORITHM_VERSION),
+        ).fetchall()
+    first_memberships = {
+        frozenset(json.loads(row["member_ids_json"])) for row in first_rows
+    }
+    assert first_memberships == {
+        frozenset({jordan_id, atlas_id}),
+        frozenset({casey_id}),
+    }
+    first_ids = {str(row["id"]) for row in first_rows}
+    overview = build_graph_overview(store, limit=100)
+    assert first_ids.issubset({
+        str(node["id"])
+        for node in overview["nodes"]
+        if node["type"] == "community"
+    })
+
+    store.enqueue_job(
+        "dream_cycle",
+        input_hash=stable_hash("community-dream", "second"),
+        input_data={"scheduled_slot": "2026-07-21T04:00:00Z"},
+    )
+    assert worker.run_once().status == "succeeded"
+    with store.connect() as connection:
+        second_rows = connection.execute(
+            "SELECT id, member_ids_json FROM communities WHERE brain_id=? "
+            "AND algorithm_version=? ORDER BY id",
+            (store.brain_id, COMMUNITY_ALGORITHM_VERSION),
+        ).fetchall()
+
+    assert {str(row["id"]) for row in second_rows} == first_ids
+    assert len(second_rows) == len(first_rows)
 
 
 def test_processor_rejects_unknown_semantic_job_type_before_model_call(

@@ -1,6 +1,15 @@
 import type { StarmapNode } from '@/types/hermes'
 
-import { AGE_GRADIENT, FIT_PADDING, RING_INNER, RING_OUTER, TILT, ZOOM_MAX, ZOOM_MIN } from './constants'
+import {
+  AGE_GRADIENT,
+  CORTEX_NODE_VISUALS,
+  FIT_PADDING,
+  RING_INNER,
+  RING_OUTER,
+  TILT,
+  ZOOM_MAX,
+  ZOOM_MIN
+} from './constants'
 import type { Ring, Shape, Viewport } from './types'
 
 export function clamp(v: number, lo: number, hi: number): number {
@@ -20,12 +29,11 @@ export function hash(input: string): number {
 }
 
 export function nodeRadius(n: StarmapNode): number {
-  if (n.cortexType === 'community') {
-    return 5.2
-  }
+  if (n.cortexType) {
+    const visual = CORTEX_NODE_VISUALS[n.cortexType]
+    const activity = Math.min(1, Math.sqrt(Math.max(0, n.useCount)) * 0.12)
 
-  if (n.kind === 'memory' || n.cortexType === 'evidence' || n.cortexType === 'document') {
-    return 4.4
+    return visual.radius + activity + (n.pinned ? 0.6 : 0)
   }
 
   const base = n.state === 'archived' || n.state === 'stale' ? 2.4 : 3
@@ -62,6 +70,25 @@ export function shapePath(ctx: CanvasRenderingContext2D, shape: Shape, x: number
 
   if (shape === 'circle') {
     ctx.arc(x, y, r, 0, Math.PI * 2)
+
+    return
+  }
+
+  if (shape === 'star') {
+    for (let i = 0; i < 10; i += 1) {
+      const a = -Math.PI / 2 + (i / 10) * Math.PI * 2
+      const pointRadius = i % 2 === 0 ? r : r * 0.46
+      const px = x + Math.cos(a) * pointRadius
+      const py = y + Math.sin(a) * pointRadius
+
+      if (i === 0) {
+        ctx.moveTo(px, py)
+      } else {
+        ctx.lineTo(px, py)
+      }
+    }
+
+    ctx.closePath()
 
     return
   }

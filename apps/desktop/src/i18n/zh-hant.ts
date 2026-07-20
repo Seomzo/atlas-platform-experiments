@@ -894,7 +894,25 @@ export const zhHant = defineLocale({
     loadFailed: '無法載入記憶圖譜',
     loading: '載入中…',
     emptyTitle: '尚無學習內容',
-    emptyDesc: '當 Atlas 為你的工作建立技能與記憶時，會顯示在這裡。'
+    emptyDesc: '當 Atlas 為你的工作建立技能與記憶時，會顯示在這裡。',
+    cortex: {
+      brainLabel: '大腦',
+      clearFilters: '清除篩選',
+      defaultBrain: '預設大腦',
+      emptyBrainDescription: brain => `${brain} 尚無 Cortex 資料。工作過程產生的記憶與圖譜結構會顯示在這裡。`,
+      emptyBrainTitle: '這個大腦目前是空的',
+      noMatchesDescription: '請嘗試其他關鍵字、節點類型或知識領域。',
+      noMatchesTitle: '沒有相符的節點',
+      nodeTypes: {
+        community: '社群',
+        document: '文件',
+        entity: '實體',
+        evidence: '證據',
+        memory: '記憶',
+        session: '工作階段'
+      },
+      typeFilterLabel: '節點類型'
+    }
   },
   agents: {
     close: '關閉代理',
@@ -1855,8 +1873,7 @@ export const zhHant = defineLocale({
     copy: '複製',
     copied: '已複製',
     done: '完成',
-    applyingBody:
-      'Atlas 更新程式會在自己的視窗中接管，並在完成後自動重新開啟 Atlas。更新期間請勿自行重新開啟 Atlas。',
+    applyingBody: 'Atlas 更新程式會在自己的視窗中接管，並在完成後自動重新開啟 Atlas。更新期間請勿自行重新開啟 Atlas。',
     applyingBodyBackend: '遠端後端正在套用更新並將重新啟動。恢復後 Atlas 會自動重新連線。',
     applyingClose: '此視窗會在更新期間關閉，隨後 Atlas 會自動重新開啟。',
     errorTitle: '更新未完成',

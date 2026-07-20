@@ -613,48 +613,53 @@ function cortexContract<T extends { version: string }>(value: T, expected: T['ve
   return value
 }
 
-export async function getCortexGraph(limit = 500): Promise<CortexGraphResponse> {
+function cortexRequest(path: string, brainProfile?: null | string): { path: string; profile?: string } {
+  if (brainProfile === undefined || brainProfile === null) {
+    return { ...profileScoped(), path }
+  }
+
+  const separator = path.includes('?') ? '&' : '?'
+
+  return { path: `${path}${separator}profile=${encodeURIComponent(brainProfile || 'default')}` }
+}
+
+export async function getCortexGraph(limit = 500, brainProfile?: null | string): Promise<CortexGraphResponse> {
   const value = await window.hermesDesktop.api<CortexGraphResponse>({
-    ...profileScoped(),
-    path: `/api/cognitive/graph?projection=growth&limit=${Math.max(1, Math.min(500, limit))}`
+    ...cortexRequest(`/api/cognitive/graph?projection=growth&limit=${Math.max(1, Math.min(500, limit))}`, brainProfile)
   })
 
   return cortexContract(value, 'atlas.cortex.graph.v1')
 }
 
-export async function getCortexHealth(): Promise<CortexHealthResponse> {
+export async function getCortexHealth(brainProfile?: null | string): Promise<CortexHealthResponse> {
   const value = await window.hermesDesktop.api<CortexHealthResponse>({
-    ...profileScoped(),
-    path: '/api/cognitive/health'
+    ...cortexRequest('/api/cognitive/health', brainProfile)
   })
 
   return cortexContract(value, 'atlas.cortex.health.v1')
 }
 
-export async function getCortexNode(id: string): Promise<CortexNodeDetailResponse> {
+export async function getCortexNode(id: string, brainProfile?: null | string): Promise<CortexNodeDetailResponse> {
   const value = await window.hermesDesktop.api<CortexNodeDetailResponse>({
-    ...profileScoped(),
-    path: `/api/cognitive/node/${encodeURIComponent(id)}`
+    ...cortexRequest(`/api/cognitive/node/${encodeURIComponent(id)}`, brainProfile)
   })
 
   return cortexContract(value, 'atlas.cortex.detail.v1')
 }
 
-export async function runCortexDream(): Promise<CortexJobResponse> {
+export async function runCortexDream(brainProfile?: null | string): Promise<CortexJobResponse> {
   const value = await window.hermesDesktop.api<CortexJobResponse>({
-    ...profileScoped(),
+    ...cortexRequest('/api/cognitive/dream/run', brainProfile),
     body: {},
-    method: 'POST',
-    path: '/api/cognitive/dream/run'
+    method: 'POST'
   })
 
   return cortexContract(value, 'atlas.cortex.job.v1')
 }
 
-export async function getCortexDream(jobId: string): Promise<CortexJobResponse> {
+export async function getCortexDream(jobId: string, brainProfile?: null | string): Promise<CortexJobResponse> {
   const value = await window.hermesDesktop.api<CortexJobResponse>({
-    ...profileScoped(),
-    path: `/api/cognitive/dream/${encodeURIComponent(jobId)}`
+    ...cortexRequest(`/api/cognitive/dream/${encodeURIComponent(jobId)}`, brainProfile)
   })
 
   return cortexContract(value, 'atlas.cortex.job.v1')

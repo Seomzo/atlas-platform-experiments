@@ -29,7 +29,7 @@ const finiteTs = (v?: null | number): null | number =>
   typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.round(v)) : null
 
 function writeNode(w: BitWriter, n: StarmapNode, dict: Dict, minTs: number, span: number): void {
-  w.uint(idxOf(KINDS, n.kind), 1)
+  w.uint(idxOf(KINDS, n.kind === 'memory' ? 'memory' : 'skill'), 1)
   w.varint(dict.id(trim(n.label || '')))
   w.varint(dict.id(n.category || ''))
   w.varint(Math.max(0, n.useCount | 0))

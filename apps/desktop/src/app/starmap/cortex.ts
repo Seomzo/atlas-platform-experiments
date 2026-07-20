@@ -1,4 +1,13 @@
-import type { CortexGraphNode, CortexGraphResponse, StarmapGraph, StarmapNode } from '@/types/hermes'
+import type { CortexGraphNode, CortexGraphResponse, CortexNodeType, StarmapGraph, StarmapNode } from '@/types/hermes'
+
+export const CORTEX_NODE_TYPES: readonly CortexNodeType[] = [
+  'entity',
+  'memory',
+  'evidence',
+  'session',
+  'document',
+  'community'
+]
 
 function timestamp(value: null | string): null | number {
   if (!value) {
@@ -29,7 +38,7 @@ function adaptNode(node: CortexGraphNode): StarmapNode {
     cortexType: node.type,
     createdBy: null,
     id: node.id,
-    kind: node.type === 'memory' ? 'memory' : 'skill',
+    kind: node.type,
     label: node.label,
     memorySource: node.type === 'memory' ? 'memory' : undefined,
     pinned: node.badges.includes('protected') || node.badges.includes('pinned'),
@@ -39,6 +48,25 @@ function adaptNode(node: CortexGraphNode): StarmapNode {
     timestamp: timestamp(node.updated_at ?? node.created_at),
     useCount: Math.max(0, node.usage || node.degree)
   }
+}
+
+export function filterCortexNodes(
+  nodes: StarmapNode[],
+  options: { domain: null | string; hiddenTypes: ReadonlySet<CortexNodeType>; query: string }
+): StarmapNode[] {
+  const needle = options.query.trim().toLowerCase()
+
+  return nodes.filter(
+    node =>
+      (!options.domain || node.category === options.domain) &&
+      (!node.cortexType || !options.hiddenTypes.has(node.cortexType)) &&
+      (!needle ||
+        [node.label, node.summary, node.category, node.cortexType, node.state, ...(node.badges ?? [])]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase()
+          .includes(needle))
+  )
 }
 
 /** Adapt the native DTO to the existing radial renderer without flattening its

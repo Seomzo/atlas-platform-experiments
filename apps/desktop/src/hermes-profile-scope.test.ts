@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   checkHermesUpdate,
   getActionStatus,
+  getCortexGraph,
+  getCortexHealth,
   getStatus,
   restartGateway,
   setApiRequestProfile,
@@ -45,5 +47,25 @@ describe('backend action helpers are profile-scoped', () => {
     for (const call of api.mock.calls) {
       expect(call[0].profile).toBe('coder')
     }
+  })
+
+  it('routes an explicitly selected Cortex brain through the primary backend query', async () => {
+    setApiRequestProfile('coder')
+    api.mockResolvedValueOnce({ version: 'atlas.cortex.graph.v1' } as never)
+
+    await getCortexGraph(250, 'research worker')
+
+    expect(api).toHaveBeenLastCalledWith({
+      path: '/api/cognitive/graph?projection=growth&limit=250&profile=research%20worker'
+    })
+  })
+
+  it('keeps implicit Cortex reads on the active profile backend', async () => {
+    setApiRequestProfile('coder')
+    api.mockResolvedValueOnce({ version: 'atlas.cortex.health.v1' } as never)
+
+    await getCortexHealth()
+
+    expect(api).toHaveBeenLastCalledWith({ path: '/api/cognitive/health', profile: 'coder' })
   })
 })

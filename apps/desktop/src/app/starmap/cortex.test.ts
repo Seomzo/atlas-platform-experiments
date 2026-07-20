@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import type { CortexGraphResponse } from '@/types/hermes'
+import type { CortexGraphResponse, CortexNodeType } from '@/types/hermes'
 
-import { cortexNodeAriaLabel, cortexToStarmap } from './cortex'
+import { CORTEX_NODE_VISUALS, nodeShape } from './constants'
+import { CORTEX_NODE_TYPES, cortexNodeAriaLabel, cortexToStarmap, filterCortexNodes } from './cortex'
+import { nodeRadius } from './geometry'
 
 function response(): CortexGraphResponse {
   return {
@@ -21,50 +23,29 @@ function response(): CortexGraphResponse {
       }
     ],
     facets: {
-      domains: [{ count: 2, value: 'personal' }],
-      statuses: [{ count: 2, value: 'active' }],
-      types: [
-        { count: 1, value: 'entity' },
-        { count: 1, value: 'memory' }
-      ]
+      domains: [{ count: 6, value: 'personal' }],
+      statuses: [{ count: 6, value: 'active' }],
+      types: CORTEX_NODE_TYPES.map(value => ({ count: 1, value }))
     },
     generated_at: '2026-07-14T10:01:00Z',
     layout_seed: 'stable-layout',
     next_cursor: null,
-    nodes: [
-      {
-        badges: ['private'],
-        community: null,
-        created_at: '2026-07-10T10:00:00Z',
-        degree: 1,
-        domain: 'personal',
-        id: 'entity_1',
-        label: 'Jordan Customer',
-        metadata: { entity_type: 'person' },
-        privacy: 'private',
-        status: 'active',
-        summary: 'Customer entity',
-        type: 'entity',
-        updated_at: '2026-07-14T10:00:00Z',
-        usage: 0
-      },
-      {
-        badges: ['cited', 'protected'],
-        community: null,
-        created_at: '2026-07-11T10:00:00Z',
-        degree: 1,
-        domain: 'personal',
-        id: 'memory_1',
-        label: 'Prefers text updates',
-        metadata: { evidence_count: 1 },
-        privacy: 'private',
-        status: 'active',
-        summary: 'Prefers text updates after 3 PM.',
-        type: 'memory',
-        updated_at: '2026-07-14T10:00:00Z',
-        usage: 2
-      }
-    ],
+    nodes: CORTEX_NODE_TYPES.map((type, index) => ({
+      badges: type === 'memory' ? ['cited', 'protected'] : ['private'],
+      community: type === 'community' ? 'community_1' : null,
+      created_at: `2026-07-${String(10 + index).padStart(2, '0')}T10:00:00Z`,
+      degree: 1,
+      domain: 'personal',
+      id: `${type}_1`,
+      label: type === 'entity' ? 'Jordan Customer' : `${type} fixture`,
+      metadata: {},
+      privacy: 'private',
+      status: 'active',
+      summary: `${type} summary`,
+      type,
+      updated_at: '2026-07-14T10:00:00Z',
+      usage: type === 'memory' ? 2 : 0
+    })),
     projection: 'growth',
     redaction_summary: {
       document_bodies_hidden: 0,
@@ -82,10 +63,10 @@ describe('Cortex graph adapter', () => {
     const graph = cortexToStarmap(response())
 
     expect(graph.source).toBe('cortex')
-    expect(graph.nodes.map(node => [node.id, node.cortexType])).toEqual([
-      ['entity_1', 'entity'],
-      ['memory_1', 'memory']
-    ])
+    expect(graph.nodes.map(node => [node.id, node.cortexType, node.kind])).toEqual(
+      CORTEX_NODE_TYPES.map(type => [`${type}_1`, type, type])
+    )
+    expect(graph.nodes.every(node => node.kind !== 'skill')).toBe(true)
     expect(graph.nodes[1]?.pinned).toBe(true)
     expect(graph.nodes[1]?.timestamp).toBe(Date.parse('2026-07-14T10:00:00Z') / 1000)
     expect(graph.edges[0]).toMatchObject({
@@ -108,5 +89,24 @@ describe('Cortex graph adapter', () => {
     const node = cortexToStarmap(response()).nodes[0]!
 
     expect(cortexNodeAriaLabel(node)).toBe('Jordan Customer, entity, personal, active, private')
+  })
+
+  it('gives all six Cortex types distinct renderer treatments', () => {
+    const graph = cortexToStarmap(response())
+    const visuals = CORTEX_NODE_TYPES.map(type => CORTEX_NODE_VISUALS[type])
+
+    expect(new Set(visuals.map(visual => visual.color)).size).toBe(6)
+    expect(new Set(visuals.map(visual => visual.shape)).size).toBe(6)
+    expect(new Set(visuals.map(visual => visual.radius)).size).toBe(6)
+    expect(graph.nodes.map(nodeShape)).toEqual(visuals.map(visual => visual.shape))
+    expect(new Set(graph.nodes.map(nodeRadius)).size).toBe(6)
+  })
+
+  it('filters node types without changing the graph adapter contract', () => {
+    const nodes = cortexToStarmap(response()).nodes
+    const hiddenTypes = new Set<CortexNodeType>(['evidence', 'session'])
+    const filtered = filterCortexNodes(nodes, { domain: null, hiddenTypes, query: '' })
+
+    expect(filtered.map(node => node.cortexType)).toEqual(['entity', 'memory', 'document', 'community'])
   })
 })

@@ -908,7 +908,26 @@ export const en: Translations = {
     importEmpty: 'Paste a map code to load it.',
     importSuccess: nodes => `Loaded a map with ${nodes} ${nodes === 1 ? 'node' : 'nodes'}.`,
     importedBadge: 'imported map',
-    resetToMine: 'Back to my map'
+    resetToMine: 'Back to my map',
+    cortex: {
+      brainLabel: 'Brain',
+      clearFilters: 'Clear filters',
+      defaultBrain: 'Default brain',
+      emptyBrainDescription: brain =>
+        `${brain} has no Cortex data yet. Memories and graph structure will appear here as it works.`,
+      emptyBrainTitle: 'This brain is empty',
+      noMatchesDescription: 'Try another phrase, node type, or knowledge domain.',
+      noMatchesTitle: 'No matching nodes',
+      nodeTypes: {
+        community: 'Communities',
+        document: 'Documents',
+        entity: 'Entities',
+        evidence: 'Evidence',
+        memory: 'Memories',
+        session: 'Sessions'
+      },
+      typeFilterLabel: 'Node types'
+    }
   },
   agents: {
     close: 'Close agents',
@@ -1385,7 +1404,8 @@ export const en: Translations = {
     failedUploadAvatar: 'Failed to upload worker portrait',
     generateAvatar: 'Generate a portrait',
     generateAvatarDesc: 'Describe the worker’s look. Atlas uses your configured image provider.',
-    generatePromptPlaceholder: 'A confident service advisor in a modern dealership, warm natural light, square portrait...',
+    generatePromptPlaceholder:
+      'A confident service advisor in a modern dealership, warm natural light, square portrait...',
     generatePromptRequired: 'Describe the worker’s look before generating.',
     generateAction: 'Generate',
     regenerateAvatar: 'Regenerate',

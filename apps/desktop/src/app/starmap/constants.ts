@@ -1,6 +1,6 @@
 import type { StarmapNode } from '@/types/hermes'
 
-import type { GraphParams, Rgb, RingParams, Shape } from './types'
+import type { CortexNodeVisual, GraphParams, Rgb, RingParams, Shape } from './types'
 
 // ── Disk geometry ────────────────────────────────────────────────────────────
 export const RING_INNER = 58
@@ -19,19 +19,19 @@ export const AGE_GRADIENT = { mid: 0.52, midInk: 0.74, newInk: 0.95, oldInk: 0.4
 
 // Node glyph per kind — pure path geometry (the seam a future sprite/instanced
 // renderer would bake from).
-export const NODE_SHAPE: Record<StarmapNode['kind'], Shape> = { memory: 'diamond', skill: 'circle' }
+export const NODE_SHAPE: Record<'memory' | 'skill', Shape> = { memory: 'diamond', skill: 'circle' }
 
-const CORTEX_NODE_SHAPE: Record<NonNullable<StarmapNode['cortexType']>, Shape> = {
-  community: 'hexagon',
-  document: 'square',
-  entity: 'circle',
-  evidence: 'triangle',
-  memory: 'diamond',
-  session: 'hexagon'
+export const CORTEX_NODE_VISUALS: Record<NonNullable<StarmapNode['cortexType']>, CortexNodeVisual> = {
+  community: { color: '#ff7898', ink: { b: 152, g: 120, r: 255 }, radius: 5.8, shape: 'star' },
+  document: { color: '#62dec6', ink: { b: 198, g: 222, r: 98 }, radius: 4.6, shape: 'square' },
+  entity: { color: '#56c8ff', ink: { b: 255, g: 200, r: 86 }, radius: 3.5, shape: 'circle' },
+  evidence: { color: '#ab8cff', ink: { b: 255, g: 140, r: 171 }, radius: 3.9, shape: 'triangle' },
+  memory: { color: '#f5b85b', ink: { b: 91, g: 184, r: 245 }, radius: 4.3, shape: 'diamond' },
+  session: { color: '#5f86ff', ink: { b: 255, g: 134, r: 95 }, radius: 5.1, shape: 'hexagon' }
 }
 
 export const nodeShape = (node: StarmapNode): Shape =>
-  node.cortexType ? CORTEX_NODE_SHAPE[node.cortexType] : NODE_SHAPE[node.kind]
+  node.cortexType ? CORTEX_NODE_VISUALS[node.cortexType].shape : NODE_SHAPE[node.kind === 'memory' ? 'memory' : 'skill']
 
 // Darken the orb body so a bright primary doesn't swallow the sheen (the
 // highlight is computed from the original ink, so it still reads).

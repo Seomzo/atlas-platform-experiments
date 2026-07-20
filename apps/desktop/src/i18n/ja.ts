@@ -922,7 +922,26 @@ export const ja = defineLocale({
     loadFailed: 'メモリグラフを読み込めませんでした',
     loading: '読み込み中…',
     emptyTitle: 'まだ学習はありません',
-    emptyDesc: 'Atlas がスキルやメモリを蓄積すると、ここに表示されます。'
+    emptyDesc: 'Atlas がスキルやメモリを蓄積すると、ここに表示されます。',
+    cortex: {
+      brainLabel: 'ブレイン',
+      clearFilters: 'フィルターを解除',
+      defaultBrain: 'デフォルトのブレイン',
+      emptyBrainDescription: brain =>
+        `${brain} にはまだ Cortex データがありません。作業で生まれたメモリとグラフ構造がここに表示されます。`,
+      emptyBrainTitle: 'このブレインは空です',
+      noMatchesDescription: '別の語句、ノード種別、または知識ドメインを試してください。',
+      noMatchesTitle: '一致するノードはありません',
+      nodeTypes: {
+        community: 'コミュニティ',
+        document: 'ドキュメント',
+        entity: 'エンティティ',
+        evidence: '証拠',
+        memory: 'メモリ',
+        session: 'セッション'
+      },
+      typeFilterLabel: 'ノード種別'
+    }
   },
   agents: {
     close: 'エージェントを閉じる',
@@ -1357,7 +1376,8 @@ export const ja = defineLocale({
     failedUploadAvatar: 'ワーカーの顔写真のアップロードに失敗しました',
     generateAvatar: '顔写真を生成',
     generateAvatarDesc: 'ワーカーの外見を説明してください。設定済みの画像プロバイダーを使用します。',
-    generatePromptPlaceholder: '現代的な自動車販売店のプロフェッショナルなサービスアドバイザー、暖かい自然光、正方形の肖像…',
+    generatePromptPlaceholder:
+      '現代的な自動車販売店のプロフェッショナルなサービスアドバイザー、暖かい自然光、正方形の肖像…',
     generatePromptRequired: '生成する前にワーカーの外見を説明してください。',
     generateAction: '生成',
     regenerateAvatar: '再生成',
@@ -2281,8 +2301,7 @@ export const ja = defineLocale({
       showConsole: 'プレビューコンソールを表示',
       hideDevTools: 'プレビュー DevTools を非表示',
       openDevTools: 'プレビュー DevTools を開く',
-      finishedRestarting: message =>
-        `Atlas がプレビューサーバーの再起動を完了しました${message ? `: ${message}` : ''}`,
+      finishedRestarting: message => `Atlas がプレビューサーバーの再起動を完了しました${message ? `: ${message}` : ''}`,
       failedRestarting: message => `サーバーの再起動に失敗しました: ${message}`,
       unknownError: '不明なエラー',
       restartedTitle: 'プレビューサーバーが再起動しました',

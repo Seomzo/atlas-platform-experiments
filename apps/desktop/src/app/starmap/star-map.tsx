@@ -1185,7 +1185,8 @@ export function StarMap({
           </button>
         )}
 
-        {/* Legacy legend remains in-canvas; Cortex's key lives in the reserved dock. */}
+        {/* Legacy legend remains in-canvas; Cortex's interactive type key lives
+            in the workspace header. */}
         {!cortex ? (
           <div className="pointer-events-none absolute bottom-2 left-2 flex flex-col gap-1 text-[0.62rem] text-muted-foreground">
             <span className="flex items-center gap-1.5">
@@ -1203,23 +1204,6 @@ export function StarMap({
       {cortex ? (
         <div className="relative z-20 shrink-0 border-t border-white/8 bg-[#07111d]/94 px-4 py-2.5 shadow-[0_-14px_40px_rgba(0,0,0,0.2)] backdrop-blur-xl">
           <div className="flex min-w-0 flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[0.58rem] text-[#72899f]">
-            <span className="flex items-center gap-1.5">
-              <span className="inline-block size-2 rounded-full bg-[#56c8ff]" /> entity
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="inline-block size-2 rotate-45" style={{ backgroundColor: memoryColor }} /> memory
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="inline-block size-0 border-x-4 border-b-[7px] border-x-transparent border-b-current" />{' '}
-              evidence
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="inline-block size-2 border border-current" /> document
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="inline-block size-2 rotate-45 rounded-[2px] border border-current" /> session / community
-            </span>
-            <span className="hidden h-3 w-px bg-white/10 sm:block" />
             <span className="text-[#536b82]">oldest at core · newer outward</span>
             <RevealLabel axis={timeAxis} revealStore={revealStore} />
           </div>

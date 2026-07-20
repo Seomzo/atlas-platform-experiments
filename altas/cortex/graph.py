@@ -39,6 +39,21 @@ _PROJECTIONS = frozenset({
     "workflow",
     "health",
 })
+_STRATIFIED_TYPE_ORDER = (
+    "memory",
+    "session",
+    "community",
+    "document",
+    "entity",
+    "evidence",
+)
+_STRATIFIED_FIRST_WINDOW_TARGETS = {
+    "memory": 50,
+    "session": 100,
+    "community": 200,
+    "document": 50,
+    "entity": 200,
+}
 _SAFE_JOB_OUTPUT_FIELDS = frozenset({
     "status",
     "sessions_processed",
@@ -408,6 +423,77 @@ def _collect_nodes(
     return nodes, community_rows
 
 
+def _stratified_node_order(
+    nodes: Sequence[dict[str, Any]], *, projection: str
+) -> list[dict[str, Any]]:
+    """Return one stable order whose leading window represents every type.
+
+    Evidence is normally the highest-volume table and the newest row for every
+    turn. A global recency sort therefore made a bounded overview look like an
+    evidence log. Keep recency inside each type, reserve the leading window for
+    the complete small durable layers, then let recency order the remainder.
+    The ordering is independent of the requested page size, so offset cursors
+    retain their existing no-duplicate/no-gap contract.
+    """
+    buckets: dict[str, list[dict[str, Any]]] = {
+        node_type: [] for node_type in _STRATIFIED_TYPE_ORDER
+    }
+    for node in nodes:
+        buckets.setdefault(str(node.get("type") or ""), []).append(node)
+    for bucket in buckets.values():
+        bucket.sort(
+            key=lambda node: (
+                str(node.get("_sort_at") or ""),
+                str(node.get("id") or ""),
+            ),
+            reverse=True,
+        )
+
+    positions = {node_type: 0 for node_type in buckets}
+    ordered: list[dict[str, Any]] = []
+
+    def take(node_type: str, count: int) -> None:
+        start = positions[node_type]
+        end = min(len(buckets[node_type]), start + max(0, count))
+        ordered.extend(buckets[node_type][start:end])
+        positions[node_type] = end
+
+    # One node from every populated type makes the vocabulary truthful even
+    # when the caller asks for a small overview.
+    for node_type in _STRATIFIED_TYPE_ORDER:
+        take(node_type, 1)
+
+    # Durable/derived layers are small in normal stores. Keep their bounded
+    # working sets in front of the high-volume evidence residual; entities
+    # receive a larger allowance because they are the connective substrate.
+    for node_type, target in _STRATIFIED_FIRST_WINDOW_TARGETS.items():
+        take(node_type, target - positions[node_type])
+
+    priority = {
+        "community": 6 if projection == "communities" else 1,
+        "entity": 5,
+        "memory": 4,
+        "document": 3,
+        "session": 2,
+        "evidence": 1,
+    }
+    remainder = [
+        node
+        for node_type, bucket in buckets.items()
+        for node in bucket[positions[node_type] :]
+    ]
+    remainder.sort(
+        key=lambda node: (
+            str(node.get("_sort_at") or ""),
+            priority.get(str(node.get("type")), 0),
+            str(node.get("id") or ""),
+        ),
+        reverse=True,
+    )
+    ordered.extend(remainder)
+    return ordered
+
+
 def _collect_edges(
     connection: Any,
     store: CortexStore,
@@ -644,22 +730,7 @@ def build_graph_overview(
             if projection == "answer-path":
                 nodes = [node for node in nodes if str(node["id"]) in answer_path_ids]
 
-        priority = {
-            "community": 6 if projection == "communities" else 1,
-            "entity": 5,
-            "memory": 4,
-            "document": 3,
-            "session": 2,
-            "evidence": 1,
-        }
-        nodes.sort(
-            key=lambda node: (
-                str(node.get("_sort_at") or ""),
-                priority.get(str(node.get("type")), 0),
-                str(node.get("id")),
-            ),
-            reverse=True,
-        )
+        nodes = _stratified_node_order(nodes, projection=projection)
         total_in_window = len(nodes)
         visible_nodes = nodes[offset : offset + limit]
         edges = _collect_edges(
@@ -1111,11 +1182,13 @@ def build_job_status(store: CortexStore, job_id: str) -> dict[str, Any]:
 
 
 def enqueue_dream(store: CortexStore, *, source: str = "dashboard") -> dict[str, Any]:
-    """Queue a deterministic manual recovery checkpoint.
+    """Queue deterministic structural recovery maintenance.
 
     The legacy public endpoint keeps its ``dream`` name for compatibility,
-    but this job never performs global semantic consolidation. Model-backed
-    work remains scoped to logical sessions finalized by the lifecycle hook.
+    but this job never performs global semantic consolidation. It may rebuild
+    derived graph communities from existing entities and relations. Model-
+    backed work remains scoped to logical sessions finalized by the lifecycle
+    hook.
     """
     requested_at = utc_now()
     job_id = store.enqueue_job(

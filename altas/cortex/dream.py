@@ -27,6 +27,7 @@ REASONING_PROMPT_VERSION = "atlas.cortex.reasoning.prompt.v1"
 RECONCILE_PROMPT_VERSION = "atlas.cortex.reconcile.v1"
 CHECKPOINT_PROMPT_VERSION = "atlas.cortex.checkpoint.v1"
 RECOVERY_PROMPT_VERSION = "atlas.cortex.recovery.v1"
+COMMUNITY_ALGORITHM_VERSION = "cortex:connected-components:v1"
 
 ACTIONS = frozenset({
     "defer_unresolved",
@@ -1217,18 +1218,23 @@ class DreamProcessor:
     def _process_recovery_checkpoint(
         self, job: Mapping[str, Any], *, owner: str
     ) -> DreamOutcome:
-        """Acknowledge legacy/scheduled work without invoking a model.
+        """Run deterministic recovery maintenance without invoking a model.
 
         Semantic consolidation is exclusively lineage-scoped
         ``session_distill`` work. Legacy pre-compress/dream rows and the daily
         recovery marker remain deterministic so an upgrade cannot process an
-        active conversation unexpectedly.
+        active conversation unexpectedly. Dream markers may rebuild the
+        derived entity-community projection because that operation only groups
+        already-persisted graph structure; it does not create customer truth.
         """
 
         job_id = str(job["id"])
         started_at = utc_now()
         job_input = _mapping(job.get("input"))
         session_ids = _job_session_ids(job_input)
+        community_count = 0
+        if str(job.get("job_type") or "") in {"dream", "dream_cycle"}:
+            community_count = self._rebuild_communities()
         self._checkpoint(
             job_id,
             owner,
@@ -1237,6 +1243,7 @@ class DreamProcessor:
                 "legacy_job_type": str(job.get("job_type") or ""),
                 "session_ids": list(session_ids),
                 "model_processing": False,
+                "communities_built": community_count,
             },
         )
         report = DreamReport(
@@ -1248,6 +1255,7 @@ class DreamProcessor:
             completed_at=utc_now(),
         )
         report_value = report.to_dict()
+        report_value["communities_built"] = community_count
         self._record_health(job_id, "succeeded", report_value)
         self._checkpoint(job_id, owner, "complete", report_value)
         return DreamOutcome(
@@ -1258,6 +1266,130 @@ class DreamProcessor:
             output_tokens=0,
             cost_micros=0,
         )
+
+    def _rebuild_communities(self) -> int:
+        """Replace derived communities with connected entity components.
+
+        Relations are directed facts, but community membership is structural,
+        so connectivity is deliberately undirected. Isolated entities form
+        singleton components and remain visible as part of the brain. Spaces
+        governed by a published GraphRAG artifact keep their supplied
+        communities instead of receiving a duplicate local grouping.
+        """
+        generated_at = utc_now()
+        with self.store.transaction() as connection:
+            entity_rows = connection.execute(
+                "SELECT e.id, e.knowledge_space_id, e.canonical_name "
+                "FROM entities e JOIN knowledge_spaces k "
+                "ON k.id=e.knowledge_space_id AND k.brain_id=e.brain_id "
+                "WHERE e.brain_id=? AND e.deleted_at IS NULL "
+                "AND k.deleted_at IS NULL ORDER BY e.knowledge_space_id, e.id",
+                (self.store.brain_id,),
+            ).fetchall()
+            relation_rows = connection.execute(
+                "SELECT r.knowledge_space_id, r.subject_entity_id, "
+                "r.object_entity_id FROM relations r "
+                "JOIN entities s ON s.id=r.subject_entity_id "
+                "AND s.brain_id=r.brain_id AND s.deleted_at IS NULL "
+                "JOIN entities o ON o.id=r.object_entity_id "
+                "AND o.brain_id=r.brain_id AND o.deleted_at IS NULL "
+                "WHERE r.brain_id=? AND r.status='active' "
+                "AND s.knowledge_space_id=r.knowledge_space_id "
+                "AND o.knowledge_space_id=r.knowledge_space_id "
+                "ORDER BY r.knowledge_space_id, r.id",
+                (self.store.brain_id,),
+            ).fetchall()
+            graphrag_spaces = {
+                str(row["knowledge_space_id"])
+                for row in connection.execute(
+                    "SELECT DISTINCT knowledge_space_id FROM communities "
+                    "WHERE brain_id=? AND stale=0 "
+                    "AND algorithm_version LIKE 'graphrag:%'",
+                    (self.store.brain_id,),
+                ).fetchall()
+            }
+
+            names: dict[str, str] = {}
+            spaces: dict[str, list[str]] = {}
+            for row in entity_rows:
+                entity_id = str(row["id"])
+                space_id = str(row["knowledge_space_id"])
+                names[entity_id] = str(row["canonical_name"])
+                spaces.setdefault(space_id, []).append(entity_id)
+
+            adjacency = {entity_id: set() for entity_id in names}
+            for row in relation_rows:
+                source = str(row["subject_entity_id"])
+                target = str(row["object_entity_id"])
+                if source in adjacency and target in adjacency:
+                    adjacency[source].add(target)
+                    adjacency[target].add(source)
+
+            connection.execute(
+                "UPDATE communities SET parent_id=NULL WHERE brain_id=? "
+                "AND algorithm_version=?",
+                (self.store.brain_id, COMMUNITY_ALGORITHM_VERSION),
+            )
+            connection.execute(
+                "DELETE FROM communities WHERE brain_id=? AND algorithm_version=?",
+                (self.store.brain_id, COMMUNITY_ALGORITHM_VERSION),
+            )
+
+            communities: list[tuple[str, str, tuple[str, ...]]] = []
+            for space_id in sorted(spaces):
+                if space_id in graphrag_spaces:
+                    continue
+                unseen = set(spaces[space_id])
+                while unseen:
+                    pending = [min(unseen)]
+                    members: set[str] = set()
+                    while pending:
+                        entity_id = pending.pop()
+                        if entity_id not in unseen:
+                            continue
+                        unseen.remove(entity_id)
+                        members.add(entity_id)
+                        pending.extend(
+                            sorted(adjacency[entity_id] & unseen, reverse=True)
+                        )
+                    communities.append((space_id, min(members), tuple(sorted(members))))
+
+            communities.sort(key=lambda item: (item[0], item[1], item[2]))
+            for space_id, _first_member, member_ids in communities:
+                member_names = sorted(names[member_id] for member_id in member_ids)
+                if len(member_names) == 1:
+                    label = member_names[0]
+                elif len(member_names) == 2:
+                    label = f"{member_names[0]} + {member_names[1]}"
+                else:
+                    label = f"{member_names[0]} + {len(member_names) - 1} more"
+                report_names = ", ".join(member_names[:12])
+                if len(member_names) > 12:
+                    report_names += f", and {len(member_names) - 12} more"
+                community_id = "community_" + stable_hash(
+                    self.store.brain_id,
+                    COMMUNITY_ALGORITHM_VERSION,
+                    space_id,
+                    *member_ids,
+                )[:32]
+                connection.execute(
+                    "INSERT INTO communities(id, brain_id, knowledge_space_id, level, "
+                    "label, report, algorithm_version, member_ids_json, stale, generated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        community_id,
+                        self.store.brain_id,
+                        space_id,
+                        0,
+                        label,
+                        f"Connected group of {len(member_ids)} entities: {report_names}",
+                        COMMUNITY_ALGORITHM_VERSION,
+                        _json(member_ids),
+                        0,
+                        generated_at,
+                    ),
+                )
+        return len(communities)
 
     def record_failure(self, job_id: str, error: BaseException) -> None:
         self._record_health(

@@ -4,7 +4,14 @@ import type { StarmapGraph, StarmapNode } from '@/types/hermes'
 
 export type MemoryCard = StarmapGraph['memory'][number]
 
-export type Shape = 'circle' | 'diamond' | 'hexagon' | 'square' | 'triangle'
+export type Shape = 'circle' | 'diamond' | 'hexagon' | 'square' | 'star' | 'triangle'
+
+export interface CortexNodeVisual {
+  color: string
+  ink: Rgb
+  radius: number
+  shape: Shape
+}
 
 export interface Viewport {
   k: number

@@ -428,11 +428,11 @@ export interface UsageStats {
   total: number
 }
 
-/** One graph node in the star map (learned skill or memory chunk). */
+/** One graph node in the star map. Cortex nodes retain their native type. */
 export interface StarmapNode {
   id: string
   label: string
-  kind: 'memory' | 'skill'
+  kind: CortexNodeType | 'skill'
   /** Native Cortex type. Absent on the legacy /api/learning projection. */
   cortexType?: CortexNodeType
   memorySource?: 'memory' | 'profile'
