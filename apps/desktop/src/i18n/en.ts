@@ -915,7 +915,7 @@ export const en: Translations = {
       constellation: {
         ariaLabel: 'Atlas brain constellation with the main brain and every worker brain.',
         backToConstellation: 'All brains',
-        boundedOverview: 'Each brain is sampled independently for a fast overview. Open one to see its full graph.',
+        lodOverview: 'Counts shape the whole sky. Zoom into an aggregate to resolve its real nodes.',
         cortexDisabled: 'Cortex off',
         description: 'The main Atlas brain and every worker brain, together without merging their knowledge.',
         disabledBrainDescription: brain =>
@@ -930,7 +930,7 @@ export const en: Translations = {
         unavailableBrainDescription: brain =>
           `${brain}'s Cortex store could not be reached. Its graph was not replaced with placeholder data.`,
         unavailableBrainTitle: 'Brain unavailable',
-        visibleNodes: 'Visible nodes',
+        totalNodes: 'Total nodes',
         workers: 'Workers'
       },
       defaultBrain: 'Default brain',
@@ -939,6 +939,8 @@ export const en: Translations = {
       emptyBrainTitle: 'This brain is empty',
       noMatchesDescription: 'Try another phrase, node type, or knowledge domain.',
       noMatchesTitle: 'No matching nodes',
+      resolving: 'Resolving real nodes',
+      totalNodes: 'Total nodes',
       nodeTypes: {
         community: 'Communities',
         document: 'Documents',
@@ -947,7 +949,8 @@ export const en: Translations = {
         memory: 'Memories',
         session: 'Sessions'
       },
-      typeFilterLabel: 'Node types'
+      typeFilterLabel: 'Node types',
+      zoomToResolve: 'Zoom into a cluster to resolve real nodes'
     }
   },
   agents: {

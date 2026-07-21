@@ -1095,7 +1095,7 @@ export const zh: Translations = {
       constellation: {
         ariaLabel: '包含 Atlas 主大脑和所有工作单元大脑的星座图。',
         backToConstellation: '所有大脑',
-        boundedOverview: '为保持概览流畅，每个大脑都会独立限量显示。打开单个大脑可查看完整图谱。',
+        lodOverview: '真实计数塑造整片星空。放大聚合星即可解析真实节点。',
         cortexDisabled: 'Cortex 已关闭',
         description: 'Atlas 主大脑与所有工作单元大脑同处一片星空，但不会合并各自的知识。',
         disabledBrainDescription: brain => `${brain} 已关闭 Cortex。为此工作单元启用 Cortex 后即可构建记忆。`,
@@ -1108,7 +1108,7 @@ export const zh: Translations = {
         unavailable: '暂不可用',
         unavailableBrainDescription: brain => `无法访问 ${brain} 的 Cortex 存储。界面没有用占位数据替代其图谱。`,
         unavailableBrainTitle: '大脑不可用',
-        visibleNodes: '可见节点',
+        totalNodes: '节点总数',
         workers: '工作单元'
       },
       defaultBrain: '默认大脑',
@@ -1116,6 +1116,8 @@ export const zh: Translations = {
       emptyBrainTitle: '这个大脑还是空的',
       noMatchesDescription: '请尝试其他关键词、节点类型或知识域。',
       noMatchesTitle: '没有匹配的节点',
+      resolving: '正在解析真实节点',
+      totalNodes: '节点总数',
       nodeTypes: {
         community: '社区',
         document: '文档',
@@ -1124,7 +1126,8 @@ export const zh: Translations = {
         memory: '记忆',
         session: '会话'
       },
-      typeFilterLabel: '节点类型'
+      typeFilterLabel: '节点类型',
+      zoomToResolve: '放大聚合星以解析真实节点'
     }
   },
   agents: {

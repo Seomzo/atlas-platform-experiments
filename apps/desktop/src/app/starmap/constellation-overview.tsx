@@ -111,12 +111,14 @@ export function ConstellationOverview({ onOpenBrain, scene }: ConstellationOverv
               <dd className="mt-0.5 font-mono text-sm tabular-nums text-[#dff4ff]">{workerCount}</dd>
             </div>
             <div className="border-l border-white/10 pl-4">
-              <dt className="text-[0.52rem] uppercase tracking-[0.16em] text-[#647b91]">{copy.visibleNodes}</dt>
-              <dd className="mt-0.5 font-mono text-sm tabular-nums text-[#dff4ff]">{scene.graph.nodes.length}</dd>
+              <dt className="text-[0.52rem] uppercase tracking-[0.16em] text-[#647b91]">{copy.totalNodes}</dt>
+              <dd className="mt-0.5 font-mono text-sm tabular-nums text-[#dff4ff]">
+                {Number(scene.graph.stats.totalNodes ?? 0).toLocaleString()}
+              </dd>
             </div>
           </dl>
           <div className="hidden max-w-72 rounded-lg border border-[#56c8ff]/12 bg-[#56c8ff]/[0.045] px-3 py-2 text-[0.58rem] leading-relaxed text-[#7690a7] xl:block">
-            {copy.boundedOverview}
+            {copy.lodOverview}
           </div>
         </div>
       </header>
@@ -190,7 +192,7 @@ export function ConstellationOverview({ onOpenBrain, scene }: ConstellationOverv
 
               return (
                 <button
-                  aria-label={`${copy.openBrain(name)} — ${statusLabel(partition.status, partition.nodeIds.length, copy)}`}
+                  aria-label={`${copy.openBrain(name)} — ${statusLabel(partition.status, partition.totalNodeCount, copy)}`}
                   className={cn(
                     'pointer-events-auto absolute flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-1.5 rounded-xl px-2 py-1.5 text-center outline-none transition duration-200 hover:scale-[1.04] focus-visible:ring-1 focus-visible:ring-[#78d8ff]',
                     muted && 'opacity-70 hover:opacity-100'
@@ -228,7 +230,7 @@ export function ConstellationOverview({ onOpenBrain, scene }: ConstellationOverv
                       partition.status === 'unavailable' && 'border-[#c7a579]/12 bg-[#c7a579]/5 text-[#9f876d]'
                     )}
                   >
-                    {statusLabel(partition.status, partition.nodeIds.length, copy)}
+                    {statusLabel(partition.status, partition.totalNodeCount, copy)}
                   </span>
                 </button>
               )

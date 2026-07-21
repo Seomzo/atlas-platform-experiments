@@ -17,6 +17,7 @@ import type {
   CortexMemoryModelAssignmentResponse,
   CortexMemoryModelOptionsResponse,
   CortexNodeDetailResponse,
+  CortexNodeType,
   CronJob,
   CronJobCreatePayload,
   CronJobUpdates,
@@ -623,9 +624,42 @@ function cortexRequest(path: string, brainProfile?: null | string): { path: stri
   return { path: `${path}${separator}profile=${encodeURIComponent(brainProfile || 'default')}` }
 }
 
-export async function getCortexGraph(limit = 500, brainProfile?: null | string): Promise<CortexGraphResponse> {
+export interface CortexGraphQuery {
+  community?: string
+  cursor?: string
+  projection?: string
+  types?: CortexNodeType[]
+  uncommunitied?: boolean
+}
+
+export async function getCortexGraph(
+  limit = 500,
+  brainProfile?: null | string,
+  query: CortexGraphQuery = {}
+): Promise<CortexGraphResponse> {
+  const params = new URLSearchParams({
+    limit: String(Math.max(1, Math.min(500, limit))),
+    projection: query.projection ?? 'growth'
+  })
+
+  if (query.cursor) {
+    params.set('cursor', query.cursor)
+  }
+
+  if (query.community) {
+    params.set('community', query.community)
+  }
+
+  if (query.types?.length) {
+    params.set('types', query.types.join(','))
+  }
+
+  if (query.uncommunitied) {
+    params.set('uncommunitied', 'true')
+  }
+
   const value = await window.hermesDesktop.api<CortexGraphResponse>({
-    ...cortexRequest(`/api/cognitive/graph?projection=growth&limit=${Math.max(1, Math.min(500, limit))}`, brainProfile)
+    ...cortexRequest(`/api/cognitive/graph?${params}`, brainProfile)
   })
 
   return cortexContract(value, 'atlas.cortex.graph.v1')

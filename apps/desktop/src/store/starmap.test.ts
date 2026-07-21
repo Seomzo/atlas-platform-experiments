@@ -1,8 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type { CortexGraphQuery } from '@/hermes'
 import type { CortexGraphResponse, CortexHealthResponse, ProfileInfo, StarmapGraph } from '@/types/hermes'
 
-const getCortexGraph = vi.fn<(limit?: number, profile?: null | string) => Promise<CortexGraphResponse>>()
+const getCortexGraph =
+  vi.fn<(limit?: number, profile?: null | string, query?: CortexGraphQuery) => Promise<CortexGraphResponse>>()
+
 const getCortexHealth = vi.fn<(profile?: null | string) => Promise<CortexHealthResponse>>()
 const getCortexDream = vi.fn()
 const getStarmapGraph = vi.fn<() => Promise<StarmapGraph>>()
@@ -14,6 +17,18 @@ const store = await import('./starmap')
 
 function cortex(label: string): CortexGraphResponse {
   return {
+    aggregates: {
+      relation_count: 0,
+      total_nodes: 1,
+      types: [
+        { count: 0, type: 'entity', uncommunitied_count: 0 },
+        { count: 1, type: 'memory', uncommunitied_count: 1 },
+        { count: 0, type: 'evidence', uncommunitied_count: 0 },
+        { count: 0, type: 'session', uncommunitied_count: 0 },
+        { count: 0, type: 'document', uncommunitied_count: 0 },
+        { count: 0, type: 'community', uncommunitied_count: 0 }
+      ]
+    },
     communities: [],
     edges: [],
     facets: { domains: [], statuses: [], types: [] },
@@ -43,6 +58,20 @@ function cortex(label: string): CortexGraphResponse {
     retrieval_run_id: null,
     timeline_window: { end: null, start: null },
     version: 'atlas.cortex.graph.v1'
+  }
+}
+
+function emptyCortex(): CortexGraphResponse {
+  const value = cortex('empty')
+
+  return {
+    ...value,
+    aggregates: {
+      relation_count: 0,
+      total_nodes: 0,
+      types: value.aggregates.types.map(item => ({ ...item, count: 0, uncommunitied_count: 0 }))
+    },
+    nodes: []
   }
 }
 
@@ -106,8 +135,11 @@ describe('starmap Cortex loading', () => {
     await store.loadStarmapGraph()
 
     expect(store.$starmapGraph.get()?.source).toBe('cortex')
-    expect(store.$starmapGraph.get()?.nodes[0]?.label).toBe('native')
-    expect(getCortexGraph).toHaveBeenCalledWith(500, 'default')
+    expect(store.$starmapGraph.get()?.nodes[0]?.aggregate?.count).toBe(1)
+    expect(getCortexGraph).toHaveBeenCalledWith(24, 'default', {
+      projection: 'communities',
+      types: ['community']
+    })
     expect(getCortexHealth).toHaveBeenCalledWith('default')
     expect(getStarmapGraph).not.toHaveBeenCalled()
   })
@@ -143,7 +175,7 @@ describe('starmap Cortex loading', () => {
     await store.loadStarmapGraph()
     await store.refreshCortexDreamStatus('job-1')
 
-    expect(store.$starmapGraph.get()?.nodes[0]?.label).toBe('after')
+    expect(store.$cortexGraph.get()?.nodes[0]?.label).toBe('after')
     expect(getCortexGraph).toHaveBeenCalledTimes(2)
   })
 
@@ -159,7 +191,7 @@ describe('starmap Cortex loading', () => {
     oldProfile.resolve(cortex('old-profile'))
     await oldLoad
 
-    expect(store.$starmapGraph.get()?.nodes[0]?.label).toBe('new-profile')
+    expect(store.$cortexGraph.get()?.nodes[0]?.label).toBe('new-profile')
   })
 
   it('selects an independent worker brain and never masks it with legacy data', async () => {
@@ -168,9 +200,12 @@ describe('starmap Cortex loading', () => {
     await store.selectStarmapBrain('worker_graph')
 
     expect(store.$starmapBrainProfile.get()).toBe('worker_graph')
-    expect(getCortexGraph).toHaveBeenCalledWith(500, 'worker_graph')
+    expect(getCortexGraph).toHaveBeenCalledWith(24, 'worker_graph', {
+      projection: 'communities',
+      types: ['community']
+    })
     expect(getCortexHealth).toHaveBeenCalledWith('worker_graph')
-    expect(store.$starmapGraph.get()?.nodes[0]?.label).toBe('worker-memory')
+    expect(store.$cortexGraph.get()?.nodes[0]?.label).toBe('worker-memory')
     expect(getStarmapGraph).not.toHaveBeenCalled()
 
     getCortexGraph.mockRejectedValueOnce(Object.assign(new Error('404: not found'), { statusCode: 404 }))
@@ -204,23 +239,27 @@ describe('starmap Cortex loading', () => {
     await oldLoad
 
     expect(store.$starmapBrainProfile.get()).toBe('current-worker')
-    expect(store.$starmapGraph.get()?.nodes[0]?.label).toBe('current-worker')
+    expect(store.$cortexGraph.get()?.nodes[0]?.label).toBe('current-worker')
   })
 
-  it('loads every brain independently with a proportional overview budget', async () => {
+  it('loads one aggregate page per brain without a shared node ceiling', async () => {
     const profiles = [profile('default', true), profile('parts'), profile('service'), profile('sales')]
     getCortexGraph.mockImplementation(async (_limit, brain) => {
       if (brain === 'service') {
         throw Object.assign(new Error('503: Atlas Cortex is disabled for this profile'), { statusCode: 503 })
       }
 
-      return brain === 'sales' ? { ...cortex('sales'), nodes: [] } : cortex(String(brain))
+      return brain === 'sales' ? emptyCortex() : cortex(String(brain))
     })
 
     await store.showStarmapConstellation(profiles)
 
     expect(getCortexGraph).toHaveBeenCalledTimes(4)
-    expect(getCortexGraph.mock.calls.every(([limit]) => limit === 105)).toBe(true)
+    expect(
+      getCortexGraph.mock.calls.every(
+        ([limit, , query]) => limit === 24 && query?.projection === 'communities' && query?.types?.[0] === 'community'
+      )
+    ).toBe(true)
     expect(store.$starmapConstellation.get()?.partitions.map(partition => partition.status)).toEqual([
       'ready',
       'ready',
@@ -231,7 +270,7 @@ describe('starmap Cortex loading', () => {
     expect(store.$starmapMode.get()).toBe('constellation')
   })
 
-  it('transitions from constellation to an isolated brain and back without shrinking the isolated limit', async () => {
+  it('transitions from constellation to an isolated brain with one aggregate page', async () => {
     const profiles = [profile('default', true), profile('service')]
     getCortexGraph.mockImplementation(async (_limit, brain) => cortex(String(brain)))
 
@@ -240,7 +279,10 @@ describe('starmap Cortex loading', () => {
 
     expect(store.$starmapMode.get()).toBe('brain')
     expect(store.$starmapBrainProfile.get()).toBe('service')
-    expect(getCortexGraph).toHaveBeenLastCalledWith(500, 'service')
+    expect(getCortexGraph).toHaveBeenLastCalledWith(24, 'service', {
+      projection: 'communities',
+      types: ['community']
+    })
 
     await store.showStarmapConstellation(profiles)
 

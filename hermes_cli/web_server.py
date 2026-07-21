@@ -3053,6 +3053,18 @@ class CortexGraphCommunity(_CortexContractModel):
     visible_member_count: int
 
 
+class CortexGraphTypeAggregate(_CortexContractModel):
+    count: int
+    type: CortexNodeType
+    uncommunitied_count: int
+
+
+class CortexGraphAggregates(_CortexContractModel):
+    relation_count: int
+    total_nodes: int
+    types: List[CortexGraphTypeAggregate]
+
+
 class CortexFacet(_CortexContractModel):
     count: int
     value: str
@@ -3076,6 +3088,7 @@ class CortexGraphRedactionSummary(_CortexContractModel):
 
 
 class CortexGraphResponse(_CortexPublicResponse):
+    aggregates: CortexGraphAggregates
     communities: List[CortexGraphCommunity]
     edges: List[CortexGraphEdge]
     facets: CortexGraphFacets
@@ -3228,6 +3241,8 @@ async def get_cognitive_graph(
     types: Optional[str] = None,
     status: Optional[str] = None,
     retrieval_run_id: Optional[str] = None,
+    community: Optional[str] = None,
+    uncommunitied: bool = False,
 ):
     """Return a bounded graph overview with source bodies redacted."""
     try:
@@ -3250,6 +3265,8 @@ async def get_cognitive_graph(
                 node_types=node_types,
                 status=status,
                 retrieval_run_id=retrieval_run_id,
+                community_id=community,
+                uncommunitied=uncommunitied,
             )
     except HTTPException:
         raise

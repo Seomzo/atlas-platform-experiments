@@ -437,6 +437,8 @@ export interface StarmapNode {
   brainProfile?: string
   /** Native Cortex type. Absent on the legacy /api/learning projection. */
   cortexType?: CortexNodeType
+  /** Real count represented by an aggregate LOD star. */
+  aggregate?: StarmapAggregate
   memorySource?: 'memory' | 'profile'
   timestamp?: null | number
   category: string
@@ -447,6 +449,14 @@ export interface StarmapNode {
   badges?: string[]
   privacy?: string
   summary?: string
+}
+
+export interface StarmapAggregate {
+  count: number
+  key: string
+  kind: 'community' | 'type'
+  sourceId?: string
+  type?: CortexNodeType
 }
 
 /** A declared `related_skills` link; both endpoints are guaranteed to be nodes. */
@@ -526,7 +536,20 @@ export interface CortexGraphCommunity {
   visible_member_count: number
 }
 
+export interface CortexGraphTypeAggregate {
+  count: number
+  type: CortexNodeType
+  uncommunitied_count: number
+}
+
+export interface CortexGraphAggregates {
+  relation_count: number
+  total_nodes: number
+  types: CortexGraphTypeAggregate[]
+}
+
 export interface CortexGraphResponse {
+  aggregates: CortexGraphAggregates
   communities: CortexGraphCommunity[]
   edges: CortexGraphEdge[]
   facets: {

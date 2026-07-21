@@ -33,6 +33,7 @@ export interface Rect {
 }
 
 export interface SimNode extends StarmapNode, SimulationNodeDatum {
+  lodActive?: boolean
   outerRingIndex: number // first ring that caps this node's recency band
   rec: number // recency 0 (oldest) → 1 (newest)
   tr: number // time-anchored target radius

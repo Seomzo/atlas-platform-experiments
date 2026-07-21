@@ -929,7 +929,7 @@ export const ja = defineLocale({
       constellation: {
         ariaLabel: 'Atlas のメインブレインとすべてのワーカーブレインを表示するコンステレーション。',
         backToConstellation: 'すべてのブレイン',
-        boundedOverview: '高速な全体表示のため、各ブレインを個別に制限しています。開くと完全なグラフを確認できます。',
+        lodOverview: '実データの件数が空全体を形作ります。集約スターを拡大すると実ノードを展開します。',
         cortexDisabled: 'Cortex オフ',
         description: 'Atlas のメインブレインとすべてのワーカーブレインを、知識を統合せず一つの空に表示します。',
         disabledBrainDescription: brain =>
@@ -944,7 +944,7 @@ export const ja = defineLocale({
         unavailableBrainDescription: brain =>
           `${brain} の Cortex ストアに接続できませんでした。グラフを仮データで置き換えてはいません。`,
         unavailableBrainTitle: 'ブレインを利用できません',
-        visibleNodes: '表示ノード',
+        totalNodes: '総ノード数',
         workers: 'ワーカー'
       },
       defaultBrain: 'デフォルトのブレイン',
@@ -953,6 +953,8 @@ export const ja = defineLocale({
       emptyBrainTitle: 'このブレインは空です',
       noMatchesDescription: '別の語句、ノード種別、または知識ドメインを試してください。',
       noMatchesTitle: '一致するノードはありません',
+      resolving: '実ノードを展開中',
+      totalNodes: '総ノード数',
       nodeTypes: {
         community: 'コミュニティ',
         document: 'ドキュメント',
@@ -961,7 +963,8 @@ export const ja = defineLocale({
         memory: 'メモリ',
         session: 'セッション'
       },
-      typeFilterLabel: 'ノード種別'
+      typeFilterLabel: 'ノード種別',
+      zoomToResolve: '集約スターを拡大して実ノードを展開'
     }
   },
   agents: {

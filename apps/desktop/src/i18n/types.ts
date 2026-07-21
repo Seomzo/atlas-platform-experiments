@@ -798,7 +798,7 @@ export interface Translations {
       constellation: {
         ariaLabel: string
         backToConstellation: string
-        boundedOverview: string
+        lodOverview: string
         cortexDisabled: string
         description: string
         disabledBrainDescription: (brain: string) => string
@@ -811,7 +811,7 @@ export interface Translations {
         unavailable: string
         unavailableBrainDescription: (brain: string) => string
         unavailableBrainTitle: string
-        visibleNodes: string
+        totalNodes: string
         workers: string
       }
       defaultBrain: string
@@ -819,6 +819,8 @@ export interface Translations {
       emptyBrainTitle: string
       noMatchesDescription: string
       noMatchesTitle: string
+      resolving: string
+      totalNodes: string
       nodeTypes: {
         community: string
         document: string
@@ -828,6 +830,7 @@ export interface Translations {
         session: string
       }
       typeFilterLabel: string
+      zoomToResolve: string
     }
   }
   agents: {

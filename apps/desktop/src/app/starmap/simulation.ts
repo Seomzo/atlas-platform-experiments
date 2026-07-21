@@ -1,6 +1,7 @@
 import {
   forceCollide,
   forceLink,
+  type ForceLink,
   forceManyBody,
   forceRadial,
   forceSimulation,
@@ -11,12 +12,12 @@ import {
 
 import type { StarmapGraph, StarmapNode } from '@/types/hermes'
 
-import { RING_STEPS } from './constants'
+import { RING_STEPS, TILT } from './constants'
 import type { ConstellationScene } from './constellation'
 import { clamp, hash, nodeRadius, radiusForRecency } from './geometry'
 import { formatDate } from './text'
 import { computeRecency, recForRatio } from './time-axis'
-import type { Ring, SimLink, SimNode } from './types'
+import type { Ring, SimLink, SimNode, Viewport } from './types'
 
 export interface BuiltSim {
   byId: Map<string, SimNode>
@@ -27,6 +28,63 @@ export interface BuiltSim {
 }
 
 export type ConstellationSimulationLayout = Pick<ConstellationScene, 'outerRadius' | 'partitions'>
+
+/** Freeze resolved detail outside the viewport and make force work zero-cost for
+ * those nodes. The renderer separately culls their pixels and incident links. */
+export function updateSimulationViewport(
+  simulation: Simulation<SimNode, SimLink>,
+  nodes: SimNode[],
+  links: SimLink[],
+  viewport: Viewport,
+  size: { h: number; w: number },
+  padding = 80
+): number {
+  const activeNodes: SimNode[] = []
+  const activeIds = new Set<string>()
+  let activeCount = 0
+  let changed = false
+
+  for (const node of nodes) {
+    const x = node.x * viewport.k + viewport.x
+    const y = node.y * viewport.k * TILT + viewport.y
+    const active = x >= -padding && x <= size.w + padding && y >= -padding && y <= size.h + padding
+
+    if (node.lodActive !== active) {
+      changed = true
+      node.lodActive = active
+    }
+
+    if (active) {
+      activeCount += 1
+      activeNodes.push(node)
+      activeIds.add(node.id)
+      node.fx = null
+      node.fy = null
+    } else {
+      node.fx = node.x
+      node.fy = node.y
+      node.vx = 0
+      node.vy = 0
+    }
+  }
+
+  if (changed) {
+    const linkForce = simulation.force('link') as ForceLink<SimNode, SimLink> | undefined
+    linkForce?.links([])
+    simulation.nodes(activeNodes)
+    linkForce?.links(
+      links.filter(link => {
+        const source = typeof link.source === 'object' ? link.source.id : String(link.source)
+        const target = typeof link.target === 'object' ? link.target.id : String(link.target)
+
+        return activeIds.has(source) && activeIds.has(target)
+      })
+    )
+    simulation.alpha(0.18).restart()
+  }
+
+  return activeCount
+}
 
 const DAY = 86_400
 
@@ -338,7 +396,10 @@ function buildConstellationSimulation(
   const sim = forceSimulation(nodes)
     .alphaDecay(0.08)
     .velocityDecay(0.68)
-    .force('charge', forceManyBody<SimNode>().strength(-9))
+    .force(
+      'charge',
+      forceManyBody<SimNode>().strength(node => (node.lodActive === false ? 0 : -9))
+    )
     .force(
       'link',
       forceLink<SimNode, SimLink>(links)
@@ -349,7 +410,7 @@ function buildConstellationSimulation(
     .force(
       'collide',
       forceCollide<SimNode>()
-        .radius(node => nodeRadius(node) + 3)
+        .radius(node => (node.lodActive === false ? 0 : nodeRadius(node) + 3))
         .iterations(2)
     )
     .force('partition-x', forceX<SimNode>(node => targets.get(node.id)?.x ?? 0).strength(0.24))
@@ -413,7 +474,10 @@ export function buildSimulation(
   const sim = forceSimulation(nodes)
     .alphaDecay(0.05)
     .velocityDecay(0.62)
-    .force('charge', forceManyBody<SimNode>().strength(-18))
+    .force(
+      'charge',
+      forceManyBody<SimNode>().strength(node => (node.lodActive === false ? 0 : -18))
+    )
     .force(
       'link',
       forceLink<SimNode, SimLink>(links)
@@ -424,7 +488,7 @@ export function buildSimulation(
     .force(
       'collide',
       forceCollide<SimNode>()
-        .radius(n => nodeRadius(n) + 4)
+        .radius(n => (n.lodActive === false ? 0 : nodeRadius(n) + 4))
         .iterations(2)
     )
     .force('radial', forceRadial<SimNode>(n => (n as SimNode).tr, 0, 0).strength(0.92))

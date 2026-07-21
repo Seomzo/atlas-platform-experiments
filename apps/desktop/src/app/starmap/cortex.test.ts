@@ -8,6 +8,11 @@ import { nodeRadius } from './geometry'
 
 function response(): CortexGraphResponse {
   return {
+    aggregates: {
+      relation_count: 1,
+      total_nodes: CORTEX_NODE_TYPES.length,
+      types: CORTEX_NODE_TYPES.map(type => ({ count: 1, type, uncommunitied_count: type === 'community' ? 0 : 1 }))
+    },
     communities: [],
     edges: [
       {

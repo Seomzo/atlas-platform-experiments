@@ -901,7 +901,7 @@ export const zhHant = defineLocale({
       constellation: {
         ariaLabel: '包含 Atlas 主大腦與所有工作單元大腦的星座圖。',
         backToConstellation: '所有大腦',
-        boundedOverview: '為保持總覽流暢，每個大腦都會獨立限量顯示。開啟單一大腦可查看完整圖譜。',
+        lodOverview: '真實計數塑造整片星空。放大聚合星即可解析真實節點。',
         cortexDisabled: 'Cortex 已關閉',
         description: 'Atlas 主大腦與所有工作單元大腦同處一片星空，但不會合併各自的知識。',
         disabledBrainDescription: brain => `${brain} 已關閉 Cortex。為此工作單元啟用 Cortex 後即可建立記憶。`,
@@ -914,7 +914,7 @@ export const zhHant = defineLocale({
         unavailable: '暫不可用',
         unavailableBrainDescription: brain => `無法存取 ${brain} 的 Cortex 儲存區。介面沒有用預留位置資料取代其圖譜。`,
         unavailableBrainTitle: '大腦不可用',
-        visibleNodes: '可見節點',
+        totalNodes: '節點總數',
         workers: '工作單元'
       },
       defaultBrain: '預設大腦',
@@ -922,6 +922,8 @@ export const zhHant = defineLocale({
       emptyBrainTitle: '這個大腦目前是空的',
       noMatchesDescription: '請嘗試其他關鍵字、節點類型或知識領域。',
       noMatchesTitle: '沒有相符的節點',
+      resolving: '正在解析真實節點',
+      totalNodes: '節點總數',
       nodeTypes: {
         community: '社群',
         document: '文件',
@@ -930,7 +932,8 @@ export const zhHant = defineLocale({
         memory: '記憶',
         session: '工作階段'
       },
-      typeFilterLabel: '節點類型'
+      typeFilterLabel: '節點類型',
+      zoomToResolve: '放大聚合星以解析真實節點'
     }
   },
   agents: {

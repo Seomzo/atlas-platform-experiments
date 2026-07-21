@@ -4,8 +4,6 @@ import type { CortexGraphResponse, CortexNodeType, ProfileInfo } from '@/types/h
 
 import {
   buildConstellationScene,
-  CONSTELLATION_TOTAL_NODE_BUDGET,
-  constellationNodeBudget,
   hasOnlyIntraBrainKnowledgeEdges,
   normalizeConstellationProfiles
 } from './constellation'
@@ -30,41 +28,24 @@ function profile(name: string, isDefault = false): ProfileInfo {
 }
 
 function graph(nodeCount: number): CortexGraphResponse {
-  const nodes = Array.from({ length: nodeCount }, (_, index) => ({
-    badges: [],
-    community: null,
-    created_at: `2026-07-${String((index % 20) + 1).padStart(2, '0')}T00:00:00Z`,
-    degree: index === 0 ? 1 : 2,
-    domain: `domain_${index % 4}`,
-    id: `node_${index}`,
-    label: `Node ${index}`,
-    metadata: {},
-    privacy: 'private',
-    status: 'active',
-    summary: `Summary ${index}`,
-    type: NODE_TYPES[index % NODE_TYPES.length]!,
-    updated_at: '2026-07-20T00:00:00Z',
-    usage: index % 7
+  const quotient = Math.floor(nodeCount / NODE_TYPES.length)
+  const remainder = nodeCount % NODE_TYPES.length
+
+  const counts = NODE_TYPES.map((type, index) => ({
+    count: quotient + (index < remainder ? 1 : 0),
+    type,
+    uncommunitied_count: type === 'community' ? 0 : quotient + (index < remainder ? 1 : 0)
   }))
 
   return {
+    aggregates: { relation_count: nodeCount * 2, total_nodes: nodeCount, types: counts },
     communities: [],
-    edges: nodes.slice(1).map((node, index) => ({
-      created_at: '2026-07-20T00:00:00Z',
-      direction: 'directed' as const,
-      id: `edge_${index}`,
-      metadata: {},
-      source: nodes[index]!.id,
-      status: 'active',
-      target: node.id,
-      type: 'fixture_relation',
-      updated_at: '2026-07-20T00:00:00Z'
-    })),
+    edges: [],
     facets: { domains: [], statuses: [], types: [] },
     generated_at: '2026-07-20T00:00:00Z',
     layout_seed: 'fixture',
     next_cursor: null,
-    nodes,
+    nodes: [],
     projection: 'growth',
     redaction_summary: {
       document_bodies_hidden: 0,
@@ -78,12 +59,11 @@ function graph(nodeCount: number): CortexGraphResponse {
 }
 
 describe('brain constellation composition', () => {
-  it('normalizes the main brain first and divides one bounded overview budget', () => {
+  it('normalizes the main brain first without assigning a shared node ceiling', () => {
     const profiles = normalizeConstellationProfiles([profile('zeta'), profile('default', true), profile('alpha')])
 
     expect(profiles.map(item => item.name)).toEqual(['default', 'alpha', 'zeta'])
-    expect(constellationNodeBudget(4)).toBe(105)
-    expect(constellationNodeBudget(4) * 4).toBeLessThanOrEqual(CONSTELLATION_TOTAL_NODE_BUDGET)
+    expect(profiles).toHaveLength(3)
   })
 
   it('partitions every brain into a distinct region anchored to its identity', () => {
@@ -118,10 +98,9 @@ describe('brain constellation composition', () => {
       { graph: graph(4), profile: profile('service'), status: 'ready' }
     ])
 
-    expect(scene.graph.nodes).toHaveLength(8)
-    expect(scene.graph.edges).toHaveLength(6)
+    expect(scene.graph.nodes.length).toBeGreaterThan(0)
+    expect(scene.graph.edges).toHaveLength(0)
     expect(hasOnlyIntraBrainKnowledgeEdges(scene)).toBe(true)
-    expect(scene.graph.edges.every(edge => edge.type === 'fixture_relation')).toBe(true)
     expect(scene.graph.edges.some(edge => edge.type === 'ownership')).toBe(false)
   })
 
@@ -135,12 +114,10 @@ describe('brain constellation composition', () => {
     expect(scene.partitions.map(partition => partition.status)).toEqual(['empty', 'disabled'])
   })
 
-  it('settles a measured 1 main + 3 worker scene within the 420-node envelope', () => {
-    const perBrain = constellationNodeBudget(4)
-
+  it('settles a 50k-node brain fixture as a bounded aggregate scene', () => {
     const scene = buildConstellationScene(
       [profile('default', true), profile('parts'), profile('service'), profile('sales')].map(item => ({
-        graph: graph(perBrain),
+        graph: graph(50_000),
         profile: item,
         status: 'ready' as const
       }))
@@ -150,8 +127,9 @@ describe('brain constellation composition', () => {
     simulation.sim.stop()
     simulation.sim.tick(180)
 
-    expect(scene.graph.nodes).toHaveLength(420)
-    expect(scene.graph.edges).toHaveLength(416)
+    expect(scene.graph.nodes.length).toBeLessThanOrEqual(NODE_TYPES.length * 4)
+    expect(scene.graph.stats.totalNodes).toBe(200_000)
+    expect(scene.graph.edges).toHaveLength(0)
     expect(scene.ownershipEdges).toHaveLength(4)
     expect(simulation.nodes.every(node => Number.isFinite(node.x) && Number.isFinite(node.y))).toBe(true)
   })

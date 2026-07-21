@@ -8,9 +8,12 @@ import {
   $cortexDreamJob,
   $cortexHealth,
   $cortexStatusError,
+  $starmapLodError,
+  $starmapLodResolving,
   loadStarmapGraph,
   refreshCortexDreamStatus,
   refreshCortexHealth,
+  resolveStarmapAggregate,
   runCortexDreamNow
 } from '@/store/starmap'
 import type { CortexNodeType, StarmapGraph, StarmapNode } from '@/types/hermes'
@@ -108,6 +111,8 @@ export function CortexWorkspace({
   const health = useStore($cortexHealth)
   const dream = useStore($cortexDreamJob)
   const statusError = useStore($cortexStatusError)
+  const lodError = useStore($starmapLodError)
+  const lodResolving = useStore($starmapLodResolving)
   const cronJobs = useStore($cronJobs)
   const [query, setQuery] = useState('')
   const [domain, setDomain] = useState<string | null>(null)
@@ -143,23 +148,19 @@ export function CortexWorkspace({
     const counts = new Map<string, number>()
 
     for (const node of graph.nodes) {
-      counts.set(node.category, (counts.get(node.category) ?? 0) + 1)
+      counts.set(node.category, (counts.get(node.category) ?? 0) + (node.aggregate?.count ?? 1))
     }
 
     return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
   }, [graph.nodes])
 
   const typeCounts = useMemo(() => {
-    const counts = new Map<CortexNodeType, number>()
-
-    for (const node of graph.nodes) {
-      if (node.cortexType) {
-        counts.set(node.cortexType, (counts.get(node.cortexType) ?? 0) + 1)
-      }
-    }
-
-    return counts
-  }, [graph.nodes])
+    return new Map(
+      graph.clusters
+        .filter(item => CORTEX_NODE_TYPES.includes(item.category as CortexNodeType))
+        .map(item => [item.category as CortexNodeType, item.count])
+    )
+  }, [graph.clusters])
 
   const matchingNodes = useMemo(
     () => filterCortexNodes(graph.nodes, { domain, hiddenTypes, query }),
@@ -190,12 +191,11 @@ export function CortexWorkspace({
   }, [onSelectNode, selectedNodeId, visibleGraph.nodes])
 
   const systemJob = cronJobs.find(isCortexSystemJob)
-  const memoryCount = health?.counts.memory_records ?? graph.nodes.filter(node => node.cortexType === 'memory').length
-
-  const evidenceCount =
-    health?.counts.evidence_items ?? graph.nodes.filter(node => node.cortexType === 'evidence').length
-
-  const entityCount = health?.counts.entities ?? graph.nodes.filter(node => node.cortexType === 'entity').length
+  const exactTypeCounts = new Map(graph.clusters.map(item => [item.category, item.count]))
+  const totalNodeCount = Number(graph.stats.totalNodes ?? graph.nodes.length)
+  const memoryCount = exactTypeCounts.get('memory') ?? health?.counts.memory_records ?? 0
+  const evidenceCount = exactTypeCounts.get('evidence') ?? health?.counts.evidence_items ?? 0
+  const entityCount = exactTypeCounts.get('entity') ?? health?.counts.entities ?? 0
   const status = health?.status ?? 'checking'
 
   const runRecovery = async () => {
@@ -238,7 +238,7 @@ export function CortexWorkspace({
 
           <dl className="hidden shrink-0 items-center gap-5 xl:flex">
             {[
-              ['Nodes', graph.nodes.length],
+              [t.starmap.cortex.totalNodes, totalNodeCount],
               ['Memories', memoryCount],
               ['Evidence', evidenceCount]
             ].map(([label, value]) => (
@@ -299,7 +299,7 @@ export function CortexWorkspace({
             onClick={() => setDomain(null)}
             type="button"
           >
-            All domains <span className="ml-1 font-mono text-[0.58rem] opacity-60">{graph.nodes.length}</span>
+            All domains <span className="ml-1 font-mono text-[0.58rem] opacity-60">{totalNodeCount}</span>
           </button>
           {domains.map(([name, count]) => (
             <button
@@ -368,7 +368,20 @@ export function CortexWorkspace({
             }}
           />
           {visibleGraph.nodes.length ? (
-            <StarMap graph={visibleGraph} onNodeSelect={onSelectNode} selectedNodeId={selectedNodeId} />
+            <StarMap
+              graph={visibleGraph}
+              lodHint={lodResolving ? t.starmap.cortex.resolving : t.starmap.cortex.zoomToResolve}
+              lodResolving={lodResolving}
+              onNodeSelect={id => {
+                const selected = id ? visibleGraph.nodes.find(node => node.id === id) : null
+
+                if (!selected?.aggregate) {
+                  onSelectNode(id)
+                }
+              }}
+              onResolveAggregate={aggregate => void resolveStarmapAggregate(aggregate)}
+              selectedNodeId={selectedNodeId}
+            />
           ) : (
             <div className="relative z-10 m-auto max-w-sm text-center">
               <div className="mx-auto mb-4 grid size-14 place-items-center rounded-full border border-[#56c8ff]/20 bg-[#56c8ff]/8 text-[#56c8ff]">
@@ -403,6 +416,11 @@ export function CortexWorkspace({
             <div className="pointer-events-none absolute left-4 top-4 z-20 rounded-full border border-[#56c8ff]/15 bg-[#07121f]/85 px-3 py-1.5 text-[0.63rem] text-[#8ea5bc] shadow-lg backdrop-blur-md">
               Showing <span className="font-mono text-[#d9f3ff]">{visibleGraph.nodes.length}</span> of{' '}
               {graph.nodes.length} nodes
+            </div>
+          ) : null}
+          {lodError ? (
+            <div className="pointer-events-none absolute bottom-4 left-4 z-20 rounded-md border border-[#ff938a]/15 bg-[#251117]/85 px-3 py-2 text-[0.62rem] text-[#ffaaa3]">
+              {lodError}
             </div>
           ) : null}
         </main>
@@ -527,7 +545,9 @@ export function CortexWorkspace({
                         <button
                           aria-label={cortexNodeAriaLabel(node)}
                           className="group flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left transition hover:bg-white/[0.045] focus-visible:outline focus-visible:outline-1 focus-visible:outline-[#56c8ff]/60"
-                          onClick={() => onSelectNode(node.id)}
+                          onClick={() =>
+                            node.aggregate ? void resolveStarmapAggregate(node.aggregate) : onSelectNode(node.id)
+                          }
                           type="button"
                         >
                           <span className="mt-1.5 grid size-5 shrink-0 place-items-center rounded-md border border-white/7 bg-white/[0.025]">
