@@ -56,7 +56,7 @@ describe('backend action helpers are profile-scoped', () => {
     await getCortexGraph(250, 'research worker')
 
     expect(api).toHaveBeenLastCalledWith({
-      path: '/api/cognitive/graph?projection=growth&limit=250&profile=research%20worker'
+      path: '/api/cognitive/graph?limit=250&projection=growth&profile=research%20worker'
     })
   })
 
