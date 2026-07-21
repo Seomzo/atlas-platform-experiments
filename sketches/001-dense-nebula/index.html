@@ -1,0 +1,120 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Atlas — Dense Nebula</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #060b16; color: #dbe6f5; overflow: hidden; }
+  #hud { position: fixed; top: 0; left: 0; right: 0; padding: 18px 26px; display: flex; justify-content: space-between; align-items: flex-start; z-index: 10; pointer-events: none; }
+  .brand { letter-spacing: .28em; font-size: 10px; color: #4f7fd9; font-weight: 600; }
+  h1 { font-family: Georgia, serif; font-size: 26px; margin-top: 4px; color: #eef4ff; }
+  .sub { font-size: 12px; color: #6b7f9e; margin-top: 3px; }
+  .stats { display: flex; gap: 26px; text-align: right; }
+  .stat .k { font-size: 9px; letter-spacing: .2em; color: #56688a; }
+  .stat .v { font-size: 18px; font-variant-numeric: tabular-nums; color: #cfe0ff; }
+  #closebtn { pointer-events: all; background: rgba(20,32,54,.8); border: 1px solid #24344f; color: #8fa7cc; width: 34px; height: 34px; border-radius: 9px; font-size: 15px; cursor: pointer; margin-left: 22px; }
+  #closebtn:hover { color: #fff; border-color: #4f7fd9; }
+  #legend { position: fixed; bottom: 16px; left: 20px; display: flex; gap: 14px; font-size: 11px; color: #7d90b0; background: rgba(10,17,30,.72); border: 1px solid #1b2942; padding: 8px 14px; border-radius: 10px; z-index: 10; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+  #workerbar { position: fixed; bottom: 16px; right: 20px; display: flex; gap: 10px; z-index: 10; }
+  .worker { display: flex; align-items: center; gap: 8px; background: rgba(13,22,38,.85); border: 1px solid #22334f; border-radius: 22px; padding: 6px 14px 6px 6px; cursor: pointer; transition: border-color .2s; font-size: 12px; }
+  .worker:hover { border-color: #5b8def; }
+  .worker.active { border-color: #5b8def; box-shadow: 0 0 18px rgba(91,141,239,.25); }
+  .av { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 700; }
+  .worker small { display: block; color: #64789c; font-size: 9px; }
+  canvas { display: block; }
+  #tip { position: fixed; padding: 8px 12px; background: rgba(9,15,28,.95); border: 1px solid #2c4368; border-radius: 8px; font-size: 11px; color: #b9cbe8; pointer-events: none; display: none; z-index: 20; max-width: 240px; }
+  #tip b { color: #eaf2ff; display: block; margin-bottom: 2px; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <div>
+    <div class="brand">● ATLAS COGNITION NETWORK</div>
+    <h1>Memory</h1>
+    <div class="sub">One living nebula. Workers weave into the same sky.</div>
+  </div>
+  <div style="display:flex;align-items:center">
+    <div class="stats">
+      <div class="stat"><div class="k">NODES</div><div class="v">2,698</div></div>
+      <div class="stat"><div class="k">WORKERS</div><div class="v">2</div></div>
+      <div class="stat"><div class="k">GROWTH 7D</div><div class="v" style="color:#7ee2a8">+312</div></div>
+    </div>
+    <button id="closebtn" title="Close">✕</button>
+  </div>
+</div>
+<div id="legend">
+  <span><span class="dot" style="background:#5b8def"></span>Entities</span>
+  <span><span class="dot" style="background:#e8b34b"></span>Memories</span>
+  <span><span class="dot" style="background:#9a6df2"></span>Evidence</span>
+  <span><span class="dot" style="background:#4bc8e8"></span>Sessions</span>
+  <span><span class="dot" style="background:#f26d9a"></span>Communities</span>
+</div>
+<div id="workerbar">
+  <div class="worker active" data-w="all"><div class="av" style="background:#1d3b6e;color:#9cc0ff">A</div><div>Atlas<small>whole sky</small></div></div>
+  <div class="worker" data-w="codex"><div class="av" style="background:#5a3d14;color:#ffd37a">C</div><div>Codex<small>dim others</small></div></div>
+  <div class="worker" data-w="svc"><div class="av" style="background:#14424a;color:#7ae2f2">S</div><div>Service<small>dim others</small></div></div>
+</div>
+<div id="tip"></div>
+<canvas id="c"></canvas>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let W, H; const resize = () => { W = cv.width = innerWidth * devicePixelRatio; H = cv.height = innerHeight * devicePixelRatio; cv.style.width = innerWidth+'px'; cv.style.height = innerHeight+'px'; };
+resize(); addEventListener('resize', resize);
+const TYPES = [
+  {c:'#5b8def', n:'Entity', w:.34}, {c:'#e8b34b', n:'Memory', w:.16},
+  {c:'#9a6df2', n:'Evidence', w:.36}, {c:'#4bc8e8', n:'Session', w:.10}, {c:'#f26d9a', n:'Community', w:.04}
+];
+const OWNERS = ['all','all','all','all','all','all','codex','svc'];
+const N = 1500, nodes = [], edges = [];
+function pickType(){ let r=Math.random(),a=0; for(const t of TYPES){a+=t.w; if(r<a) return t;} return TYPES[0]; }
+// several gravity wells so it reads as one nebula with sub-clusters
+const wells = Array.from({length:11},(_,i)=>({ x:(.08+.84*Math.random())*innerWidth, y:(.16+.68*Math.random())*innerHeight, owner: OWNERS[Math.floor(Math.random()*OWNERS.length)] }));
+for(let i=0;i<N;i++){
+  const wl = wells[Math.floor(Math.random()*wells.length)];
+  const a = Math.random()*Math.PI*2, r = Math.pow(Math.random(),.5)*130;
+  const t = pickType();
+  nodes.push({ x:wl.x+Math.cos(a)*r, y:wl.y+Math.sin(a)*r, vx:0, vy:0, t, owner:wl.owner,
+    r: t.n==='Community' ? 4.5+Math.random()*3 : 1.2+Math.random()*2.2, tw: Math.random()*Math.PI*2 });
+}
+for(let i=0;i<N;i++){ for(let k=0;k<2;k++){ const j = Math.floor(Math.random()*N); if(i!==j && Math.hypot(nodes[i].x-nodes[j].x, nodes[i].y-nodes[j].y) < 120) edges.push([i,j]); } }
+let focus = 'all', mx=-1, my=-1;
+document.querySelectorAll('.worker').forEach(el=>el.onclick=()=>{ document.querySelectorAll('.worker').forEach(e=>e.classList.remove('active')); el.classList.add('active'); focus = el.dataset.w; });
+document.getElementById('closebtn').onclick=()=>alert('(mock) closes overlay back to chat');
+cv.onmousemove = e => { mx = e.clientX; my = e.clientY; };
+const tip = document.getElementById('tip');
+let t0 = 0;
+function frame(ts){
+  const dt = Math.min(32, ts-t0); t0 = ts;
+  ctx.clearRect(0,0,W,H); ctx.save(); ctx.scale(devicePixelRatio, devicePixelRatio);
+  // edges
+  ctx.lineWidth = .5;
+  for(const [i,j] of edges){
+    const a = nodes[i], b = nodes[j];
+    const dim = focus!=='all' && a.owner!==focus && b.owner!==focus;
+    ctx.strokeStyle = dim ? 'rgba(60,80,120,.05)' : 'rgba(91,141,239,.10)';
+    ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+  }
+  // nodes with slow drift + twinkle
+  let hover = null;
+  for(const n of nodes){
+    n.tw += .001*dt; n.x += Math.cos(n.tw)*.05; n.y += Math.sin(n.tw*1.3)*.05;
+    const dim = focus!=='all' && n.owner!==focus;
+    const tw = .6 + .4*Math.sin(n.tw*2);
+    ctx.globalAlpha = dim ? .07 : (n.t.n==='Community' ? .95 : .45 + .45*tw);
+    ctx.fillStyle = n.t.c;
+    ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, 7); ctx.fill();
+    if(n.t.n==='Community' && !dim){ ctx.globalAlpha=.12; ctx.beginPath(); ctx.arc(n.x,n.y,n.r*4,0,7); ctx.fill(); }
+    if(Math.hypot(n.x-mx,n.y-my) < 8 && !dim) hover = n;
+  }
+  ctx.globalAlpha = 1; ctx.restore();
+  if(hover){ tip.style.display='block'; tip.style.left=(mx+14)+'px'; tip.style.top=(my+10)+'px';
+    tip.innerHTML = `<b>${hover.t.n}</b>learned by ${hover.owner==='all'?'Atlas':hover.owner} · July 2026<br><span style="color:#5f7396">click to inspect · right-click to dispute</span>`;
+  } else tip.style.display='none';
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
