@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { CortexGraphResponse, CortexHealthResponse, StarmapGraph } from '@/types/hermes'
+import type { CortexGraphResponse, CortexHealthResponse, ProfileInfo, StarmapGraph } from '@/types/hermes'
 
 const getCortexGraph = vi.fn<(limit?: number, profile?: null | string) => Promise<CortexGraphResponse>>()
 const getCortexHealth = vi.fn<(profile?: null | string) => Promise<CortexHealthResponse>>()
@@ -64,6 +64,22 @@ const legacy = (label: string): StarmapGraph => ({
   ],
   stats: {}
 })
+
+function profile(name: string, isDefault = false): ProfileInfo {
+  return {
+    display_name: isDefault ? 'Atlas' : name,
+    gateway_running: false,
+    has_avatar: false,
+    has_env: true,
+    is_default: isDefault,
+    model: null,
+    name,
+    path: `/tmp/${name}`,
+    provider: null,
+    role: isDefault ? 'main' : 'worker',
+    skill_count: 0
+  }
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -164,6 +180,18 @@ describe('starmap Cortex loading', () => {
     expect(getStarmapGraph).not.toHaveBeenCalled()
   })
 
+  it('keeps Cortex-disabled brains explicit instead of falling back to legacy data', async () => {
+    getCortexGraph.mockRejectedValueOnce(
+      Object.assign(new Error('503: Atlas Cortex is disabled for this profile'), { statusCode: 503 })
+    )
+
+    await store.selectStarmapBrain('default')
+
+    expect(store.$starmapBrainStatus.get()).toBe('disabled')
+    expect(store.$starmapGraph.get()).toBeNull()
+    expect(getStarmapGraph).not.toHaveBeenCalled()
+  })
+
   it('prevents a slow previous brain from overwriting the selected brain', async () => {
     const oldBrain = deferred<CortexGraphResponse>()
     getCortexGraph.mockReturnValueOnce(oldBrain.promise)
@@ -177,5 +205,46 @@ describe('starmap Cortex loading', () => {
 
     expect(store.$starmapBrainProfile.get()).toBe('current-worker')
     expect(store.$starmapGraph.get()?.nodes[0]?.label).toBe('current-worker')
+  })
+
+  it('loads every brain independently with a proportional overview budget', async () => {
+    const profiles = [profile('default', true), profile('parts'), profile('service'), profile('sales')]
+    getCortexGraph.mockImplementation(async (_limit, brain) => {
+      if (brain === 'service') {
+        throw Object.assign(new Error('503: Atlas Cortex is disabled for this profile'), { statusCode: 503 })
+      }
+
+      return brain === 'sales' ? { ...cortex('sales'), nodes: [] } : cortex(String(brain))
+    })
+
+    await store.showStarmapConstellation(profiles)
+
+    expect(getCortexGraph).toHaveBeenCalledTimes(4)
+    expect(getCortexGraph.mock.calls.every(([limit]) => limit === 105)).toBe(true)
+    expect(store.$starmapConstellation.get()?.partitions.map(partition => partition.status)).toEqual([
+      'ready',
+      'ready',
+      'empty',
+      'disabled'
+    ])
+    expect(store.$starmapConstellation.get()?.graph.nodes).toHaveLength(2)
+    expect(store.$starmapMode.get()).toBe('constellation')
+  })
+
+  it('transitions from constellation to an isolated brain and back without shrinking the isolated limit', async () => {
+    const profiles = [profile('default', true), profile('service')]
+    getCortexGraph.mockImplementation(async (_limit, brain) => cortex(String(brain)))
+
+    await store.showStarmapConstellation(profiles)
+    await store.selectStarmapBrain('service')
+
+    expect(store.$starmapMode.get()).toBe('brain')
+    expect(store.$starmapBrainProfile.get()).toBe('service')
+    expect(getCortexGraph).toHaveBeenLastCalledWith(500, 'service')
+
+    await store.showStarmapConstellation(profiles)
+
+    expect(store.$starmapMode.get()).toBe('constellation')
+    expect(store.$starmapBrainProfile.get()).toBe('default')
   })
 })

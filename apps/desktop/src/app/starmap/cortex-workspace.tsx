@@ -13,7 +13,7 @@ import {
   refreshCortexHealth,
   runCortexDreamNow
 } from '@/store/starmap'
-import type { CortexNodeType, ProfileInfo, StarmapGraph, StarmapNode } from '@/types/hermes'
+import type { CortexNodeType, StarmapGraph, StarmapNode } from '@/types/hermes'
 
 import { CORTEX_NODE_VISUALS } from './constants'
 import { CORTEX_NODE_TYPES, cortexNodeAriaLabel, filterCortexNodes } from './cortex'
@@ -23,11 +23,11 @@ import { StarMap } from './star-map'
 import { isCortexSystemJob } from './system-job'
 
 interface CortexWorkspaceProps {
+  brainName: string
   brainProfile: string
   graph: StarmapGraph
-  onBrainChange: (profile: string) => void
+  onBack: () => void
   onSelectNode: (id: null | string) => void
-  profiles: ProfileInfo[]
   selectedNodeId: null | string
 }
 
@@ -84,7 +84,7 @@ function NodeGlyph({ node }: { node: StarmapNode }) {
   return <TypeGlyph type={type} />
 }
 
-function TypeGlyph({ type }: { type: CortexNodeType }) {
+export function TypeGlyph({ type }: { type: CortexNodeType }) {
   const visual = CORTEX_NODE_VISUALS[type]
 
   return (
@@ -97,11 +97,11 @@ function TypeGlyph({ type }: { type: CortexNodeType }) {
 }
 
 export function CortexWorkspace({
+  brainName,
   brainProfile,
   graph,
-  onBrainChange,
+  onBack,
   onSelectNode,
-  profiles,
   selectedNodeId
 }: CortexWorkspaceProps) {
   const { t } = useI18n()
@@ -148,14 +148,6 @@ export function CortexWorkspace({
 
     return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
   }, [graph.nodes])
-
-  const brains = useMemo(() => {
-    const named = profiles
-      .filter(profile => !profile.is_default && profile.name !== 'default')
-      .sort((a, b) => a.display_name.localeCompare(b.display_name) || a.name.localeCompare(b.name))
-
-    return named
-  }, [profiles])
 
   const typeCounts = useMemo(() => {
     const counts = new Map<CortexNodeType, number>()
@@ -257,26 +249,17 @@ export function CortexWorkspace({
             ))}
           </dl>
 
-          <label className="flex h-9 max-w-48 shrink-0 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.045] px-2.5 text-[#8da4ba] transition focus-within:border-[#56c8ff]/55">
-            <Codicon name="server-environment" size="0.8rem" />
-            <span className="sr-only">{t.starmap.cortex.brainLabel}</span>
-            <select
-              aria-label={t.starmap.cortex.brainLabel}
-              className="min-w-0 flex-1 bg-transparent text-[0.68rem] text-[#c5d8e9] outline-none"
-              onChange={event => onBrainChange(event.target.value)}
-              value={brainProfile}
-            >
-              <option value="default">{t.starmap.cortex.defaultBrain}</option>
-              {brainProfile !== 'default' && !brains.some(profile => profile.name === brainProfile) ? (
-                <option value={brainProfile}>{brainProfile}</option>
-              ) : null}
-              {brains.map(profile => (
-                <option key={profile.name} value={profile.name}>
-                  {profile.display_name || profile.name}
-                </option>
-              ))}
-            </select>
-          </label>
+          <button
+            className="flex h-9 max-w-56 shrink-0 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.045] px-3 text-[#8da4ba] transition hover:border-[#56c8ff]/25 hover:bg-white/[0.065] hover:text-[#d9efff]"
+            onClick={onBack}
+            title={t.starmap.cortex.constellation.backToConstellation}
+            type="button"
+          >
+            <Codicon name="arrow-left" size="0.75rem" />
+            <span className="truncate text-[0.66rem]">{t.starmap.cortex.constellation.backToConstellation}</span>
+            <span className="text-white/20">/</span>
+            <span className="truncate text-[0.66rem] text-[#c5d8e9]">{brainName}</span>
+          </button>
 
           <label className="group flex h-9 w-56 shrink-0 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.045] px-3 transition focus-within:border-[#56c8ff]/55 focus-within:bg-white/[0.065] xl:w-64">
             <Codicon className="text-[#6f879f] group-focus-within:text-[#56c8ff]" name="search" size="0.85rem" />

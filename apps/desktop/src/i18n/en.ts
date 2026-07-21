@@ -912,6 +912,27 @@ export const en: Translations = {
     cortex: {
       brainLabel: 'Brain',
       clearFilters: 'Clear filters',
+      constellation: {
+        ariaLabel: 'Atlas brain constellation with the main brain and every worker brain.',
+        backToConstellation: 'All brains',
+        boundedOverview: 'Each brain is sampled independently for a fast overview. Open one to see its full graph.',
+        cortexDisabled: 'Cortex off',
+        description: 'The main Atlas brain and every worker brain, together without merging their knowledge.',
+        disabledBrainDescription: brain =>
+          `${brain} has Cortex turned off. Enable Cortex for this worker to build memory.`,
+        disabledBrainTitle: 'Cortex is turned off',
+        eyebrow: 'Atlas cognition network',
+        noMemoryYet: 'No memory yet',
+        nodes: count => `${count} ${count === 1 ? 'node' : 'nodes'}`,
+        openBrain: brain => `Open ${brain} brain`,
+        title: 'Brain Constellation',
+        unavailable: 'Unavailable',
+        unavailableBrainDescription: brain =>
+          `${brain}'s Cortex store could not be reached. Its graph was not replaced with placeholder data.`,
+        unavailableBrainTitle: 'Brain unavailable',
+        visibleNodes: 'Visible nodes',
+        workers: 'Workers'
+      },
       defaultBrain: 'Default brain',
       emptyBrainDescription: brain =>
         `${brain} has no Cortex data yet. Memories and graph structure will appear here as it works.`,

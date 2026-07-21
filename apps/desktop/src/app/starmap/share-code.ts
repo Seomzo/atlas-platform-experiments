@@ -190,3 +190,35 @@ export function encodeShareCode(graph: StarmapGraph): string {
 export function decodeShareCode(code: string): StarmapGraph {
   return codec.decode(code)
 }
+
+export type StarmapViewMode = 'brain' | 'constellation'
+
+export interface StarmapViewState {
+  brainProfile: string
+  mode: StarmapViewMode
+}
+
+/** Encode only navigation state for `/starmap`; no graph data or memory text is
+ * included. Keeping this beside the loadout codec gives every Starmap link one
+ * explicit serialization boundary. */
+export function encodeStarmapViewState(state: StarmapViewState): string {
+  const params = new URLSearchParams()
+  params.set('view', state.mode)
+
+  if (state.mode === 'brain') {
+    params.set('brain', state.brainProfile.trim() || 'default')
+  }
+
+  return params.toString()
+}
+
+export function decodeStarmapViewState(value: string): StarmapViewState {
+  const params = new URLSearchParams(value.startsWith('?') ? value.slice(1) : value)
+  const brainProfile = params.get('brain')?.trim()
+
+  if (params.get('view') === 'brain' && brainProfile) {
+    return { brainProfile, mode: 'brain' }
+  }
+
+  return { brainProfile: 'default', mode: 'constellation' }
+}

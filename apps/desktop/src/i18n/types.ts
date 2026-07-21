@@ -795,6 +795,25 @@ export interface Translations {
     cortex: {
       brainLabel: string
       clearFilters: string
+      constellation: {
+        ariaLabel: string
+        backToConstellation: string
+        boundedOverview: string
+        cortexDisabled: string
+        description: string
+        disabledBrainDescription: (brain: string) => string
+        disabledBrainTitle: string
+        eyebrow: string
+        noMemoryYet: string
+        nodes: (count: number) => string
+        openBrain: (brain: string) => string
+        title: string
+        unavailable: string
+        unavailableBrainDescription: (brain: string) => string
+        unavailableBrainTitle: string
+        visibleNodes: string
+        workers: string
+      }
       defaultBrain: string
       emptyBrainDescription: (brain: string) => string
       emptyBrainTitle: string

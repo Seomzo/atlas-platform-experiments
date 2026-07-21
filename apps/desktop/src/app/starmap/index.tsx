@@ -1,72 +1,200 @@
 import { useStore } from '@nanostores/react'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 
+import { STARMAP_ROUTE } from '@/app/routes'
 import { PageLoader } from '@/components/page-loader'
+import { Codicon } from '@/components/ui/codicon'
 import { getProfiles } from '@/hermes'
 import { useI18n } from '@/i18n'
 import {
   $starmapBrainProfile,
+  $starmapBrainStatus,
+  $starmapConstellation,
   $starmapError,
   $starmapGraph,
   $starmapLoading,
-  loadStarmapGraph,
-  selectStarmapBrain
+  $starmapMode,
+  selectStarmapBrain,
+  showStarmapConstellation
 } from '@/store/starmap'
 import type { ProfileInfo, StarmapGraph } from '@/types/hermes'
 
 import { Panel, PanelEmpty } from '../overlays/panel'
 
+import { normalizeConstellationProfiles } from './constellation'
+import { ConstellationOverview } from './constellation-overview'
 import { CortexWorkspace } from './cortex-workspace'
+import { decodeStarmapViewState, encodeStarmapViewState } from './share-code'
 import { StarMap } from './star-map'
 
-// Star map overlay: a top-down map of what Atlas has learned for a profile,
-// over a radial time axis. Data is fetched on demand into the $starmap* atoms;
-// the map itself lives in ./star-map. The chrome is owned by the map itself
-// (timeline scrubber + legend float over the canvas), so there's no panel
-// header here.
+function BrainUnavailable({
+  brainName,
+  detail,
+  disabled,
+  onBack,
+  title
+}: {
+  brainName: string
+  detail: string
+  disabled: boolean
+  onBack: () => void
+  title: string
+}) {
+  const { t } = useI18n()
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col bg-[#050b14] text-[#e9f5ff]">
+      <header className="shrink-0 border-b border-white/8 bg-[#07101c]/94 px-6 py-4">
+        <button
+          className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.045] px-3 py-2 text-[0.68rem] text-[#9ab0c4] transition hover:bg-white/[0.07] hover:text-white"
+          onClick={onBack}
+          type="button"
+        >
+          <Codicon name="arrow-left" size="0.75rem" />
+          {t.starmap.cortex.constellation.backToConstellation}
+          <span className="text-white/20">/</span>
+          <span className="text-[#d9efff]">{brainName}</span>
+        </button>
+      </header>
+      <div className="relative grid min-h-0 flex-1 place-items-center overflow-hidden px-6 text-center">
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0"
+          style={{
+            backgroundImage:
+              'radial-gradient(circle at 50% 48%, rgba(43,131,185,.15), transparent 28%), linear-gradient(rgba(92,158,200,.022) 1px, transparent 1px), linear-gradient(90deg, rgba(92,158,200,.022) 1px, transparent 1px)',
+            backgroundSize: 'auto, 30px 30px, 30px 30px'
+          }}
+        />
+        <div className="relative max-w-sm">
+          <div
+            className={`mx-auto grid size-16 place-items-center rounded-full border ${
+              disabled
+                ? 'border-[#d48787]/24 bg-[#d48787]/7 text-[#cb8d92]'
+                : 'border-[#c7a579]/20 bg-[#c7a579]/7 text-[#bea077]'
+            }`}
+          >
+            <Codicon name={disabled ? 'circle-slash' : 'debug-disconnect'} size="1.35rem" />
+          </div>
+          <h1 className="mt-5 text-lg font-semibold text-white">{title}</h1>
+          <p className="mt-2 text-xs leading-relaxed text-[#748ba1]">{detail}</p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// The default route is the full constellation. A `view=brain&brain=...` query
+// is a validated deep link into the existing isolated Cortex workspace.
 export function StarmapView({ onClose }: { onClose: () => void }) {
   const { t } = useI18n()
+  const location = useLocation()
+  const navigate = useNavigate()
   const graph = useStore($starmapGraph)
   const loading = useStore($starmapLoading)
   const error = useStore($starmapError)
   const brainProfile = useStore($starmapBrainProfile)
+  const brainStatus = useStore($starmapBrainStatus)
+  const constellation = useStore($starmapConstellation)
+  const mode = useStore($starmapMode)
 
-  // A pasted share code populates the map with someone else's (or an exported)
-  // graph, overriding the live profile scan. Cleared by "back to my map" and
-  // whenever a fresh profile graph loads in.
   const [imported, setImported] = useState<StarmapGraph | null>(null)
   const [selectedCortexNode, setSelectedCortexNode] = useState<null | string>(null)
   const [profiles, setProfiles] = useState<ProfileInfo[]>([])
+  const [profilesLoaded, setProfilesLoaded] = useState(false)
 
   useEffect(() => {
-    void loadStarmapGraph()
+    let cancelled = false
+
     void getProfiles().then(
-      result => setProfiles(result.profiles),
-      () => setProfiles([])
+      result => {
+        if (!cancelled) {
+          setProfiles(result.profiles)
+          setProfilesLoaded(true)
+        }
+      },
+      () => {
+        if (!cancelled) {
+          setProfiles([])
+          setProfilesLoaded(true)
+        }
+      }
     )
+
+    return () => void (cancelled = true)
   }, [])
 
-  // Drop a stale import when the underlying profile graph changes out from under it.
+  const brains = useMemo(() => normalizeConstellationProfiles(profiles), [profiles])
+
+  useEffect(() => {
+    if (!profilesLoaded) {
+      return
+    }
+
+    const state = decodeStarmapViewState(location.search)
+    const knownBrain = brains.some(profile => profile.name === state.brainProfile)
+
+    if (state.mode === 'brain' && knownBrain) {
+      void selectStarmapBrain(state.brainProfile)
+    } else {
+      if (state.mode === 'brain') {
+        navigate(STARMAP_ROUTE, { replace: true })
+      }
+
+      void showStarmapConstellation(brains)
+    }
+  }, [brains, location.search, navigate, profilesLoaded])
+
   useEffect(() => {
     setImported(null)
     setSelectedCortexNode(null)
-  }, [graph])
+  }, [graph, mode])
 
+  const openBrain = (profile: string) => {
+    navigate(`${STARMAP_ROUTE}?${encodeStarmapViewState({ brainProfile: profile, mode: 'brain' })}`)
+  }
+
+  const backToConstellation = () => navigate(STARMAP_ROUTE)
+  const selectedProfile = brains.find(profile => profile.name === brainProfile)
+  const brainName = selectedProfile?.display_name.trim() || selectedProfile?.name || brainProfile
   const shown = imported ?? graph
-  const cortex = !imported && shown?.source === 'cortex'
+  const cortex = mode === 'brain' && !imported && shown?.source === 'cortex'
+  const immersive = mode === 'constellation' || cortex || brainStatus === 'disabled' || brainStatus === 'unavailable'
+  const copy = t.starmap.cortex.constellation
 
   return (
     <Panel
       className={
-        cortex
+        immersive
           ? 'border-white/10! bg-[#050b14]! [--chrome-action-hover:rgba(255,255,255,0.08)] [--ui-text-tertiary:#9db2c7]'
           : undefined
       }
       closeLabel={t.starmap.close}
-      contentClassName={cortex ? 'p-0!' : undefined}
+      contentClassName={immersive ? 'p-0!' : undefined}
       onClose={onClose}
     >
-      {error ? (
+      {!profilesLoaded || (loading && mode === 'constellation' && !constellation) ? (
+        <PageLoader aria-label={t.starmap.loading} className="min-h-0 flex-1" />
+      ) : mode === 'constellation' && constellation ? (
+        <ConstellationOverview onOpenBrain={openBrain} scene={constellation} />
+      ) : mode === 'brain' && brainStatus === 'disabled' ? (
+        <BrainUnavailable
+          brainName={brainName}
+          detail={copy.disabledBrainDescription(brainName)}
+          disabled
+          onBack={backToConstellation}
+          title={copy.disabledBrainTitle}
+        />
+      ) : mode === 'brain' && brainStatus === 'unavailable' ? (
+        <BrainUnavailable
+          brainName={brainName}
+          detail={copy.unavailableBrainDescription(brainName)}
+          disabled={false}
+          onBack={backToConstellation}
+          title={copy.unavailableBrainTitle}
+        />
+      ) : error ? (
         <PanelEmpty description={error} icon="warning" title={t.starmap.loadFailed} />
       ) : !shown && loading ? (
         <PageLoader aria-label={t.starmap.loading} className="min-h-0 flex-1" />
@@ -74,20 +202,27 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
         <PanelEmpty description={t.starmap.emptyDesc} icon="lightbulb" title={t.starmap.emptyTitle} />
       ) : shown && cortex ? (
         <CortexWorkspace
+          brainName={brainName}
           brainProfile={brainProfile}
           graph={shown}
-          onBrainChange={profile => {
-            setImported(null)
-            setSelectedCortexNode(null)
-            void selectStarmapBrain(profile)
-          }}
+          onBack={backToConstellation}
           onSelectNode={setSelectedCortexNode}
-          profiles={profiles}
           selectedNodeId={selectedCortexNode}
         />
       ) : shown ? (
-        <div className="flex min-h-0 flex-1">
-          <div className="relative min-w-0 flex-1">
+        <div className="flex min-h-0 flex-1 flex-col">
+          {mode === 'brain' ? (
+            <div className="shrink-0 border-b px-4 py-2">
+              <button
+                className="text-xs text-muted-foreground hover:text-foreground"
+                onClick={backToConstellation}
+                type="button"
+              >
+                ← {copy.backToConstellation} / {brainName}
+              </button>
+            </div>
+          ) : null}
+          <div className="relative min-h-0 min-w-0 flex-1">
             <StarMap
               graph={shown}
               imported={imported !== null}

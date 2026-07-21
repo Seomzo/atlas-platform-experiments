@@ -2,7 +2,13 @@ import { describe, expect, it } from 'vitest'
 
 import type { StarmapGraph } from '@/types/hermes'
 
-import { decodeShareCode, encodeShareCode, ShareCodeError } from './share-code'
+import {
+  decodeShareCode,
+  decodeStarmapViewState,
+  encodeShareCode,
+  encodeStarmapViewState,
+  ShareCodeError
+} from './share-code'
 
 function sampleGraph(): StarmapGraph {
   return {
@@ -175,5 +181,15 @@ describe('share-code', () => {
 
     expect(() => decodeShareCode(wrapped)).not.toThrow()
     expect(decodeShareCode(wrapped).nodes).toHaveLength(sampleGraph().nodes.length)
+  })
+
+  it('round-trips constellation mode and an encoded brain selection', () => {
+    const isolated = { brainProfile: 'service / west', mode: 'brain' as const }
+
+    expect(decodeStarmapViewState(encodeStarmapViewState(isolated))).toEqual(isolated)
+    expect(decodeStarmapViewState(encodeStarmapViewState({ brainProfile: 'ignored', mode: 'constellation' }))).toEqual({
+      brainProfile: 'default',
+      mode: 'constellation'
+    })
   })
 })

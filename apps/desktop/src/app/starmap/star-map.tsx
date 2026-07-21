@@ -23,6 +23,7 @@ import { drawScene, drawScramble } from './render'
 import { decodeShareCode, encodeShareCode, ShareCodeError } from './share-code'
 import { ShareControls } from './share-controls'
 import { buildSimulation } from './simulation'
+import type { ConstellationSimulationLayout } from './simulation'
 import { formatDate } from './text'
 import { buildTimeAxis, dateAtReveal, type TimeAxis } from './time-axis'
 import { Timeline } from './timeline'
@@ -111,6 +112,8 @@ function RevealLabel({ axis, revealStore }: { axis: TimeAxis; revealStore: Writa
 // at the core, newest on the outer rings. This component owns the refs, effects
 // and pointer wiring; layout lives in simulation.ts and painting in render.ts.
 export function StarMap({
+  ariaLabel,
+  constellation,
   graph,
   imported = false,
   onImport,
@@ -118,6 +121,8 @@ export function StarMap({
   onResetMap,
   selectedNodeId
 }: {
+  ariaLabel?: string
+  constellation?: ConstellationSimulationLayout
   graph: StarmapGraph
   imported?: boolean
   onImport?: (graph: StarmapGraph) => void
@@ -203,6 +208,7 @@ export function StarMap({
   const camRadiusRef = useRef(RING_OUTER)
   const timeAxis = useMemo(() => buildTimeAxis(graph, 72), [graph])
   const cortex = graph.source === 'cortex'
+  const constellationMode = Boolean(constellation)
 
   // The current map as a WoW-style share code, recomputed only when the graph
   // changes (encode walks every node/edge/card, so don't redo it per render).
@@ -391,22 +397,28 @@ export function StarMap({
       return
     }
 
-    const { byId, links, nodes, rings, sim } = buildSimulation(graph, () => {
-      // Cortex never drifts: while the simulation settles, keep either the graph
-      // origin or the selected node pinned to the visual center at the current
-      // zoom. Camera transitions own x/y only for their brief animation.
-      if (cortex && !cameraAnimatingRef.current && cameraModeRef.current !== 'free') {
-        const focus =
-          cameraModeRef.current === 'focus' && selectedIdRef.current ? byIdRef.current.get(selectedIdRef.current) : null
+    const { byId, links, nodes, rings, sim } = buildSimulation(
+      graph,
+      () => {
+        // Cortex never drifts: while the simulation settles, keep either the graph
+        // origin or the selected node pinned to the visual center at the current
+        // zoom. Camera transitions own x/y only for their brief animation.
+        if (cortex && !cameraAnimatingRef.current && cameraModeRef.current !== 'free') {
+          const focus =
+            cameraModeRef.current === 'focus' && selectedIdRef.current
+              ? byIdRef.current.get(selectedIdRef.current)
+              : null
 
-        const { h, w } = sizeRef.current
-        const centered = centerViewportOn(w, h, focus?.x ?? 0, focus?.y ?? 0, viewportRef.current.k)
+          const { h, w } = sizeRef.current
+          const centered = centerViewportOn(w, h, focus?.x ?? 0, focus?.y ?? 0, viewportRef.current.k)
 
-        viewportRef.current = centered
-      }
+          viewportRef.current = centered
+        }
 
-      invalidate()
-    })
+        invalidate()
+      },
+      constellation
+    )
 
     simRef.current = sim
     nodesRef.current = nodes
@@ -432,7 +444,7 @@ export function StarMap({
         simRef.current = null
       }
     }
-  }, [cortex, fitMapViewport, graph, invalidate, resetFades, selectNode, size])
+  }, [constellation, cortex, fitMapViewport, graph, invalidate, resetFades, selectNode, size])
 
   // Selecting a Cortex node becomes a deliberate camera transition: center the
   // node and move into a closer neighborhood view. Clearing selection (Back,
@@ -740,6 +752,7 @@ export function StarMap({
           selectedRing: selectedRingRef.current,
           size: sizeRef.current,
           snapMotion: snapMotionRef.current,
+          showStructure: !constellationMode,
           vp: viewportRef.current
         })
 
@@ -759,12 +772,18 @@ export function StarMap({
       ctx.clearRect(0, 0, canvas.width, canvas.height)
 
       if (focused) {
-        drawScramble({ ctx, dpr: dprRef.current, palette, rings: ringsRef.current, vp: viewportRef.current })
+        if (!constellationMode) {
+          drawScramble({ ctx, dpr: dprRef.current, palette, rings: ringsRef.current, vp: viewportRef.current })
+        }
+
         ctx.setTransform(1, 0, 0, 1, 0, 0)
         ctx.drawImage(staticCanvas, 0, 0)
       } else {
         ctx.drawImage(staticCanvas, 0, 0)
-        drawScramble({ ctx, dpr: dprRef.current, palette, rings: ringsRef.current, vp: viewportRef.current })
+
+        if (!constellationMode) {
+          drawScramble({ ctx, dpr: dprRef.current, palette, rings: ringsRef.current, vp: viewportRef.current })
+        }
       }
     }
 
@@ -782,7 +801,13 @@ export function StarMap({
       force = false
       lastAnimTs = ts
       paint()
-      schedule()
+
+      // Constellation has no live scramble layer. Once its static scene and
+      // fades settle, sleep until the simulation or an interaction invalidates
+      // it instead of blitting an unchanged 420-node canvas at 30 fps.
+      if (!constellationMode || dirtyRef.current) {
+        schedule()
+      }
     }
 
     invalidateRef.current = () => {
@@ -828,7 +853,7 @@ export function StarMap({
 
       invalidateRef.current = () => {}
     }
-  }, [])
+  }, [constellationMode])
 
   // Size the backing canvas (DPR-aware).
   useEffect(() => {
@@ -1009,6 +1034,20 @@ export function StarMap({
         return
       }
 
+      if (constellationMode) {
+        dragRef.current = {
+          id: null,
+          mode: 'none',
+          moved: false,
+          ring: null,
+          sx: 0,
+          sy: 0,
+          vp: viewportRef.current
+        }
+
+        return
+      }
+
       // Independent toggles: a date and a node can both be selected.
       if (drag.ring != null) {
         selectedRingRef.current = selectedRingRef.current === drag.ring ? null : drag.ring
@@ -1068,6 +1107,12 @@ export function StarMap({
 
     e.preventDefault()
 
+    // Identity anchors and ownership lines are React overlays projected against
+    // the fitted constellation viewport, so this overview stays camera-locked.
+    if (constellationMode) {
+      return
+    }
+
     // macOS smart zoom (two-finger double-tap) → reset (see lib/trackpad-gestures).
     if (isSmartZoomWheel(e)) {
       resetView()
@@ -1124,9 +1169,10 @@ export function StarMap({
       <div className={cortex ? 'relative min-h-0 flex-1 overflow-hidden' : 'absolute inset-0'} ref={wrapRef}>
         <canvas
           aria-label={
-            cortex
+            ariaLabel ??
+            (cortex
               ? 'Interactive Atlas Cortex memory graph. Use the Explore graph list for keyboard access.'
-              : 'Interactive Atlas memory graph'
+              : 'Interactive Atlas memory graph')
           }
           className={
             cortex ? 'block touch-none select-none text-[#dcefff]' : 'block touch-none select-none text-foreground'
@@ -1175,7 +1221,7 @@ export function StarMap({
           <div className="pointer-events-auto absolute bottom-2 right-2 z-20 [-webkit-app-region:no-drag]">
             <ShareControls imported={imported} onImport={importCode} onResetMap={onResetMap} shareCode={shareCode} />
           </div>
-        ) : (
+        ) : !constellationMode ? (
           <button
             className="pointer-events-auto absolute right-4 top-4 z-20 flex items-center gap-1.5 rounded-md border border-white/10 bg-[#07121f]/80 px-2.5 py-1.5 text-[0.62rem] text-[#7f96ad] shadow-lg backdrop-blur-md transition hover:border-white/20 hover:text-white [-webkit-app-region:no-drag]"
             onClick={resetView}
@@ -1183,7 +1229,7 @@ export function StarMap({
           >
             Reset view
           </button>
-        )}
+        ) : null}
 
         {/* Legacy legend remains in-canvas; Cortex's interactive type key lives
             in the workspace header. */}
@@ -1201,7 +1247,7 @@ export function StarMap({
         ) : null}
       </div>
 
-      {cortex ? (
+      {cortex && !constellationMode ? (
         <div className="relative z-20 shrink-0 border-t border-white/8 bg-[#07111d]/94 px-4 py-2.5 shadow-[0_-14px_40px_rgba(0,0,0,0.2)] backdrop-blur-xl">
           <div className="flex min-w-0 flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[0.58rem] text-[#72899f]">
             <span className="text-[#536b82]">oldest at core · newer outward</span>
