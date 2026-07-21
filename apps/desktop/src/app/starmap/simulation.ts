@@ -12,6 +12,7 @@ import {
 import type { StarmapGraph, StarmapNode } from '@/types/hermes'
 
 import { RING_STEPS } from './constants'
+import type { ConstellationScene } from './constellation'
 import { clamp, hash, nodeRadius, radiusForRecency } from './geometry'
 import { formatDate } from './text'
 import { computeRecency, recForRatio } from './time-axis'
@@ -24,6 +25,8 @@ export interface BuiltSim {
   rings: Ring[]
   sim: Simulation<SimNode, SimLink>
 }
+
+export type ConstellationSimulationLayout = Pick<ConstellationScene, 'outerRadius' | 'partitions'>
 
 const DAY = 86_400
 
@@ -262,10 +265,118 @@ function buildLayout(
   }
 }
 
+function buildConstellationSimulation(
+  graph: StarmapGraph,
+  onTick: () => void,
+  constellation: ConstellationSimulationLayout
+): BuiltSim {
+  const { rec } = computeRecency(graph.nodes)
+  const targets = new Map<string, { x: number; y: number }>()
+
+  for (const partition of constellation.partitions) {
+    const partitionNodes = graph.nodes
+      .filter(node => partition.nodeIds.includes(node.id))
+      .sort((left, right) => left.id.localeCompare(right.id))
+
+    const rankById = new Map(partitionNodes.map((node, index) => [node.id, index + 1]))
+    const byDomain = new Map<string, StarmapNode[]>()
+
+    for (const node of partitionNodes) {
+      const domain = node.category || 'general'
+      byDomain.set(domain, [...(byDomain.get(domain) ?? []), node])
+    }
+
+    const domains = [...byDomain].sort(([left], [right]) => left.localeCompare(right))
+
+    domains.forEach(([domain, domainNodes], domainIndex) => {
+      const domainCenter = (domainIndex / Math.max(1, domains.length)) * Math.PI * 2 - Math.PI / 2
+      const sector = domains.length > 1 ? (Math.PI * 2 * 0.72) / domains.length : Math.PI * 2
+
+      domainNodes.forEach((node, nodeIndex) => {
+        const spread = domainNodes.length === 1 ? 0 : (nodeIndex / (domainNodes.length - 1) - 0.5) * sector
+        const jitter = ((hash(`${node.id}:constellation`) % 1_000) / 1_000 - 0.5) * Math.min(0.45, sector * 0.24)
+        const angle = domainCenter + spread + jitter
+        const rank = rankById.get(node.id) ?? 1
+
+        const anchorAtCenter =
+          Math.hypot(partition.anchor.x - partition.center.x, partition.anchor.y - partition.center.y) < 1
+
+        const radius = Math.max(
+          anchorAtCenter ? 42 : 18,
+          partition.radius * 0.84 * Math.sqrt(rank / Math.max(1, partitionNodes.length))
+        )
+
+        targets.set(node.id, {
+          x: partition.center.x + Math.cos(angle) * radius,
+          y: partition.center.y + Math.sin(angle) * radius
+        })
+      })
+    })
+  }
+
+  const nodes: SimNode[] = graph.nodes.map(node => {
+    const target = targets.get(node.id) ?? { x: 0, y: 0 }
+
+    return {
+      ...node,
+      outerRingIndex: 0,
+      rec: rec.get(node.id) ?? 1,
+      tr: Math.hypot(target.x, target.y),
+      vx: 0,
+      vy: 0,
+      x: target.x,
+      y: target.y
+    }
+  })
+
+  const byId = new Map(nodes.map(node => [node.id, node]))
+
+  const links: SimLink[] = graph.edges
+    .filter(edge => byId.has(edge.source) && byId.has(edge.target))
+    .map(edge => ({ ...edge, source: edge.source, target: edge.target }))
+
+  const sim = forceSimulation(nodes)
+    .alphaDecay(0.08)
+    .velocityDecay(0.68)
+    .force('charge', forceManyBody<SimNode>().strength(-9))
+    .force(
+      'link',
+      forceLink<SimNode, SimLink>(links)
+        .id(node => node.id)
+        .distance(18)
+        .strength(0.02)
+    )
+    .force(
+      'collide',
+      forceCollide<SimNode>()
+        .radius(node => nodeRadius(node) + 3)
+        .iterations(2)
+    )
+    .force('partition-x', forceX<SimNode>(node => targets.get(node.id)?.x ?? 0).strength(0.24))
+    .force('partition-y', forceY<SimNode>(node => targets.get(node.id)?.y ?? 0).strength(0.24))
+    .on('tick', onTick)
+
+  return {
+    byId,
+    links,
+    nodes,
+    rings: [{ label: null, r: constellation.outerRadius, ratio: 1 }],
+    sim
+  }
+}
+
 // Build the radial time simulation: a node's distance from the core encodes its
 // timestamp bucket (radial force dominates; charge/collide only spread nodes
 // around their date ring). Rings are dated, equal-width gridlines.
-export function buildSimulation(graph: StarmapGraph, onTick: () => void): BuiltSim {
+export function buildSimulation(
+  graph: StarmapGraph,
+  onTick: () => void,
+  constellation?: ConstellationSimulationLayout
+): BuiltSim {
+  if (constellation) {
+    return buildConstellationSimulation(graph, onTick, constellation)
+  }
+
   const { maxTs, minTs, rec: recById, timed } = computeRecency(graph.nodes)
   const { index, rec: recOf, rings, tr: trOf } = buildLayout(graph, recById, minTs, maxTs, timed)
 

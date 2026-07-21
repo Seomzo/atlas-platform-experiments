@@ -926,6 +926,27 @@ export const ja = defineLocale({
     cortex: {
       brainLabel: 'ブレイン',
       clearFilters: 'フィルターを解除',
+      constellation: {
+        ariaLabel: 'Atlas のメインブレインとすべてのワーカーブレインを表示するコンステレーション。',
+        backToConstellation: 'すべてのブレイン',
+        boundedOverview: '高速な全体表示のため、各ブレインを個別に制限しています。開くと完全なグラフを確認できます。',
+        cortexDisabled: 'Cortex オフ',
+        description: 'Atlas のメインブレインとすべてのワーカーブレインを、知識を統合せず一つの空に表示します。',
+        disabledBrainDescription: brain =>
+          `${brain} は Cortex がオフです。このワーカーで Cortex を有効にするとメモリを構築できます。`,
+        disabledBrainTitle: 'Cortex はオフです',
+        eyebrow: 'Atlas 認知ネットワーク',
+        noMemoryYet: 'メモリはまだありません',
+        nodes: count => `${count} ノード`,
+        openBrain: brain => `${brain} のブレインを開く`,
+        title: 'ブレイン・コンステレーション',
+        unavailable: '利用不可',
+        unavailableBrainDescription: brain =>
+          `${brain} の Cortex ストアに接続できませんでした。グラフを仮データで置き換えてはいません。`,
+        unavailableBrainTitle: 'ブレインを利用できません',
+        visibleNodes: '表示ノード',
+        workers: 'ワーカー'
+      },
       defaultBrain: 'デフォルトのブレイン',
       emptyBrainDescription: brain =>
         `${brain} にはまだ Cortex データがありません。作業で生まれたメモリとグラフ構造がここに表示されます。`,

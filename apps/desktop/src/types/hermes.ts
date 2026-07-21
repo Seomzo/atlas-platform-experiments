@@ -433,6 +433,8 @@ export interface StarmapNode {
   id: string
   label: string
   kind: CortexNodeType | 'skill'
+  /** Owning Cortex profile in a composed constellation. */
+  brainProfile?: string
   /** Native Cortex type. Absent on the legacy /api/learning projection. */
   cortexType?: CortexNodeType
   memorySource?: 'memory' | 'profile'
@@ -449,6 +451,8 @@ export interface StarmapNode {
 
 /** A declared `related_skills` link; both endpoints are guaranteed to be nodes. */
 export interface StarmapEdge {
+  /** Owning Cortex profile in a composed constellation. */
+  brainProfile?: string
   direction?: 'directed'
   id?: string
   source: string

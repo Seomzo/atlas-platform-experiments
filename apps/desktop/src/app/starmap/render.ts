@@ -44,6 +44,8 @@ export interface Scene {
   reveal: number
   rings: Ring[]
   selectedRing: null | number
+  /** Constellation mode keeps the shared sky but omits one misleading global time disk. */
+  showStructure?: boolean
   size: { h: number; w: number }
   // Scrub jumps: snap every ease to its target this frame (no birth/fade replay).
   snapMotion?: boolean
@@ -181,6 +183,7 @@ export function drawScene(scene: Scene): DrawResult {
     reveal,
     rings,
     selectedRing,
+    showStructure = true,
     size,
     snapMotion = false,
     vp
@@ -320,7 +323,7 @@ export function drawScene(scene: Scene): DrawResult {
 
   // Inter-ring bands: a theme-tinted wash sliver at the outer edge; the lit
   // date's band flattens to an even wash.
-  if (bandAlpha > 0 || litRingIdx != null) {
+  if (showStructure && (bandAlpha > 0 || litRingIdx != null)) {
     for (let i = 0; i < rings.length - 1; i += 1) {
       const lit = litRingIdx != null && i + 1 === litRingIdx
 
@@ -370,26 +373,30 @@ export function drawScene(scene: Scene): DrawResult {
   // neighbor (the two bounding the lit band).
   ctx.lineWidth = c.ringWidth / vp.k
   ctx.setLineDash(c.ringDashed ? [c.ringDash / vp.k, c.ringDash / vp.k] : [])
-  rings.forEach((rg, i) => {
-    const emphasized = ringIdx != null && (i === ringIdx || i === ringIdx - 1)
-    // Reveal in/out rides the smooth (slow) ringAppear envelope so a ring fades
-    // out as gracefully as it grew in; the alpha bucket only carries the snappy
-    // selection emphasis.
-    const emphasisAlpha = emphasized ? clamp(LIT_BAND_ALPHA * 2, 0, 1) : ringAlpha
-    // The core ring (i 0) fades in from reveal 0 so the scramble orb starts
-    // un-enclosed (no outline boxing it in) and the shell appears as it plays.
-    const coreFade = i === 0 ? clamp(reveal / 0.08, 0, 1) : 1
-    const ringAlphaNow = fadeAlpha(fades.rings, String(i), emphasisAlpha, emphasized) * (ringVis[i] ?? 1) * coreFade
 
-    if (ringAlphaNow < 0.004) {
-      return
-    }
+  if (showStructure) {
+    rings.forEach((rg, i) => {
+      const emphasized = ringIdx != null && (i === ringIdx || i === ringIdx - 1)
+      // Reveal in/out rides the smooth (slow) ringAppear envelope so a ring fades
+      // out as gracefully as it grew in; the alpha bucket only carries the snappy
+      // selection emphasis.
+      const emphasisAlpha = emphasized ? clamp(LIT_BAND_ALPHA * 2, 0, 1) : ringAlpha
+      // The core ring (i 0) fades in from reveal 0 so the scramble orb starts
+      // un-enclosed (no outline boxing it in) and the shell appears as it plays.
+      const coreFade = i === 0 ? clamp(reveal / 0.08, 0, 1) : 1
+      const ringAlphaNow = fadeAlpha(fades.rings, String(i), emphasisAlpha, emphasized) * (ringVis[i] ?? 1) * coreFade
 
-    ctx.strokeStyle = shade(ringAlphaNow)
-    ctx.beginPath()
-    ctx.arc(0, 0, ringDrawR[i] ?? rg.r, 0, Math.PI * 2)
-    ctx.stroke()
-  })
+      if (ringAlphaNow < 0.004) {
+        return
+      }
+
+      ctx.strokeStyle = shade(ringAlphaNow)
+      ctx.beginPath()
+      ctx.arc(0, 0, ringDrawR[i] ?? rg.r, 0, Math.PI * 2)
+      ctx.stroke()
+    })
+  }
+
   ctx.setLineDash([])
 
   // Screen space for the jump routes and glyphs (crisp, easy to trim). The empty
@@ -581,44 +588,47 @@ export function drawScene(scene: Scene): DrawResult {
   ctx.textAlign = 'center'
   const LABEL_GAP = 15
   let lastLabelY = Number.POSITIVE_INFINITY
+
   // A ring's date only shows once it actually has a revealed node — no floating
   // date over a blank disk (t=0) or a lone empty ring.
-  rings.forEach((rg, i) => {
-    if (!rg.label || !revealedRings.has(i)) {
-      return
-    }
+  if (showStructure) {
+    rings.forEach((rg, i) => {
+      if (!rg.label || !revealedRings.has(i)) {
+        return
+      }
 
-    const sx = projX(0)
-    // Track the growing radius so the date rides the ring as it expands out.
-    const sy = projY(-(ringDrawR[i] ?? rg.r))
+      const sx = projX(0)
+      // Track the growing radius so the date rides the ring as it expands out.
+      const sy = projY(-(ringDrawR[i] ?? rg.r))
 
-    if (sy < 8 || sy > h - 8 || lastLabelY - sy < LABEL_GAP) {
-      return
-    }
+      if (sy < 8 || sy > h - 8 || lastLabelY - sy < LABEL_GAP) {
+        return
+      }
 
-    lastLabelY = sy
-    const tw = ctx.measureText(rg.label).width
-    const boxW = tw + 6
-    const isThis = ringIdx === i || hoverRing === i
-    const faded = (focusId != null || ringIdx != null) && !isThis
-    // The date rides the same smooth ringAppear envelope, so it recedes as
-    // gently as it appears; the bucket carries only the snappy focus/selection dim.
-    const emphasisAlpha = faded ? 0.33 : 1
-    const labelAlpha = fadeAlpha(fades.labels, String(i), emphasisAlpha, isThis) * (ringVis[i] ?? 1)
+      lastLabelY = sy
+      const tw = ctx.measureText(rg.label).width
+      const boxW = tw + 6
+      const isThis = ringIdx === i || hoverRing === i
+      const faded = (focusId != null || ringIdx != null) && !isThis
+      // The date rides the same smooth ringAppear envelope, so it recedes as
+      // gently as it appears; the bucket carries only the snappy focus/selection dim.
+      const emphasisAlpha = faded ? 0.33 : 1
+      const labelAlpha = fadeAlpha(fades.labels, String(i), emphasisAlpha, isThis) * (ringVis[i] ?? 1)
 
-    if (labelAlpha < 0.01) {
-      return
-    }
+      if (labelAlpha < 0.01) {
+        return
+      }
 
-    ctx.globalAlpha = labelAlpha
-    ctx.fillStyle = rgba(bg, 1)
-    ctx.fillRect(sx - boxW / 2, sy - 6, boxW, 13)
-    ctx.fillStyle = shade(isThis ? 1 : 0.2)
-    ctx.fillText(rg.label, sx, sy + 3)
-    ctx.globalAlpha = 1
-    // Hidden labels (mid fade-out / not yet reached) drop out of hit-testing.
-    ringLabelRects.push({ h: 18, i, w: boxW + 6, x: sx - boxW / 2 - 3, y: sy - 10 })
-  })
+      ctx.globalAlpha = labelAlpha
+      ctx.fillStyle = rgba(bg, 1)
+      ctx.fillRect(sx - boxW / 2, sy - 6, boxW, 13)
+      ctx.fillStyle = shade(isThis ? 1 : 0.2)
+      ctx.fillText(rg.label, sx, sy + 3)
+      ctx.globalAlpha = 1
+      // Hidden labels (mid fade-out / not yet reached) drop out of hit-testing.
+      ringLabelRects.push({ h: 18, i, w: boxW + 6, x: sx - boxW / 2 - 3, y: sy - 10 })
+    })
+  }
 
   // Tooltip on focus — measured first so its rect joins the avoidance set and
   // neighbor labels route around it.
