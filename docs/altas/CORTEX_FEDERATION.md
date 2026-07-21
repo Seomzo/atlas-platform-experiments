@@ -56,11 +56,28 @@ spaces become the unit of sharing.
 - Dream cycle gains an admission queue pass for the supervisor brain.
 - No sync daemons, no eventual-consistency machinery, no data duplication.
 
-## Decisions needed from Omar + Joe
+## Decisions recorded (Omar, 2026-07-20)
 
-1. Approve the subscription model (vs. alternatives: full sync/copy, or a
-   single shared brain for all workers — both rejected in analysis for
-   cache, blast-radius, and authorization reasons).
-2. v1 default: are admitted Tekion learnings auto-admitted after N days
-   unreviewed, or held indefinitely until explicit review?
-3. Who may create shared spaces in v1 — supervisor only?
+1. **Purpose check:** federation is not meant to be complicated. Workers on
+   one box need to share project knowledge — docs, project context, which
+   documents live where, workflow facts — and the constellation exists to
+   *show* that interconnection with real data. Keep the machinery minimal.
+2. **Reference, not copy:** cross-brain edges point at the owner space's
+   canonical record. No copies, no sync drift.
+3. **Secrets carve-out (standing, ADR-006/008):** credential *values* never
+   enter Cortex/memory. Shared spaces may record that a credential exists
+   and who may use it; the values live in the credential vault and access is
+   deterministic policy. "Workers share logins" = shared *access*, vault-
+   mediated — never secret text in the graph.
+4. **Offline/remote worker brains:** constellation dims the anchor with an
+   "unreachable" badge and last-known stats. (All brains are local SQLite
+   today; this only matters for future remote workers.)
+5. **Maintenance from the supervisor desktop:** writable. Omar can run
+   maintenance (dream, community rebuild) on any worker's brain while
+   zoomed into it from the constellation.
+
+## Decisions still open for Omar + Joe
+
+1. v1 default: are worker proposals into shared spaces auto-admitted after
+   N days unreviewed, or held indefinitely until explicit review?
+2. Who may create shared spaces in v1 — supervisor only?
