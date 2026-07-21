@@ -1283,7 +1283,6 @@ export const zhHant = defineLocale({
   profiles: {
     close: '關閉員工管理',
     nameHint: '小寫字母、數字、連字號和底線。必須以字母或數字開頭。',
-    namePlaceholder: 'service-advisor',
     title: '員工',
     count: count => `${count} 位員工`,
     search: '搜尋員工…',
@@ -1375,7 +1374,7 @@ export const zhHant = defineLocale({
     deleting: '刪除中…',
     createDesc: '每位員工都是獨立的 Atlas 環境，擁有自己的設定、技能與指令。',
     createIdentityDesc: '設定這位員工對外顯示的姓名、角色與簡介。',
-    workerIdLabel: '員工 ID',
+    workerIdPreview: name => `員工 ID：${name}`,
     nameLabel: '名稱',
     cloneFrom: '複製來源',
     cloneFromNone: '無（空白）',
@@ -1383,6 +1382,8 @@ export const zhHant = defineLocale({
     cloneFromDefault: '從預設員工複製設定',
     cloneFromDefaultDesc: '從您的預設員工複製設定、技能和 SOUL.md。',
     invalidName: hint => `員工 ID 無效。${hint}`,
+    reservedName: '該名稱為保留名稱，請嘗試其他名稱。',
+    takenName: '該名稱已被使用，請嘗試其他名稱。',
     nameRequired: '名稱為必填',
     creating: '建立中…',
     createAction: '建立員工',
@@ -1403,7 +1404,7 @@ export const zhHant = defineLocale({
     failedCopy: '複製安裝指令失敗',
     failedLoadSoul: '載入 SOUL.md 失敗',
     failedSaveSoul: '儲存 SOUL.md 失敗',
-    failedCreate: '建立員工失敗',
+    failedCreate: '無法建立該員工，請再試一次。',
     failedRename: '重新命名員工失敗'
   },
 

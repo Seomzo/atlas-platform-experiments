@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -125,8 +125,9 @@ describe('Workers page', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'New worker' }))
 
-    expect(await screen.findByRole('dialog', { name: 'New worker' })).toBeTruthy()
-    expect(screen.getByLabelText('Worker ID')).toBeTruthy()
+    const dialog = await screen.findByRole('dialog', { name: 'New worker' })
+
+    expect(within(dialog).getByLabelText('Display name')).toBeTruthy()
 
     fireEvent.keyDown(document, { key: 'Escape' })
 
