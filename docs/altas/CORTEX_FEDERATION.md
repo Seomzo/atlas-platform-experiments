@@ -76,8 +76,21 @@ spaces become the unit of sharing.
    maintenance (dream, community rebuild) on any worker's brain while
    zoomed into it from the constellation.
 
-## Decisions still open for Omar + Joe
+## Decisions recorded (Omar, 2026-07-20 — second pass)
 
-1. v1 default: are worker proposals into shared spaces auto-admitted after
-   N days unreviewed, or held indefinitely until explicit review?
-2. Who may create shared spaces in v1 — supervisor only?
+6. **Auto-admit, no review queue.** Dealership users are not technically
+   savvy; nobody will staff a memory-approval queue. A worker's shared
+   fact goes live for the team immediately. Safety comes from
+   **provenance + easy undo**: every shared record keeps its source
+   (which worker, when, from what session) and can be disputed/deleted
+   in one click from the graph UI. Correction over permission. The
+   earlier "proposed-then-admitted" flow in §Decision item 3 is
+   REPLACED by this. The secrets carve-out (§5.3 above) remains a hard
+   code-enforced wall and is not affected.
+7. **Anyone can create shared spaces** — workers and supervisor alike,
+   like creating a channel in Slack. Freedom by default; provenance and
+   undo are the safety net, not permission ceremonies.
+
+Both federation-v1 policy questions are now closed. Remaining work is
+engineering (WS-TBD: subscription reads, shared-space writes with
+provenance, dispute/undo UI), not product decisions.
