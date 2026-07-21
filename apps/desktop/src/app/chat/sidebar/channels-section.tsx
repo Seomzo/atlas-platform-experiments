@@ -145,12 +145,6 @@ function ChannelGroup({
                   />
                 )}
                 <span className="min-w-0 flex-1 truncate">{channel.name}</span>
-                <span
-                  aria-label="0"
-                  className="min-w-4 rounded-full border border-(--ui-stroke-quaternary) px-1 text-center font-mono text-[0.5625rem] leading-3.5 text-(--ui-text-quaternary)"
-                >
-                  0
-                </span>
               </button>
             )
           })}

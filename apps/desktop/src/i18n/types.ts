@@ -1104,24 +1104,29 @@ export interface Translations {
     userAvatarLabel: string
     memberCount: (count: number) => string
     transcriptLabel: string
-    scaffoldBadge: string
-    routingInactiveTitle: string
-    routingInactiveDescription: string
-    dmReadyTitle: string
-    dmReadyDescription: (worker: string) => string
-    openWorkerChat: (worker: string) => string
+    emptyTranscriptTitle: string
+    emptyChannelTranscriptDescription: string
+    emptyDmTranscriptDescription: (worker: string) => string
+    noActiveMembersTitle: string
+    noActiveMembersDescription: string
     mentionWorker: string
+    mentionNoMatches: string
     composerPlaceholder: (channel: string) => string
-    composerPending: string
-    dmComposerPending: string
-    sendUnavailable: string
+    composerHint: string
+    dmComposerHint: string
+    noMentionHint: string
+    sendMessage: string
+    sending: string
+    responding: string
+    deliveryError: string
+    workerMissing: (workerId: string) => string
+    workerFailed: (worker: string, detail: string) => string
+    workerEmptyResponse: (worker: string) => string
     settings: string
     settingsDescription: string
-    turnPolicy: string
     turnPolicyMentionOnly: string
     turnPolicyMentionOnlyDescription: string
-    turnPolicyAllMembers: string
-    turnPolicyAllMembersDescription: string
+    dmTurnPolicyDescription: string
     archive: string
     notFoundTitle: string
     notFoundDescription: string
