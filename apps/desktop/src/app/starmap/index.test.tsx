@@ -16,20 +16,22 @@ vi.mock('@/store/starmap', async () => {
   const { atom } = await import('nanostores')
 
   return {
+    $starmapBrainFilter: atom(null),
     $starmapBrainProfile: atom('default'),
     $starmapBrainStatus: atom('ready'),
-    $starmapConstellation: atom({}),
     $starmapError: atom(null),
     $starmapGraph: atom(null),
     $starmapLoading: atom(false),
-    $starmapMode: atom('constellation'),
+    $starmapMode: atom('nebula'),
+    $starmapNebula: atom(null),
     selectStarmapBrain: vi.fn(),
-    showStarmapConstellation: vi.fn()
+    selectStarmapBrainFilter: vi.fn(),
+    showStarmapNebula: vi.fn()
   }
 })
 
-vi.mock('./constellation-overview', () => ({
-  ConstellationOverview: () => <div data-testid="constellation" />
+vi.mock('./nebula-overview', () => ({
+  NebulaOverview: () => <div data-testid="nebula" />
 }))
 
 import { StarmapView } from './index'
@@ -52,7 +54,7 @@ function NavigationHarness() {
 }
 
 describe('StarmapView overlay chrome', () => {
-  it('renders the standard close control above the constellation and navigates back to chat', async () => {
+  it('renders the standard close control above the nebula and navigates back to chat', async () => {
     getProfiles.mockResolvedValue({ profiles: [] })
 
     render(
