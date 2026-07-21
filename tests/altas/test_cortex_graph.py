@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 
 import pytest
@@ -171,6 +172,18 @@ def test_graph_overview_is_stable_typed_bounded_and_body_free(populated_store):
     assert populated_store["document_body"] not in serialized
     assert first["redaction_summary"]["raw_evidence_bodies_hidden"] >= 1
     assert first["redaction_summary"]["document_bodies_hidden"] >= 1
+    assert first["aggregates"] == {
+        "relation_count": 1,
+        "total_nodes": 10,
+        "types": [
+            {"type": "memory", "count": 1, "uncommunitied_count": 1},
+            {"type": "session", "count": 2, "uncommunitied_count": 2},
+            {"type": "community", "count": 1, "uncommunitied_count": 0},
+            {"type": "document", "count": 1, "uncommunitied_count": 1},
+            {"type": "entity", "count": 3, "uncommunitied_count": 1},
+            {"type": "evidence", "count": 2, "uncommunitied_count": 2},
+        ],
+    }
 
     node_ids = {node["id"] for node in first["nodes"]}
     assert populated_store["evidence_id"] in node_ids
@@ -204,6 +217,36 @@ def test_graph_overview_is_stable_typed_bounded_and_body_free(populated_store):
     assert {node["id"] for node in page_one["nodes"]}.isdisjoint({
         node["id"] for node in page_two["nodes"]
     })
+
+    community_page = build_graph_overview(
+        store,
+        limit=1,
+        node_types=["entity"],
+        community_id=populated_store["community_id"],
+    )
+    community_next = build_graph_overview(
+        store,
+        limit=1,
+        cursor=community_page["next_cursor"],
+        node_types=["entity"],
+        community_id=populated_store["community_id"],
+    )
+    assert {node["id"] for node in community_page["nodes"] + community_next["nodes"]} == {
+        populated_store["customer_id"],
+        populated_store["vehicle_id"],
+    }
+
+    uncommunitied = build_graph_overview(
+        store, limit=10, node_types=["entity"], uncommunitied=True
+    )
+    assert [node["id"] for node in uncommunitied["nodes"]] == [
+        populated_store["tool_entity_id"]
+    ]
+
+    deep_cursor = base64.urlsafe_b64encode(
+        json.dumps({"offset": 10_001}, separators=(",", ":")).encode()
+    ).decode().rstrip("=")
+    assert build_graph_overview(store, limit=1, cursor=deep_cursor)["nodes"] == []
 
 
 def test_graph_overview_first_page_keeps_small_memory_layer_complete(tmp_path):
@@ -786,6 +829,7 @@ def test_cognitive_openapi_declares_strict_public_response_contracts():
         ("/api/cognitive/graph", "get"): (
             "CortexGraphResponse",
             {
+                "aggregates",
                 "communities",
                 "edges",
                 "facets",

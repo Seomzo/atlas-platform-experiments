@@ -1,8 +1,6 @@
 import type { CortexGraphResponse, ProfileInfo, StarmapEdge, StarmapGraph, StarmapNode } from '@/types/hermes'
 
-import { cortexToStarmap } from './cortex'
-
-export const CONSTELLATION_TOTAL_NODE_BUDGET = 420
+import { brainRegionRadius, cortexAggregatesToStarmap } from './lod'
 
 export type ConstellationBrainStatus = 'disabled' | 'empty' | 'ready' | 'unavailable'
 
@@ -26,6 +24,7 @@ export interface ConstellationPartition {
   radius: number
   regionId: string
   status: ConstellationBrainStatus
+  totalNodeCount: number
 }
 
 export interface ConstellationOwnershipEdge {
@@ -54,10 +53,6 @@ const DEFAULT_PROFILE: ProfileInfo = {
   provider: null,
   role: '',
   skill_count: 0
-}
-
-export function constellationNodeBudget(brainCount: number): number {
-  return Math.max(1, Math.floor(CONSTELLATION_TOTAL_NODE_BUDGET / Math.max(1, brainCount)))
 }
 
 export function normalizeConstellationProfiles(profiles: ProfileInfo[]): ProfileInfo[] {
@@ -119,7 +114,13 @@ interface PartitionGeometry {
   radius: number
 }
 
-function workerGeometry(index: number, workerCount: number): PartitionGeometry {
+function workerGeometry(
+  index: number,
+  workerCount: number,
+  mainRadius: number,
+  maxWorkerRadius: number,
+  radius: number
+): PartitionGeometry {
   let ring = 1
   let offset = index
   let consumed = 0
@@ -132,13 +133,14 @@ function workerGeometry(index: number, workerCount: number): PartitionGeometry {
 
   const count = Math.min(ring * 8, workerCount - consumed)
   const angle = -Math.PI / 2 + (offset / count) * Math.PI * 2 + (ring % 2 === 0 ? Math.PI / count : 0)
-  const anchorDistance = 205 + (ring - 1) * 165
-  const regionDistance = anchorDistance + 62
+  const ringStep = maxWorkerRadius * 2 + 100
+  const anchorDistance = mainRadius + maxWorkerRadius + 100 + (ring - 1) * ringStep
+  const regionDistance = anchorDistance + radius + 40
 
   return {
     anchor: { x: Math.cos(angle) * anchorDistance, y: Math.sin(angle) * anchorDistance },
     center: { x: Math.cos(angle) * regionDistance, y: Math.sin(angle) * regionDistance },
-    radius: 72
+    radius
   }
 }
 
@@ -148,10 +150,14 @@ export function buildConstellationScene(inputs: ConstellationBrainInput[]): Cons
   const partitions: ConstellationPartition[] = []
   const ownershipEdges: ConstellationOwnershipEdge[] = []
   const clusterCounts = new Map<string, number>()
+  const totals = inputs.map(input => input.graph?.aggregates.total_nodes ?? 0)
+  const radii = totals.map((total, index) => brainRegionRadius(total, index === 0))
+  const mainRadius = radii[0] ?? brainRegionRadius(0, true)
+  const maxWorkerRadius = Math.max(brainRegionRadius(0, false), ...radii.slice(1))
 
   inputs.forEach((input, index) => {
     const profileName = input.profile.name
-    const graph = input.graph ? cortexToStarmap(input.graph) : null
+    const graph = input.graph ? cortexAggregatesToStarmap(input.graph) : null
     const brainNodes = graph?.nodes.map(node => namespaceNode(profileName, node)) ?? []
     const brainNodeIds = new Set(brainNodes.map(node => node.id))
 
@@ -162,11 +168,12 @@ export function buildConstellationScene(inputs: ConstellationBrainInput[]): Cons
 
     const geometry =
       index === 0
-        ? { anchor: { x: 0, y: 0 }, center: { x: 0, y: 0 }, radius: 118 }
-        : workerGeometry(index - 1, inputs.length - 1)
+        ? { anchor: { x: 0, y: 0 }, center: { x: 0, y: 0 }, radius: radii[index] ?? mainRadius }
+        : workerGeometry(index - 1, inputs.length - 1, mainRadius, maxWorkerRadius, radii[index] ?? maxWorkerRadius)
 
     const { anchorId, regionId } = ids(profileName)
-    const status = input.status === 'ready' && brainNodes.length === 0 ? 'empty' : input.status
+    const totalNodeCount = totals[index] ?? 0
+    const status = input.status === 'ready' && totalNodeCount === 0 ? 'empty' : input.status
 
     nodes.push(...brainNodes)
     edges.push(...brainEdges)
@@ -181,7 +188,8 @@ export function buildConstellationScene(inputs: ConstellationBrainInput[]): Cons
       nodeIds: brainNodes.map(node => node.id),
       profile: input.profile,
       regionId,
-      status
+      status,
+      totalNodeCount
     })
     ownershipEdges.push({ kind: 'ownership', profile: profileName, source: anchorId, target: regionId })
   })
@@ -201,7 +209,8 @@ export function buildConstellationScene(inputs: ConstellationBrainInput[]): Cons
       stats: {
         brains: partitions.length,
         constellation: true,
-        ownershipEdges: ownershipEdges.length
+        ownershipEdges: ownershipEdges.length,
+        totalNodes: totals.reduce((sum, count) => sum + count, 0)
       }
     },
     outerRadius,

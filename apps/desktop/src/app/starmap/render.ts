@@ -418,6 +418,13 @@ export function drawScene(scene: Scene): DrawResult {
       continue
     }
 
+    const sVisible = Math.abs(projX(s.x) - w / 2) <= w / 2 + 40 && Math.abs(projY(s.y) - h / 2) <= h / 2 + 40
+    const tVisible = Math.abs(projX(t.x) - w / 2) <= w / 2 + 40 && Math.abs(projY(t.y) - h / 2) <= h / 2 + 40
+
+    if (!sVisible && !tVisible) {
+      continue
+    }
+
     // A jump route only exists once both of its endpoints have ignited.
     const revealed = seen(s.rec) && seen(t.rec)
 
@@ -549,6 +556,10 @@ export function drawScene(scene: Scene): DrawResult {
     const sx = projX(n.x * posScale)
     const sy = projY(n.y * posScale)
 
+    if (sx < -40 || sx > w + 40 || sy < -40 || sy > h + 40) {
+      continue
+    }
+
     ctx.globalAlpha = vis
 
     const cortexInk = n.cortexType ? CORTEX_NODE_VISUALS[n.cortexType].ink : null
@@ -575,6 +586,23 @@ export function drawScene(scene: Scene): DrawResult {
       ctx.lineWidth = 1.4
       shapePath(ctx, shape, sx, sy, r + 4)
       ctx.stroke()
+    }
+
+    if (n.aggregate) {
+      ctx.globalAlpha = vis * 0.58
+      ctx.strokeStyle = rgba(nodeInk, 1)
+      ctx.lineWidth = n.aggregate.kind === 'community' ? 1.2 : 0.85
+      ctx.setLineDash(n.aggregate.kind === 'type' ? [2, 3] : [])
+      ctx.beginPath()
+      ctx.arc(sx, sy, r + 5, 0, Math.PI * 2)
+      ctx.stroke()
+      ctx.setLineDash([])
+
+      ctx.globalAlpha = vis
+      ctx.fillStyle = rgba(nodeInk, 0.92)
+      ctx.font = '600 9px ui-monospace, SFMono-Regular, Menlo, monospace'
+      ctx.textAlign = 'center'
+      ctx.fillText(n.aggregate.count.toLocaleString(), sx, sy + r + 16)
     }
   }
 

@@ -125,7 +125,7 @@ def _decode_cursor(cursor: str | None) -> int:
         binascii.Error,
     ) as exc:
         raise ValueError("invalid cognitive graph cursor") from exc
-    if offset < 0 or offset > 10_000:
+    if offset < 0:
         raise ValueError("cognitive graph cursor is outside the supported window")
     return offset
 
@@ -195,6 +195,8 @@ def _collect_nodes(
     node_types: set[str],
     domain: str | None,
     status: str | None,
+    community_members_json: str | None = None,
+    uncommunitied: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     spaces, visibility = _space_maps(connection, store)
     nodes: list[dict[str, Any]] = []
@@ -205,11 +207,28 @@ def _collect_nodes(
             not status or item_status == status
         )
 
+    def membership_filter(id_expression: str) -> tuple[str, tuple[Any, ...]]:
+        if community_members_json is not None:
+            return (
+                f" AND {id_expression} IN (SELECT CAST(value AS TEXT) FROM json_each(?))",
+                (community_members_json,),
+            )
+        if uncommunitied:
+            return (
+                " AND NOT EXISTS (SELECT 1 FROM communities cm "
+                "JOIN json_each(cm.member_ids_json) member "
+                f"WHERE cm.brain_id=? AND cm.stale=0 AND CAST(member.value AS TEXT)={id_expression})",
+                (store.brain_id,),
+            )
+        return "", ()
+
     if "entity" in node_types:
+        membership_sql, membership_params = membership_filter("e.id")
         rows = connection.execute(
-            "SELECT * FROM entities WHERE brain_id=? AND deleted_at IS NULL "
-            "ORDER BY last_seen_at DESC, id LIMIT ?",
-            (store.brain_id, fetch_limit),
+            "SELECT e.* FROM entities e WHERE e.brain_id=? AND e.deleted_at IS NULL "
+            + membership_sql
+            + " ORDER BY e.last_seen_at DESC, e.id LIMIT ?",
+            (store.brain_id, *membership_params, fetch_limit),
         ).fetchall()
         for row in rows:
             space_id = str(row["knowledge_space_id"])
@@ -233,15 +252,18 @@ def _collect_nodes(
             )
 
     if "memory" in node_types:
+        membership_sql, membership_params = membership_filter("m.id")
         rows = connection.execute(
             "SELECT m.*, COUNT(e.id) AS evidence_count FROM memory_records m "
             "LEFT JOIN memory_evidence me ON me.memory_id=m.id "
             "LEFT JOIN evidence_items e ON e.id=me.evidence_id "
             "AND e.brain_id=m.brain_id AND e.tombstoned_at IS NULL "
             "WHERE m.brain_id=? AND m.deleted_at IS NULL "
-            "AND m.status IN ('active','disputed') GROUP BY m.id "
+            "AND m.status IN ('active','disputed') "
+            + membership_sql
+            + " GROUP BY m.id "
             "ORDER BY m.updated_at DESC, m.id LIMIT ?",
-            (store.brain_id, fetch_limit),
+            (store.brain_id, *membership_params, fetch_limit),
         ).fetchall()
         for row in rows:
             space_id = str(row["knowledge_space_id"])
@@ -283,10 +305,12 @@ def _collect_nodes(
             )
 
     if "session" in node_types and (not domain or domain == "personal"):
+        membership_sql, membership_params = membership_filter("s.id")
         rows = connection.execute(
-            "SELECT * FROM sessions WHERE brain_id=? AND state!='deleted' "
-            "ORDER BY updated_at DESC, id LIMIT ?",
-            (store.brain_id, fetch_limit),
+            "SELECT s.* FROM sessions s WHERE s.brain_id=? AND s.state!='deleted' "
+            + membership_sql
+            + " ORDER BY s.updated_at DESC, s.id LIMIT ?",
+            (store.brain_id, *membership_params, fetch_limit),
         ).fetchall()
         for row in rows:
             item_status = str(row["state"])
@@ -310,10 +334,12 @@ def _collect_nodes(
             )
 
     if "evidence" in node_types:
+        membership_sql, membership_params = membership_filter("e.id")
         rows = connection.execute(
-            "SELECT * FROM evidence_items WHERE brain_id=? AND tombstoned_at IS NULL "
-            "ORDER BY ingested_at DESC, id LIMIT ?",
-            (store.brain_id, fetch_limit),
+            "SELECT e.* FROM evidence_items e WHERE e.brain_id=? AND e.tombstoned_at IS NULL "
+            + membership_sql
+            + " ORDER BY e.ingested_at DESC, e.id LIMIT ?",
+            (store.brain_id, *membership_params, fetch_limit),
         ).fetchall()
         for row in rows:
             space_id = str(row["knowledge_space_id"])
@@ -343,12 +369,15 @@ def _collect_nodes(
             })
 
     if "document" in node_types:
+        membership_sql, membership_params = membership_filter("d.id")
         rows = connection.execute(
             "SELECT d.*, i.version, i.published_at FROM graphrag_documents d "
             "JOIN graphrag_indexes i ON i.id=d.index_id "
             "WHERE d.brain_id=? AND i.state='active' "
+            + membership_sql
+            + " "
             "ORDER BY COALESCE(i.published_at, i.created_at) DESC, d.id LIMIT ?",
-            (store.brain_id, fetch_limit),
+            (store.brain_id, *membership_params, fetch_limit),
         ).fetchall()
         for row in rows:
             space_id = str(row["knowledge_space_id"])
@@ -381,8 +410,8 @@ def _collect_nodes(
 
     rows = connection.execute(
         "SELECT * FROM communities WHERE brain_id=? AND stale=0 "
-        "ORDER BY generated_at DESC, id LIMIT ?",
-        (store.brain_id, min(fetch_limit, 500)),
+        "ORDER BY json_array_length(member_ids_json) DESC, generated_at DESC, id DESC LIMIT ?",
+        (store.brain_id, fetch_limit),
     ).fetchall()
     for row in rows:
         space_id = str(row["knowledge_space_id"])
@@ -423,6 +452,84 @@ def _collect_nodes(
     return nodes, community_rows
 
 
+def _graph_aggregates(connection: Any, store: CortexStore) -> dict[str, Any]:
+    """Return exact active graph counts without selecting source bodies."""
+    membership = (
+        "NOT EXISTS (SELECT 1 FROM communities cm "
+        "JOIN json_each(cm.member_ids_json) member "
+        "WHERE cm.brain_id=? AND cm.stale=0 "
+        "AND CAST(member.value AS TEXT)={id_expression})"
+    )
+    queries = {
+        "entity": (
+            "SELECT COUNT(*) AS n, SUM(CASE WHEN "
+            + membership.format(id_expression="e.id")
+            + " THEN 1 ELSE 0 END) AS uncommunitied "
+            "FROM entities e WHERE e.brain_id=? AND e.deleted_at IS NULL",
+            (store.brain_id, store.brain_id),
+        ),
+        "memory": (
+            "SELECT COUNT(*) AS n, SUM(CASE WHEN "
+            + membership.format(id_expression="m.id")
+            + " THEN 1 ELSE 0 END) AS uncommunitied "
+            "FROM memory_records m WHERE m.brain_id=? AND m.deleted_at IS NULL "
+            "AND m.status IN ('active','disputed')",
+            (store.brain_id, store.brain_id),
+        ),
+        "session": (
+            "SELECT COUNT(*) AS n, SUM(CASE WHEN "
+            + membership.format(id_expression="s.id")
+            + " THEN 1 ELSE 0 END) AS uncommunitied "
+            "FROM sessions s WHERE s.brain_id=? AND s.state!='deleted'",
+            (store.brain_id, store.brain_id),
+        ),
+        "evidence": (
+            "SELECT COUNT(*) AS n, SUM(CASE WHEN "
+            + membership.format(id_expression="e.id")
+            + " THEN 1 ELSE 0 END) AS uncommunitied "
+            "FROM evidence_items e WHERE e.brain_id=? AND e.tombstoned_at IS NULL",
+            (store.brain_id, store.brain_id),
+        ),
+        "document": (
+            "SELECT COUNT(*) AS n, SUM(CASE WHEN "
+            + membership.format(id_expression="d.id")
+            + " THEN 1 ELSE 0 END) AS uncommunitied "
+            "FROM graphrag_documents d JOIN graphrag_indexes i ON i.id=d.index_id "
+            "WHERE d.brain_id=? AND i.state='active'",
+            (store.brain_id, store.brain_id),
+        ),
+        "community": (
+            "SELECT COUNT(*) AS n, 0 AS uncommunitied FROM communities "
+            "WHERE brain_id=? AND stale=0",
+            (store.brain_id,),
+        ),
+    }
+    type_counts = []
+    for node_type in _STRATIFIED_TYPE_ORDER:
+        sql, params = queries[node_type]
+        row = connection.execute(sql, params).fetchone()
+        type_counts.append({
+            "type": node_type,
+            "count": int(row["n"] or 0),
+            "uncommunitied_count": int(row["uncommunitied"] or 0),
+        })
+    relation_count = int(
+        connection.execute(
+            "SELECT COUNT(*) AS n FROM relations r "
+            "JOIN entities s ON s.id=r.subject_entity_id AND s.brain_id=r.brain_id "
+            "JOIN entities o ON o.id=r.object_entity_id AND o.brain_id=r.brain_id "
+            "WHERE r.brain_id=? AND r.status='active' "
+            "AND s.deleted_at IS NULL AND o.deleted_at IS NULL",
+            (store.brain_id,),
+        ).fetchone()["n"]
+    )
+    return {
+        "relation_count": relation_count,
+        "total_nodes": sum(item["count"] for item in type_counts),
+        "types": type_counts,
+    }
+
+
 def _stratified_node_order(
     nodes: Sequence[dict[str, Any]], *, projection: str
 ) -> list[dict[str, Any]]:
@@ -440,7 +547,17 @@ def _stratified_node_order(
     }
     for node in nodes:
         buckets.setdefault(str(node.get("type") or ""), []).append(node)
-    for bucket in buckets.values():
+    for node_type, bucket in buckets.items():
+        if projection == "communities" and node_type == "community":
+            bucket.sort(
+                key=lambda node: (
+                    int(node.get("metadata", {}).get("member_count") or 0),
+                    str(node.get("_sort_at") or ""),
+                    str(node.get("id") or ""),
+                ),
+                reverse=True,
+            )
+            continue
         bucket.sort(
             key=lambda node: (
                 str(node.get("_sort_at") or ""),
@@ -687,6 +804,8 @@ def build_graph_overview(
     node_types: Sequence[str] | None = None,
     status: str | None = None,
     retrieval_run_id: str | None = None,
+    community_id: str | None = None,
+    uncommunitied: bool = False,
 ) -> dict[str, Any]:
     """Build a bounded graph projection without returning source bodies."""
     projection = str(projection or "growth").strip().lower()
@@ -704,9 +823,22 @@ def build_graph_overview(
         raise ValueError(f"unsupported cognitive node type: {sorted(unknown_types)[0]}")
     if projection == "communities":
         requested_types.add("community")
+    if community_id and uncommunitied:
+        raise ValueError("community and uncommunitied filters are mutually exclusive")
 
-    fetch_limit = min(10_501, offset + limit + 1)
+    fetch_limit = offset + limit + 1
     with store.connect() as connection:
+        community_members_json = None
+        if community_id:
+            community = connection.execute(
+                "SELECT member_ids_json FROM communities "
+                "WHERE id=? AND brain_id=? AND stale=0",
+                (community_id, store.brain_id),
+            ).fetchone()
+            if not community:
+                raise LookupError("cognitive graph community was not found")
+            community_members_json = str(community["member_ids_json"] or "[]")
+
         nodes, community_rows = _collect_nodes(
             connection,
             store,
@@ -714,7 +846,10 @@ def build_graph_overview(
             node_types=requested_types,
             domain=(domain or "").strip() or None,
             status=(status or "").strip() or None,
+            community_members_json=community_members_json,
+            uncommunitied=bool(uncommunitied),
         )
+        aggregates = _graph_aggregates(connection, store)
 
         answer_path_ids: set[str] | None = None
         if retrieval_run_id:
@@ -751,7 +886,9 @@ def build_graph_overview(
     communities = []
     for item in community_rows:
         visible_members = sorted(set(item["member_ids"]) & included)
-        if visible_members or projection == "communities":
+        if visible_members or (
+            projection == "communities" and item["id"] in included
+        ):
             communities.append({
                 "id": item["id"],
                 "label": item["label"],
@@ -780,6 +917,7 @@ def build_graph_overview(
         "projection": projection,
         "retrieval_run_id": retrieval_run_id,
         "layout_seed": stable_hash("cortex-layout", store.brain_id, projection)[:16],
+        "aggregates": aggregates,
         "nodes": clean_nodes,
         "edges": edges,
         "communities": communities,

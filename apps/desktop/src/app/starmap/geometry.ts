@@ -10,6 +10,7 @@ import {
   ZOOM_MAX,
   ZOOM_MIN
 } from './constants'
+import { aggregateStarRadius } from './lod'
 import type { Ring, Shape, Viewport } from './types'
 
 export function clamp(v: number, lo: number, hi: number): number {
@@ -29,6 +30,10 @@ export function hash(input: string): number {
 }
 
 export function nodeRadius(n: StarmapNode): number {
+  if (n.aggregate) {
+    return aggregateStarRadius(n.aggregate.count, n.aggregate.kind)
+  }
+
   if (n.cortexType) {
     const visual = CORTEX_NODE_VISUALS[n.cortexType]
     const activity = Math.min(1, Math.sqrt(Math.max(0, n.useCount)) * 0.12)

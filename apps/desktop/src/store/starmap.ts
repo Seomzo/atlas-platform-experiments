@@ -4,18 +4,25 @@ import {
   buildConstellationScene,
   type ConstellationBrainInput,
   type ConstellationBrainStatus,
-  constellationNodeBudget,
   type ConstellationScene,
   constellationStatusFromError,
   normalizeConstellationProfiles
 } from '@/app/starmap/constellation'
-import { cortexToStarmap } from '@/app/starmap/cortex'
+import {
+  cortexAggregatesToStarmap,
+  LOD_COMMUNITY_PAGE_SIZE,
+  LOD_DETAIL_PAGE_SIZE,
+  mergeResolvedRegion,
+  ProgressiveCortexResolver,
+  regionQuery
+} from '@/app/starmap/lod'
 import { getCortexDream, getCortexGraph, getCortexHealth, getStarmapGraph, runCortexDream } from '@/hermes'
 import type {
   CortexGraphResponse,
   CortexHealthResponse,
   CortexJobResponse,
   ProfileInfo,
+  StarmapAggregate,
   StarmapGraph
 } from '@/types/hermes'
 
@@ -33,10 +40,18 @@ export const $starmapBrainProfile = atom('default')
 export const $starmapBrainStatus = atom<ConstellationBrainStatus | null>(null)
 export const $starmapConstellation = atom<ConstellationScene | null>(null)
 export const $starmapMode = atom<'brain' | 'constellation'>('constellation')
+export const $starmapLodResolving = atom(false)
+export const $starmapLodError = atom<null | string>(null)
 
 let brainInflight: Promise<void> | null = null
 let constellationInflight: Promise<void> | null = null
 let requestEpoch = 0
+let aggregateBase: StarmapGraph | null = null
+const resolvedRegionKeys = new Map<string, Set<string>>()
+
+const detailResolver = new ProgressiveCortexResolver(({ brainProfile, cursor, region }) =>
+  getCortexGraph(LOD_DETAIL_PAGE_SIZE, brainProfile, { ...regionQuery(region), cursor })
+)
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
@@ -95,7 +110,11 @@ export async function loadStarmapGraph(force = false): Promise<void> {
       const healthRequest = getCortexHealth(brainProfile).catch(() => null)
 
       try {
-        const cortex = await getCortexGraph(500, brainProfile)
+        const cortex = await getCortexGraph(LOD_COMMUNITY_PAGE_SIZE, brainProfile, {
+          projection: 'communities',
+          types: ['community']
+        })
+
         const health = await healthRequest
 
         if (epoch !== requestEpoch) {
@@ -104,8 +123,19 @@ export async function loadStarmapGraph(force = false): Promise<void> {
 
         $cortexGraph.set(cortex)
         $cortexHealth.set(health)
-        $starmapGraph.set(cortexToStarmap(cortex))
-        $starmapBrainStatus.set(cortex.nodes.length ? 'ready' : 'empty')
+        aggregateBase = cortexAggregatesToStarmap(cortex)
+        let resolvedGraph = aggregateBase
+
+        for (const key of resolvedRegionKeys.get(brainProfile) ?? []) {
+          const cached = detailResolver.get(brainProfile, key)
+
+          if (cached) {
+            resolvedGraph = mergeResolvedRegion(resolvedGraph, cached)
+          }
+        }
+
+        $starmapGraph.set(resolvedGraph)
+        $starmapBrainStatus.set(cortex.aggregates.total_nodes ? 'ready' : 'empty')
         loadLatestDream(health, epoch, brainProfile)
       } catch (cortexError) {
         // Backward compatibility is only for the default brain on an
@@ -162,7 +192,6 @@ export async function loadStarmapConstellation(profiles: ProfileInfo[], force = 
 
   const epoch = requestEpoch
   const brains = normalizeConstellationProfiles(profiles)
-  const limit = constellationNodeBudget(brains.length)
   $starmapLoading.set(true)
   $starmapError.set(null)
 
@@ -171,9 +200,12 @@ export async function loadStarmapConstellation(profiles: ProfileInfo[], force = 
     const inputs = await Promise.all(
       brains.map(async (profile): Promise<ConstellationBrainInput> => {
         try {
-          const graph = await getCortexGraph(limit, profile.name)
+          const graph = await getCortexGraph(LOD_COMMUNITY_PAGE_SIZE, profile.name, {
+            projection: 'communities',
+            types: ['community']
+          })
 
-          return { graph, profile, status: graph.nodes.length ? 'ready' : 'empty' }
+          return { graph, profile, status: graph.aggregates.total_nodes ? 'ready' : 'empty' }
         } catch (error) {
           return { graph: null, profile, status: constellationStatusFromError(error) }
         }
@@ -213,6 +245,50 @@ export async function refreshCortexHealth(): Promise<void> {
   } catch (err) {
     if (epoch === requestEpoch) {
       $cortexStatusError.set(message(err))
+    }
+  }
+}
+
+export async function resolveStarmapAggregate(aggregate: StarmapAggregate): Promise<void> {
+  const epoch = requestEpoch
+  const brainProfile = $starmapBrainProfile.get()
+
+  if ($starmapMode.get() !== 'brain' || !aggregateBase) {
+    return
+  }
+
+  $starmapLodResolving.set(true)
+  $starmapLodError.set(null)
+
+  try {
+    const resolved = await detailResolver.resolve(brainProfile, aggregate)
+
+    if (epoch !== requestEpoch || brainProfile !== $starmapBrainProfile.get()) {
+      return
+    }
+
+    const keys = resolvedRegionKeys.get(brainProfile) ?? new Set<string>()
+    keys.add(aggregate.key)
+    resolvedRegionKeys.set(brainProfile, keys)
+
+    let graph = aggregateBase
+
+    for (const key of keys) {
+      const cached = detailResolver.get(brainProfile, key)
+
+      if (cached) {
+        graph = mergeResolvedRegion(graph, cached)
+      }
+    }
+
+    $starmapGraph.set(graph)
+  } catch (err) {
+    if (epoch === requestEpoch) {
+      $starmapLodError.set(message(err))
+    }
+  } finally {
+    if (epoch === requestEpoch) {
+      $starmapLodResolving.set(false)
     }
   }
 }
@@ -280,6 +356,9 @@ export function selectStarmapBrain(profile: string): Promise<void> {
   $cortexStatusError.set(null)
   $starmapError.set(null)
   $starmapBrainStatus.set(null)
+  $starmapLodError.set(null)
+  $starmapLodResolving.set(false)
+  aggregateBase = null
 
   return loadStarmapGraph(true)
 }
@@ -307,6 +386,9 @@ export function showStarmapConstellation(profiles: ProfileInfo[], force = false)
   $cortexStatusError.set(null)
   $starmapError.set(null)
   $starmapBrainStatus.set(null)
+  $starmapLodError.set(null)
+  $starmapLodResolving.set(false)
+  aggregateBase = null
   $starmapLoading.set(false)
 
   return loadStarmapConstellation(profiles, force)
@@ -349,4 +431,9 @@ export function resetStarmapGraph(): void {
   $starmapBrainStatus.set(null)
   $starmapConstellation.set(null)
   $starmapMode.set('constellation')
+  $starmapLodError.set(null)
+  $starmapLodResolving.set(false)
+  aggregateBase = null
+  resolvedRegionKeys.clear()
+  detailResolver.clear()
 }

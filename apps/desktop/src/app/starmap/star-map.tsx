@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { useThemeEpoch } from '@/hooks/use-theme-epoch'
 import { createDoubleTapDetector, isSmartZoomWheel } from '@/lib/trackpad-gestures'
-import type { StarmapGraph } from '@/types/hermes'
+import type { StarmapAggregate, StarmapGraph } from '@/types/hermes'
 
 import { computePalette, memoryInkFor, resolveRgb, rgba } from './color'
 import { RING_OUTER, TILT, ZOOM_MAX, ZOOM_MIN } from './constants'
@@ -18,11 +18,12 @@ import {
   stagedZoomOutViewport,
   zoomViewportAt
 } from './geometry'
+import { lodTierForZoom } from './lod'
 import { NodeContextMenu, type NodeMenuTarget } from './node-context-menu'
 import { drawScene, drawScramble } from './render'
 import { decodeShareCode, encodeShareCode, ShareCodeError } from './share-code'
 import { ShareControls } from './share-controls'
-import { buildSimulation } from './simulation'
+import { buildSimulation, updateSimulationViewport } from './simulation'
 import type { ConstellationSimulationLayout } from './simulation'
 import { formatDate } from './text'
 import { buildTimeAxis, dateAtReveal, type TimeAxis } from './time-axis'
@@ -117,7 +118,10 @@ export function StarMap({
   graph,
   imported = false,
   onImport,
+  lodHint,
+  lodResolving = false,
   onNodeSelect,
+  onResolveAggregate,
   onResetMap,
   selectedNodeId
 }: {
@@ -125,8 +129,11 @@ export function StarMap({
   constellation?: ConstellationSimulationLayout
   graph: StarmapGraph
   imported?: boolean
+  lodHint?: string
+  lodResolving?: boolean
   onImport?: (graph: StarmapGraph) => void
   onNodeSelect?: (id: null | string) => void
+  onResolveAggregate?: (aggregate: StarmapAggregate) => void
   onResetMap?: () => void
   selectedNodeId?: null | string
 }) {
@@ -253,6 +260,14 @@ export function StarMap({
   // Mark the canvas dirty and wake the (otherwise-idle) render loop.
   const invalidate = useCallback(() => invalidateRef.current(), [])
 
+  const syncSimulationViewport = useCallback(() => {
+    const simulation = simRef.current
+
+    if (simulation) {
+      updateSimulationViewport(simulation, nodesRef.current, linksRef.current, viewportRef.current, sizeRef.current)
+    }
+  }, [])
+
   const fitMapViewport = useCallback(
     (outer = ringsRef.current.at(-1)?.r ?? RING_OUTER): Viewport => {
       const { h, w } = sizeRef.current
@@ -297,6 +312,7 @@ export function StarMap({
 
       if (reducedMotion || duration <= 0) {
         viewportRef.current = target
+        syncSimulationViewport()
         invalidate()
 
         return
@@ -314,6 +330,7 @@ export function StarMap({
           x: from.x + (target.x - from.x) * eased,
           y: from.y + (target.y - from.y) * eased
         }
+        syncSimulationViewport()
         invalidate()
 
         if (progress < 1) {
@@ -326,7 +343,7 @@ export function StarMap({
 
       cameraRafRef.current = requestAnimationFrame(step)
     },
-    [cancelCameraAnimation, invalidate]
+    [cancelCameraAnimation, invalidate, syncSimulationViewport]
   )
 
   useEffect(() => cancelCameraAnimation, [cancelCameraAnimation])
@@ -431,6 +448,7 @@ export function StarMap({
     // Fit the actual disk (outermost ring), so a 3-ring map frames like a 12-ring
     // one — count changes the disk size, not the framing.
     viewportRef.current = fitMapViewport(rings[rings.length - 1]?.r ?? RING_OUTER)
+    updateSimulationViewport(sim, nodes, links, viewportRef.current, sizeRef.current)
     invalidate()
 
     if (selectedIdRef.current && !byId.has(selectedIdRef.current)) {
@@ -510,9 +528,10 @@ export function StarMap({
 
       if (w > 0 && h > 0) {
         viewportRef.current = fitMapViewport(radius)
+        syncSimulationViewport()
       }
     },
-    [fitMapViewport]
+    [fitMapViewport, syncSimulationViewport]
   )
 
   // Snap the camera to a reveal's stepped target (scrubbing / reset — no glide).
@@ -804,7 +823,7 @@ export function StarMap({
 
       // Constellation has no live scramble layer. Once its static scene and
       // fades settle, sleep until the simulation or an interaction invalidates
-      // it instead of blitting an unchanged 420-node canvas at 30 fps.
+      // it instead of blitting an unchanged aggregate canvas at 30 fps.
       if (!constellationMode || dirtyRef.current) {
         schedule()
       }
@@ -1052,6 +1071,12 @@ export function StarMap({
       if (drag.ring != null) {
         selectedRingRef.current = selectedRingRef.current === drag.ring ? null : drag.ring
       } else if (drag.id) {
+        const node = byIdRef.current.get(drag.id)
+
+        if (node?.aggregate) {
+          onResolveAggregate?.(node.aggregate)
+        }
+
         selectNode(selectedIdRef.current === drag.id ? null : drag.id)
       } else {
         selectedRingRef.current = null
@@ -1136,6 +1161,7 @@ export function StarMap({
       // single trackpad gesture exploding into a stack of 10% jumps.
       const zoomFactor = Math.exp(-clamp(e.deltaY, -40, 40) * 0.00265)
       const k = clamp(vp.k * zoomFactor, base.k, CORTEX_ZOOM_MAX)
+      const aggregateTarget = !zoomingOut ? pickNode(px, py)?.aggregate : undefined
 
       if (zoomingOut) {
         const result = stagedZoomOutViewport(vp, px, py, sizeRef.current.w, sizeRef.current.h, k, base.k)
@@ -1149,12 +1175,17 @@ export function StarMap({
         // beneath the cursor so every peripheral node is directly reachable.
         cameraModeRef.current = 'free'
         viewportRef.current = zoomViewportAt(vp, px, py, k)
+
+        if (aggregateTarget && lodTierForZoom(k, base.k) === 'detail') {
+          onResolveAggregate?.(aggregateTarget)
+        }
       }
     } else {
       const k = clamp(vp.k * (e.deltaY > 0 ? 0.9 : 1.1), ZOOM_MIN, ZOOM_MAX)
       viewportRef.current = { k, x: px - ((px - vp.x) / vp.k) * k, y: py - ((py - vp.y) / vp.k) * k }
     }
 
+    syncSimulationViewport()
     invalidate()
   }
 
@@ -1222,13 +1253,20 @@ export function StarMap({
             <ShareControls imported={imported} onImport={importCode} onResetMap={onResetMap} shareCode={shareCode} />
           </div>
         ) : !constellationMode ? (
-          <button
-            className="pointer-events-auto absolute right-4 top-4 z-20 flex items-center gap-1.5 rounded-md border border-white/10 bg-[#07121f]/80 px-2.5 py-1.5 text-[0.62rem] text-[#7f96ad] shadow-lg backdrop-blur-md transition hover:border-white/20 hover:text-white [-webkit-app-region:no-drag]"
-            onClick={resetView}
-            type="button"
-          >
-            Reset view
-          </button>
+          <>
+            {lodHint && graph.nodes.some(node => node.aggregate) ? (
+              <div className="pointer-events-none absolute left-4 top-4 z-20 rounded-md border border-[#56c8ff]/12 bg-[#07121f]/80 px-2.5 py-1.5 text-[0.6rem] text-[#7896ad] shadow-lg backdrop-blur-md">
+                {lodResolving ? `${lodHint}…` : lodHint}
+              </div>
+            ) : null}
+            <button
+              className="pointer-events-auto absolute right-4 top-4 z-20 flex items-center gap-1.5 rounded-md border border-white/10 bg-[#07121f]/80 px-2.5 py-1.5 text-[0.62rem] text-[#7f96ad] shadow-lg backdrop-blur-md transition hover:border-white/20 hover:text-white [-webkit-app-region:no-drag]"
+              onClick={resetView}
+              type="button"
+            >
+              Reset view
+            </button>
+          </>
         ) : null}
 
         {/* Legacy legend remains in-canvas; Cortex's interactive type key lives
