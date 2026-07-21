@@ -1,5 +1,5 @@
 import { useStore } from '@nanostores/react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 
 import { WorkerAvatar } from '@/app/profiles/worker-avatar'
@@ -12,28 +12,18 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Textarea } from '@/components/ui/textarea'
 import { Tip } from '@/components/ui/tooltip'
 import { useI18n } from '@/i18n'
-import { AtSign, Hash, MessageCircle, Send, Settings2, Users } from '@/lib/icons'
-import { cn } from '@/lib/utils'
-import {
-  $channels,
-  archiveChannel,
-  type AtlasChannel,
-  type ChannelTurnPolicy,
-  setChannelTurnPolicy
-} from '@/store/channels'
-import { $profiles, newSessionInProfile } from '@/store/profile'
+import { AtSign, Hash, MessageCircle, Settings2, Users } from '@/lib/icons'
+import { $channels, archiveChannel, type AtlasChannel } from '@/store/channels'
+import { $profiles, refreshProfiles } from '@/store/profile'
 import type { ProfileInfo } from '@/types/hermes'
 
 import { NEW_CHAT_ROUTE } from '../routes'
 
-import { directMessageWorkerId } from './routing'
-import { ChannelTranscript, type ChannelTranscriptMessage } from './transcript'
-
-const EMPTY_TRANSCRIPT: ChannelTranscriptMessage[] = []
+import { ChannelComposer } from './channel-composer'
+import { type ChannelWorkerIdentity, directMessageWorkerId, sendChannelTurn } from './routing'
+import { type ChannelPendingResponse, ChannelTranscript } from './transcript'
 
 export function ChannelsView() {
   const { channelId } = useParams<{ channelId: string }>()
@@ -41,6 +31,10 @@ export function ChannelsView() {
   const profiles = useStore($profiles)
   const channel = channels.find(item => item.id === channelId && !item.archived) ?? null
   const profilesById = useMemo(() => new Map(profiles.map(profile => [profile.name, profile])), [profiles])
+
+  useEffect(() => {
+    void refreshProfiles().catch(() => undefined)
+  }, [])
 
   if (!channel) {
     return <ChannelNotFound />
@@ -59,21 +53,66 @@ function ChannelWorkspace({
   const { t } = useI18n()
   const c = t.channels
   const navigate = useNavigate()
+  const scrollRef = useRef<HTMLElement>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [sending, setSending] = useState(false)
+  const [pending, setPending] = useState<ChannelPendingResponse[]>([])
 
   const memberProfiles = channel.memberWorkerIds
     .map(id => profilesById.get(id))
     .filter((profile): profile is ProfileInfo => Boolean(profile))
 
+  const workers = useMemo(
+    () =>
+      new Map<string, ChannelWorkerIdentity>(
+        memberProfiles.map(profile => [profile.name, { id: profile.name, name: profile.display_name || profile.name }])
+      ),
+    [memberProfiles]
+  )
+
   const dmWorkerId = directMessageWorkerId(channel)
   const dmWorker = dmWorkerId ? profilesById.get(dmWorkerId) : null
+  const allMembersDeleted = memberProfiles.length === 0
 
-  const openLiveWorkerChat = () => {
-    if (!dmWorkerId || !newSessionInProfile(dmWorkerId)) {
-      return
+  useEffect(() => {
+    const viewport = scrollRef.current
+
+    if (viewport) {
+      viewport.scrollTop = viewport.scrollHeight
     }
+  }, [channel.transcript.length, pending])
 
-    navigate(NEW_CHAT_ROUTE)
+  const send = async (text: string) => {
+    setSending(true)
+    setPending([])
+
+    try {
+      return await sendChannelTurn({
+        callbacks: {
+          onWorkerStart: workerId =>
+            setPending(current =>
+              current.some(item => item.workerId === workerId)
+                ? current
+                : [...current, { id: `pending-${channel.id}-${workerId}`, text: '', workerId }]
+            ),
+          onWorkerStream: (workerId, streamedText) =>
+            setPending(current =>
+              current.map(item => (item.workerId === workerId ? { ...item, text: streamedText } : item))
+            )
+        },
+        channel,
+        copy: {
+          emptyResponse: c.workerEmptyResponse,
+          missingWorker: c.workerMissing,
+          workerFailed: c.workerFailed
+        },
+        text,
+        workers
+      })
+    } finally {
+      setPending([])
+      setSending(false)
+    }
   }
 
   return (
@@ -141,129 +180,37 @@ function ChannelWorkspace({
         </div>
       </header>
 
-      <main className="relative z-0 flex min-h-0 flex-1 flex-col overflow-y-auto">
-        <ChannelTranscript messages={EMPTY_TRANSCRIPT} profilesById={profilesById} />
-        <div className="grid min-h-0 flex-1 place-items-center px-6 py-10">
-          <div className="w-full max-w-xl overflow-hidden rounded-2xl border border-[#7FA3F5]/18 bg-[#0A1228]/82 shadow-[0_28px_80px_rgba(0,0,0,.35)] backdrop-blur-xl">
-            <div className="h-px bg-linear-to-r from-transparent via-[#4F7BE8]/80 to-transparent" />
-            <div className="px-7 py-8 text-center">
-              <div className="mx-auto grid size-12 place-items-center rounded-2xl border border-[#4F7BE8]/35 bg-[#101C3D] text-[#7FA3F5]">
-                {channel.kind === 'dm' ? <MessageCircle className="size-6" /> : <Users className="size-6" />}
-              </div>
-              <div className="mt-4 font-mono text-[0.5625rem] font-semibold uppercase tracking-[0.22em] text-[#7FA3F5]/60">
-                {c.scaffoldBadge}
-              </div>
-              <h2 className="mt-2 text-base font-semibold text-[#F4F2EC]">
-                {channel.kind === 'dm' ? c.dmReadyTitle : c.routingInactiveTitle}
-              </h2>
-              <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-[#F4F2EC]/58">
-                {channel.kind === 'dm'
-                  ? c.dmReadyDescription(dmWorker?.display_name || dmWorker?.name || channel.name)
-                  : c.routingInactiveDescription}
-              </p>
-
-              {channel.kind === 'dm' && dmWorkerId ? (
-                <Button
-                  className="mt-5 bg-[#4F7BE8] text-white shadow-[0_12px_28px_rgba(79,123,232,.24)] hover:bg-[#628CF0]"
-                  onClick={openLiveWorkerChat}
-                >
-                  <MessageCircle className="size-4" />
-                  {c.openWorkerChat(dmWorker?.display_name || dmWorker?.name || channel.name)}
-                </Button>
-              ) : (
-                <div className="mt-5 inline-flex items-center gap-2 rounded-full border border-[#7FA3F5]/15 bg-[#101C3D]/72 px-3 py-1.5 font-mono text-[0.625rem] text-[#7FA3F5]/75">
-                  <AtSign className="size-3.5" />
-                  {c.turnPolicyMentionOnly}
-                </div>
-              )}
+      <main className="relative z-0 min-h-0 flex-1 overflow-y-auto" ref={scrollRef}>
+        {allMembersDeleted && (
+          <div className="mx-auto mt-6 flex max-w-3xl items-start gap-3 rounded-xl border border-[#F3C77A]/22 bg-[#F3C77A]/7 px-4 py-3 text-[#F7DEAE]">
+            <Users className="mt-0.5 size-4 shrink-0" />
+            <div>
+              <div className="text-xs font-semibold">{c.noActiveMembersTitle}</div>
+              <p className="mt-0.5 text-xs leading-5 text-[#F7DEAE]/68">{c.noActiveMembersDescription}</p>
             </div>
-          </div>
-        </div>
-      </main>
-
-      <ChannelComposer channel={channel} memberProfiles={memberProfiles} />
-      <ChannelSettingsDialog channel={channel} onClose={() => setSettingsOpen(false)} open={settingsOpen} />
-    </section>
-  )
-}
-
-function ChannelComposer({ channel, memberProfiles }: { channel: AtlasChannel; memberProfiles: ProfileInfo[] }) {
-  const { t } = useI18n()
-  const c = t.channels
-  const [draft, setDraft] = useState('')
-  const [mentionsOpen, setMentionsOpen] = useState(false)
-
-  const insertMention = (name: string) => {
-    setDraft(value => `${value}${value && !value.endsWith(' ') ? ' ' : ''}@${name} `)
-    setMentionsOpen(false)
-  }
-
-  return (
-    <footer className="relative z-20 shrink-0 border-t border-[#7FA3F5]/14 bg-[#0A1228]/94 px-4 pb-4 pt-3 backdrop-blur-xl">
-      <div className="relative mx-auto max-w-3xl">
-        {mentionsOpen && (
-          <div className="absolute bottom-[calc(100%+0.5rem)] left-0 w-64 overflow-hidden rounded-xl border border-[#7FA3F5]/20 bg-[#101C3D] p-1 shadow-2xl">
-            <div className="px-2 py-1.5 font-mono text-[0.5625rem] font-semibold uppercase tracking-[0.15em] text-[#7FA3F5]/60">
-              {c.mentionWorker}
-            </div>
-            {memberProfiles.map(profile => (
-              <button
-                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-[#F4F2EC]/78 hover:bg-[#4F7BE8]/15 hover:text-white"
-                key={profile.name}
-                onClick={() => insertMention(profile.display_name || profile.name)}
-                type="button"
-              >
-                <WorkerAvatar className="size-6 rounded-md text-[0.5625rem]" profile={profile} />
-                <span className="truncate">{profile.display_name || profile.name}</span>
-              </button>
-            ))}
           </div>
         )}
 
-        <div className="rounded-2xl border border-[#7FA3F5]/20 bg-[#101C3D]/88 p-2 shadow-[0_16px_45px_rgba(0,0,0,.28)] focus-within:border-[#4F7BE8]/65">
-          <Textarea
-            aria-label={c.composerPlaceholder(channel.name)}
-            className="min-h-16 resize-none border-0 bg-transparent px-2 py-1.5 text-sm text-[#F4F2EC] shadow-none placeholder:text-[#F4F2EC]/28 focus-visible:ring-0"
-            onChange={event => setDraft(event.target.value)}
-            placeholder={c.composerPlaceholder(channel.name)}
-            spellCheck
-            value={draft}
-          />
-          <div className="flex items-center gap-2 border-t border-[#7FA3F5]/10 px-1 pt-2">
-            <Tip label={c.mentionWorker}>
-              <Button
-                aria-expanded={mentionsOpen}
-                aria-label={c.mentionWorker}
-                className={cn(
-                  'text-[#7FA3F5]/70 hover:bg-[#4F7BE8]/15 hover:text-[#7FA3F5]',
-                  mentionsOpen && 'bg-[#4F7BE8]/15 text-[#7FA3F5]'
-                )}
-                onClick={() => setMentionsOpen(value => !value)}
-                size="icon-xs"
-                variant="ghost"
-              >
-                <AtSign className="size-4" />
-              </Button>
-            </Tip>
-            <span className="min-w-0 flex-1 truncate font-mono text-[0.5625rem] text-[#F4F2EC]/32">
-              {channel.kind === 'dm' ? c.dmComposerPending : c.composerPending}
-            </span>
-            <Tip label={c.sendUnavailable}>
-              <span>
-                <Button
-                  aria-label={c.sendUnavailable}
-                  className="bg-[#4F7BE8]/25 text-[#7FA3F5]/45"
-                  disabled
-                  size="icon-sm"
-                >
-                  <Send className="size-4" />
-                </Button>
-              </span>
-            </Tip>
+        {channel.transcript.length === 0 && pending.length === 0 && (
+          <div className="mx-auto grid max-w-xl place-items-center px-6 py-16 text-center">
+            <div className="grid size-12 place-items-center rounded-2xl border border-[#4F7BE8]/35 bg-[#101C3D] text-[#7FA3F5]">
+              {channel.kind === 'dm' ? <MessageCircle className="size-6" /> : <Hash className="size-6" />}
+            </div>
+            <h2 className="mt-4 text-base font-semibold text-[#F4F2EC]">{c.emptyTranscriptTitle}</h2>
+            <p className="mt-2 max-w-md text-sm leading-6 text-[#F4F2EC]/52">
+              {channel.kind === 'dm'
+                ? c.emptyDmTranscriptDescription(dmWorker?.display_name || dmWorker?.name || channel.name)
+                : c.emptyChannelTranscriptDescription}
+            </p>
           </div>
-        </div>
-      </div>
-    </footer>
+        )}
+
+        <ChannelTranscript messages={channel.transcript} pending={pending} profilesById={profilesById} />
+      </main>
+
+      <ChannelComposer channel={channel} memberProfiles={memberProfiles} onSend={send} sending={sending} />
+      <ChannelSettingsDialog channel={channel} onClose={() => setSettingsOpen(false)} open={settingsOpen} />
+    </section>
   )
 }
 
@@ -280,8 +227,6 @@ function ChannelSettingsDialog({
   const c = t.channels
   const navigate = useNavigate()
 
-  const updatePolicy = (value: string) => setChannelTurnPolicy(channel.id, value as ChannelTurnPolicy)
-
   return (
     <Dialog onOpenChange={value => !value && onClose()} open={open}>
       <DialogContent className="max-w-md">
@@ -290,23 +235,15 @@ function ChannelSettingsDialog({
           <DialogDescription>{c.settingsDescription}</DialogDescription>
         </DialogHeader>
 
-        <label className="grid gap-1.5 text-xs font-medium text-(--ui-text-secondary)">
-          {c.turnPolicy}
-          <Select onValueChange={updatePolicy} value={channel.settings.turnPolicy}>
-            <SelectTrigger className="h-9">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="mention-only">{c.turnPolicyMentionOnly}</SelectItem>
-              <SelectItem value="all-members">{c.turnPolicyAllMembers}</SelectItem>
-            </SelectContent>
-          </Select>
-          <span className="font-normal leading-relaxed text-(--ui-text-tertiary)">
-            {channel.settings.turnPolicy === 'mention-only'
-              ? c.turnPolicyMentionOnlyDescription
-              : c.turnPolicyAllMembersDescription}
-          </span>
-        </label>
+        <div className="rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-bg-quaternary) px-3 py-2.5">
+          <div className="flex items-center gap-2 text-xs font-semibold text-(--ui-text-secondary)">
+            <AtSign className="size-3.5 text-primary" />
+            {c.turnPolicyMentionOnly}
+          </div>
+          <p className="mt-1 text-[0.6875rem] leading-relaxed text-(--ui-text-tertiary)">
+            {channel.kind === 'dm' ? c.dmTurnPolicyDescription : c.turnPolicyMentionOnlyDescription}
+          </p>
+        </div>
 
         <DialogFooter className="mt-2 justify-between sm:justify-between">
           <Button

@@ -2,11 +2,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   $channels,
+  appendChannelTranscriptEntry,
   archiveChannel,
   CHANNELS_STORAGE_KEY,
   createChannel,
+  LEGACY_CHANNELS_STORAGE_KEY,
   normalizeChannelName,
-  setChannelTurnPolicy
+  setChannelSessionBinding
 } from './channels'
 
 describe('channels store', () => {
@@ -30,7 +32,9 @@ describe('channels store', () => {
       id: 'channel-service',
       memberWorkerIds: ['service', 'parts'],
       name: 'service-reports',
-      settings: { turnPolicy: 'mention-only' }
+      sessionBindings: {},
+      settings: { turnPolicy: 'mention-only' },
+      transcript: []
     })
     expect(JSON.parse(window.localStorage.getItem(CHANNELS_STORAGE_KEY) ?? '[]')).toEqual([created])
   })
@@ -40,7 +44,46 @@ describe('channels store', () => {
     expect(() => createChannel({ kind: 'dm', memberWorkerIds: ['riley', 'sam'], name: 'Riley' })).toThrow()
   })
 
-  it('persists settings and archive state without changing other channels', () => {
+  it('appends attributed transcript events and persists durable worker session bindings', () => {
+    createChannel(
+      { kind: 'channel', memberWorkerIds: ['service'], name: 'service' },
+      { createdAt: '2026-07-20T12:00:00.000Z', id: 'channel-service' }
+    )
+
+    appendChannelTranscriptEntry(
+      'channel-service',
+      { sender: { kind: 'user' }, text: 'Check the RO', turnId: 'turn-1' },
+      { createdAt: '2026-07-20T12:01:00.000Z', id: 'message-user' }
+    )
+    appendChannelTranscriptEntry(
+      'channel-service',
+      {
+        sender: { kind: 'worker', workerId: 'service' },
+        status: 'error',
+        text: 'Could not reach DMS',
+        turnId: 'turn-1'
+      },
+      { createdAt: '2026-07-20T12:02:00.000Z', id: 'message-worker' }
+    )
+    setChannelSessionBinding('channel-service', 'service', 'stored-session-service', '2026-07-20T12:01:01.000Z')
+
+    const stored = JSON.parse(window.localStorage.getItem(CHANNELS_STORAGE_KEY) ?? '[]')[0]
+
+    expect(stored.sessionBindings.service).toEqual({
+      createdAt: '2026-07-20T12:01:01.000Z',
+      sessionId: 'stored-session-service'
+    })
+    expect(stored.transcript).toEqual([
+      expect.objectContaining({ id: 'message-user', sender: { kind: 'user' }, status: 'message' }),
+      expect.objectContaining({
+        id: 'message-worker',
+        sender: { kind: 'worker', workerId: 'service' },
+        status: 'error'
+      })
+    ])
+  })
+
+  it('persists archive state without changing other channels', () => {
     createChannel(
       { kind: 'channel', memberWorkerIds: ['service'], name: 'service' },
       { createdAt: '2026-07-20T12:00:00.000Z', id: 'channel-service' }
@@ -50,12 +93,11 @@ describe('channels store', () => {
       { createdAt: '2026-07-20T12:01:00.000Z', id: 'dm-parts' }
     )
 
-    setChannelTurnPolicy('channel-service', 'all-members')
     archiveChannel('channel-service')
 
     expect($channels.get()).toEqual([
-      expect.objectContaining({ archived: true, id: 'channel-service', settings: { turnPolicy: 'all-members' } }),
-      expect.objectContaining({ archived: false, id: 'dm-parts', settings: { turnPolicy: 'mention-only' } })
+      expect.objectContaining({ archived: true, id: 'channel-service' }),
+      expect.objectContaining({ archived: false, id: 'dm-parts' })
     ])
   })
 
@@ -64,7 +106,7 @@ describe('channels store', () => {
     expect(normalizeChannelName('サービス 報告')).toBe('サービス-報告')
   })
 
-  it('hydrates valid persisted channels after a renderer restart', async () => {
+  it('hydrates transcript attribution and bindings after a renderer restart', async () => {
     window.localStorage.setItem(
       CHANNELS_STORAGE_KEY,
       JSON.stringify([
@@ -75,7 +117,19 @@ describe('channels store', () => {
           kind: 'dm',
           memberWorkerIds: ['service'],
           name: 'Service worker',
-          settings: { turnPolicy: 'mention-only' }
+          sessionBindings: {
+            service: { createdAt: '2026-07-20T12:00:01.000Z', sessionId: 'stored-service' }
+          },
+          settings: { turnPolicy: 'mention-only' },
+          transcript: [
+            {
+              createdAt: '2026-07-20T12:00:02.000Z',
+              id: 'message-service',
+              sender: { kind: 'worker', workerId: 'service' },
+              status: 'message',
+              text: 'Ready.'
+            }
+          ]
         },
         { id: 'invalid-row' }
       ])
@@ -85,7 +139,40 @@ describe('channels store', () => {
     const reloaded = await import('./channels')
 
     expect(reloaded.$channels.get()).toEqual([
-      expect.objectContaining({ id: 'dm-service', memberWorkerIds: ['service'] })
+      expect.objectContaining({
+        id: 'dm-service',
+        sessionBindings: { service: expect.objectContaining({ sessionId: 'stored-service' }) },
+        transcript: [expect.objectContaining({ sender: { kind: 'worker', workerId: 'service' }, text: 'Ready.' })]
+      })
     ])
+  })
+
+  it('migrates v1 metadata into v2 and enforces mention-only routing', async () => {
+    window.localStorage.setItem(
+      LEGACY_CHANNELS_STORAGE_KEY,
+      JSON.stringify([
+        {
+          archived: false,
+          createdAt: '2026-07-20T12:00:00.000Z',
+          id: 'channel-service',
+          kind: 'channel',
+          memberWorkerIds: ['service'],
+          name: 'service',
+          settings: { turnPolicy: 'all-members' }
+        }
+      ])
+    )
+    vi.resetModules()
+
+    const reloaded = await import('./channels')
+
+    expect(reloaded.$channels.get()[0]).toMatchObject({
+      id: 'channel-service',
+      sessionBindings: {},
+      settings: { turnPolicy: 'mention-only' },
+      transcript: []
+    })
+    expect(window.localStorage.getItem(reloaded.CHANNELS_STORAGE_KEY)).not.toBeNull()
+    expect(window.localStorage.getItem(reloaded.LEGACY_CHANNELS_STORAGE_KEY)).toBeNull()
   })
 })

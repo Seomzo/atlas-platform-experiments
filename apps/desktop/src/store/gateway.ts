@@ -181,15 +181,19 @@ function createSecondary(profile: string): Secondary {
   return entry
 }
 
-// Make `profile` the active gateway, lazily opening its socket if needed. The
-// primary is a no-op fast path. Background sockets are never closed here.
-export async function ensureGatewayForProfile(profile: string): Promise<void> {
+// Lazily open `profile`'s socket and return it. Foreground navigation uses the
+// default `activate=true`; background callers such as Atlas Teams fan-out pass
+// false so concurrent worker turns never race the visible chat's active pointer.
+// Background sockets are never closed here.
+export async function ensureGatewayForProfile(profile: string, activate = true): Promise<HermesGateway | null> {
   const key = normKey(profile)
 
   if (key === primaryProfile) {
-    setActive(key)
+    if (activate) {
+      setActive(key)
+    }
 
-    return
+    return primaryGateway
   }
 
   let entry = secondaries.get(key)
@@ -211,7 +215,11 @@ export async function ensureGatewayForProfile(profile: string): Promise<void> {
     }
   }
 
-  setActive(key)
+  if (activate) {
+    setActive(key)
+  }
+
+  return entry.gateway
 }
 
 // Reconnect the active gateway after a transient request failure. Primary
