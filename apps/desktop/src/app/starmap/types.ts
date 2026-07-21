@@ -42,6 +42,7 @@ export interface SimNode extends StarmapNode, SimulationNodeDatum {
 }
 
 export interface SimLink extends SimulationLinkDatum<SimNode> {
+  brainProfile?: string
   direction?: 'directed'
   id?: string
   source: SimNode | string

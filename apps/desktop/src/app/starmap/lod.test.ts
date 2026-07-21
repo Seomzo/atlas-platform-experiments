@@ -4,8 +4,9 @@ import type { CortexGraphNode, CortexGraphResponse, CortexNodeType, StarmapAggre
 
 import {
   aggregateStarRadius,
-  brainRegionRadius,
   cortexAggregatesToStarmap,
+  cortexNebulaToStarmap,
+  hasCompleteNebulaTypeCounts,
   hasOnlyAttestedAggregates,
   LOD_COMMUNITY_PAGE_SIZE,
   lodTierForZoom,
@@ -83,14 +84,13 @@ function response(
 }
 
 describe('Starmap level of detail', () => {
-  it('maps larger attested counts to strictly larger stars and brain regions', () => {
+  it('maps larger attested counts to strictly larger stars', () => {
     const counts = [0, 1, 10, 1_000, 50_000]
 
     for (let index = 1; index < counts.length; index += 1) {
       expect(aggregateStarRadius(counts[index]!, 'type')).toBeGreaterThan(
         aggregateStarRadius(counts[index - 1]!, 'type')
       )
-      expect(brainRegionRadius(counts[index]!, false)).toBeGreaterThan(brainRegionRadius(counts[index - 1]!, false))
     }
   })
 
@@ -145,6 +145,35 @@ describe('Starmap level of detail', () => {
     expect(graph.nodes.length).toBeLessThanOrEqual(NODE_TYPES.length)
     expect(hasOnlyAttestedAggregates(graph, payload)).toBe(true)
     expect(graph.nodes.every(item => item.aggregate && item.aggregate.count > 0)).toBe(true)
+  })
+
+  it('keeps real nebula nodes and edges while exact residual stars cover the bounded remainder', () => {
+    const payload = response({
+      nextCursor: 'cursor-2',
+      nodes: [node('entity-1', 'entity'), node('evidence-1', 'evidence')],
+      total: 50_000
+    })
+
+    payload.edges = [
+      {
+        created_at: '2026-07-20T00:00:00Z',
+        direction: 'directed',
+        id: 'edge-1',
+        metadata: {},
+        source: 'entity-1',
+        status: 'active',
+        target: 'evidence-1',
+        type: 'supported_by',
+        updated_at: '2026-07-20T00:00:00Z'
+      }
+    ]
+
+    const graph = cortexNebulaToStarmap(payload)
+
+    expect(graph.nodes.filter(item => !item.aggregate).map(item => item.id)).toEqual(['entity-1', 'evidence-1'])
+    expect(graph.edges).toHaveLength(1)
+    expect(graph.nodes.some(item => item.aggregate?.key.startsWith('remaining:'))).toBe(true)
+    expect(hasCompleteNebulaTypeCounts(graph, payload)).toBe(true)
   })
 
   it('keeps a 50k-node / 100k-edge fixture in a small steady-state aggregate scene', () => {

@@ -183,13 +183,23 @@ describe('share-code', () => {
     expect(decodeShareCode(wrapped).nodes).toHaveLength(sampleGraph().nodes.length)
   })
 
-  it('round-trips constellation mode and an encoded brain selection', () => {
+  it('round-trips nebula mode and an encoded brain selection', () => {
     const isolated = { brainProfile: 'service / west', mode: 'brain' as const }
+    const nebula = encodeStarmapViewState({ brainProfile: 'ignored', mode: 'nebula' })
 
     expect(decodeStarmapViewState(encodeStarmapViewState(isolated))).toEqual(isolated)
-    expect(decodeStarmapViewState(encodeStarmapViewState({ brainProfile: 'ignored', mode: 'constellation' }))).toEqual({
+    expect(nebula).toBe('view=nebula')
+    expect(decodeStarmapViewState(nebula)).toEqual({
       brainProfile: 'default',
-      mode: 'constellation'
+      mode: 'nebula'
+    })
+  })
+
+  it('migrates WS-16 constellation links into the shared nebula', () => {
+    expect(decodeStarmapViewState('?view=constellation')).toEqual({ brainProfile: 'default', mode: 'nebula' })
+    expect(decodeStarmapViewState('?view=constellation&brain=service')).toEqual({
+      brainProfile: 'default',
+      mode: 'nebula'
     })
   })
 })

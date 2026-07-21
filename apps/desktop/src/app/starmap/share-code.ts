@@ -191,7 +191,7 @@ export function decodeShareCode(code: string): StarmapGraph {
   return codec.decode(code)
 }
 
-export type StarmapViewMode = 'brain' | 'constellation'
+export type StarmapViewMode = 'brain' | 'nebula'
 
 export interface StarmapViewState {
   brainProfile: string
@@ -220,5 +220,7 @@ export function decodeStarmapViewState(value: string): StarmapViewState {
     return { brainProfile, mode: 'brain' }
   }
 
-  return { brainProfile: 'default', mode: 'constellation' }
+  // WS-16 emitted `view=constellation`; preserve those links while every new
+  // navigation state names the approved shared-sky mode explicitly.
+  return { brainProfile: 'default', mode: 'nebula' }
 }

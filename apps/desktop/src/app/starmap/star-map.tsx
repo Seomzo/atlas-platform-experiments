@@ -9,6 +9,7 @@ import type { StarmapAggregate, StarmapGraph } from '@/types/hermes'
 import { computePalette, memoryInkFor, resolveRgb, rgba } from './color'
 import { RING_OUTER, TILT, ZOOM_MAX, ZOOM_MIN } from './constants'
 import {
+  ambientNodePosition,
   centerViewportOn,
   clamp,
   distToSegmentSq,
@@ -24,7 +25,6 @@ import { drawScene, drawScramble } from './render'
 import { decodeShareCode, encodeShareCode, ShareCodeError } from './share-code'
 import { ShareControls } from './share-controls'
 import { buildSimulation, updateSimulationViewport } from './simulation'
-import type { ConstellationSimulationLayout } from './simulation'
 import { formatDate } from './text'
 import { buildTimeAxis, dateAtReveal, type TimeAxis } from './time-axis'
 import { Timeline } from './timeline'
@@ -114,23 +114,29 @@ function RevealLabel({ axis, revealStore }: { axis: TimeAxis; revealStore: Writa
 // and pointer wiring; layout lives in simulation.ts and painting in render.ts.
 export function StarMap({
   ariaLabel,
-  constellation,
+  brainFilter = null,
+  brainLabels,
   graph,
   imported = false,
+  inspectHint,
   onImport,
   lodHint,
   lodResolving = false,
+  nebula = false,
   onNodeSelect,
   onResolveAggregate,
   onResetMap,
   selectedNodeId
 }: {
   ariaLabel?: string
-  constellation?: ConstellationSimulationLayout
+  brainFilter?: null | string
+  brainLabels?: ReadonlyMap<string, string>
   graph: StarmapGraph
   imported?: boolean
+  inspectHint?: string
   lodHint?: string
   lodResolving?: boolean
+  nebula?: boolean
   onImport?: (graph: StarmapGraph) => void
   onNodeSelect?: (id: null | string) => void
   onResolveAggregate?: (aggregate: StarmapAggregate) => void
@@ -173,6 +179,7 @@ export function StarMap({
   const sizeRef = useRef({ h: 0, w: 0 })
   const dprRef = useRef(1)
   const dirtyRef = useRef(true)
+  const ambientTimeRef = useRef<null | number>(null)
   // Scrub = direct manipulation (snap the fades to the pointer); Play = the
   // cinematic birth/fade easing. One frame's worth of state, never re-rendered.
   const snapMotionRef = useRef(false)
@@ -215,7 +222,12 @@ export function StarMap({
   const camRadiusRef = useRef(RING_OUTER)
   const timeAxis = useMemo(() => buildTimeAxis(graph, 72), [graph])
   const cortex = graph.source === 'cortex'
-  const constellationMode = Boolean(constellation)
+  const nebulaMode = nebula
+
+  const ambientMotion = useMemo(
+    () => nebulaMode && !(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false),
+    [nebulaMode]
+  )
 
   // The current map as a WoW-style share code, recomputed only when the graph
   // changes (encode walks every node/edge/card, so don't redo it per render).
@@ -272,9 +284,13 @@ export function StarMap({
     (outer = ringsRef.current.at(-1)?.r ?? RING_OUTER): Viewport => {
       const { h, w } = sizeRef.current
 
+      if (nebulaMode) {
+        return { k: 1, x: w / 2, y: h / 2 }
+      }
+
       return fitViewport(w, h, outer, cortex ? { contain: true, padding: CORTEX_FIT_PADDING } : undefined)
     },
-    [cortex]
+    [cortex, nebulaMode]
   )
 
   const viewportForSelection = useCallback(
@@ -282,7 +298,7 @@ export function StarMap({
       const base = fitMapViewport()
       const node = id ? byIdRef.current.get(id) : null
 
-      if (!cortex || !node) {
+      if (!cortex || !node || nebulaMode) {
         return base
       }
 
@@ -291,7 +307,7 @@ export function StarMap({
 
       return centerViewportOn(w, h, node.x, node.y, k)
     },
-    [cortex, fitMapViewport]
+    [cortex, fitMapViewport, nebulaMode]
   )
 
   const cancelCameraAnimation = useCallback(() => {
@@ -434,7 +450,8 @@ export function StarMap({
 
         invalidate()
       },
-      constellation
+      nebulaMode,
+      size
     )
 
     simRef.current = sim
@@ -462,20 +479,20 @@ export function StarMap({
         simRef.current = null
       }
     }
-  }, [constellation, cortex, fitMapViewport, graph, invalidate, resetFades, selectNode, size])
+  }, [cortex, fitMapViewport, graph, invalidate, nebulaMode, resetFades, selectNode, size])
 
   // Selecting a Cortex node becomes a deliberate camera transition: center the
   // node and move into a closer neighborhood view. Clearing selection (Back,
   // empty-canvas click, or Reset) eases back to the contained whole-brain view.
   useEffect(() => {
-    if (!cortex || size.w <= 0 || size.h <= 0 || ringsRef.current.length === 0) {
+    if (!cortex || nebulaMode || size.w <= 0 || size.h <= 0 || ringsRef.current.length === 0) {
       return
     }
 
     setPlaying(false)
     cameraModeRef.current = selectedId ? 'focus' : 'overview'
     animateViewport(viewportForSelection(selectedId), selectedId ? CAMERA_EASE_MS : 340)
-  }, [animateViewport, cortex, graph, selectedId, size.h, size.w, viewportForSelection])
+  }, [animateViewport, cortex, graph, nebulaMode, selectedId, size.h, size.w, viewportForSelection])
 
   useEffect(() => {
     adjacencyRef.current = adjacency
@@ -711,7 +728,7 @@ export function StarMap({
     // on top. So an idle map costs a scramble + one drawImage, not a full redraw.
     let staticCanvas: HTMLCanvasElement | null = null
 
-    const paint = () => {
+    const paint = (time: number) => {
       const canvas = canvasRef.current
       const ctx = canvas?.getContext('2d')
 
@@ -754,6 +771,9 @@ export function StarMap({
       if (dirtyRef.current) {
         const { animating, ringLabelRects } = drawScene({
           adjacency: adjacencyRef.current,
+          ambientTime: ambientMotion ? time : null,
+          brainFilter,
+          brainLabels,
           byId: byIdRef.current,
           ctx: offCtx,
           dpr: dprRef.current,
@@ -764,6 +784,8 @@ export function StarMap({
           hoverRing: hoveredRingRef.current,
           links: linksRef.current,
           memById: memByIdRef.current,
+          inspectHint,
+          nebula: nebulaMode,
           nodes: nodesRef.current,
           palette,
           reveal: revealRef.current,
@@ -771,7 +793,7 @@ export function StarMap({
           selectedRing: selectedRingRef.current,
           size: sizeRef.current,
           snapMotion: snapMotionRef.current,
-          showStructure: !constellationMode,
+          showStructure: !nebulaMode,
           vp: viewportRef.current
         })
 
@@ -791,7 +813,7 @@ export function StarMap({
       ctx.clearRect(0, 0, canvas.width, canvas.height)
 
       if (focused) {
-        if (!constellationMode) {
+        if (!nebulaMode) {
           drawScramble({ ctx, dpr: dprRef.current, palette, rings: ringsRef.current, vp: viewportRef.current })
         }
 
@@ -800,7 +822,7 @@ export function StarMap({
       } else {
         ctx.drawImage(staticCanvas, 0, 0)
 
-        if (!constellationMode) {
+        if (!nebulaMode) {
           drawScramble({ ctx, dpr: dprRef.current, palette, rings: ringsRef.current, vp: viewportRef.current })
         }
       }
@@ -819,12 +841,17 @@ export function StarMap({
 
       force = false
       lastAnimTs = ts
-      paint()
+      ambientTimeRef.current = ambientMotion ? ts : null
+      paint(ts)
 
-      // Constellation has no live scramble layer. Once its static scene and
-      // fades settle, sleep until the simulation or an interaction invalidates
-      // it instead of blitting an unchanged aggregate canvas at 30 fps.
-      if (!constellationMode || dirtyRef.current) {
+      // The nebula's phase field is its only continuous work. Hidden/unfocused
+      // windows suspend the loop through `isPaused`; reduced-motion users get
+      // the same settled, static sky.
+      if (!nebulaMode || ambientMotion || dirtyRef.current) {
+        if (ambientMotion) {
+          dirtyRef.current = true
+        }
+
         schedule()
       }
     }
@@ -872,7 +899,7 @@ export function StarMap({
 
       invalidateRef.current = () => {}
     }
-  }, [constellationMode])
+  }, [ambientMotion, brainFilter, brainLabels, inspectHint, nebulaMode])
 
   // Size the backing canvas (DPR-aware).
   useEffect(() => {
@@ -895,23 +922,30 @@ export function StarMap({
     const vp = viewportRef.current
     // Hit radius mirrors the billboarded draw: rested fit scale, screen space.
 
-    const nodeK = cortex
-      ? Math.max(
-          0.9,
-          fitScale(sizeRef.current.w, sizeRef.current.h, ringsRef.current, {
-            contain: true,
-            padding: CORTEX_FIT_PADDING
-          })
-        )
-      : fitScale(sizeRef.current.w, sizeRef.current.h, ringsRef.current)
+    const nodeK = nebulaMode
+      ? 1
+      : cortex
+        ? Math.max(
+            0.9,
+            fitScale(sizeRef.current.w, sizeRef.current.h, ringsRef.current, {
+              contain: true,
+              padding: CORTEX_FIT_PADDING
+            })
+          )
+        : fitScale(sizeRef.current.w, sizeRef.current.h, ringsRef.current)
 
     let best: null | SimNode = null
     let bestD = Infinity
 
     for (const n of nodesRef.current) {
+      if (brainFilter && n.brainProfile !== brainFilter) {
+        continue
+      }
+
+      const position = ambientNodePosition(n, ambientTimeRef.current)
       const r = nodeRadius(n) * nodeK + 6
-      const sx = n.x * vp.k + vp.x
-      const sy = n.y * vp.k * TILT + vp.y
+      const sx = position.x * vp.k + vp.x
+      const sy = position.y * vp.k * TILT + vp.y
       const d = (sx - cssX) ** 2 + (sy - cssY) ** 2
 
       if (d < r * r && d < bestD) {
@@ -930,6 +964,10 @@ export function StarMap({
     let bestD = 25
 
     for (const link of linksRef.current) {
+      if (brainFilter && link.brainProfile !== brainFilter) {
+        continue
+      }
+
       const s = typeof link.source === 'object' ? link.source : byIdRef.current.get(String(link.source))
       const t = typeof link.target === 'object' ? link.target : byIdRef.current.get(String(link.target))
 
@@ -937,13 +975,16 @@ export function StarMap({
         continue
       }
 
+      const sourcePosition = ambientNodePosition(s, ambientTimeRef.current)
+      const targetPosition = ambientNodePosition(t, ambientTimeRef.current)
+
       const d = distToSegmentSq(
         cssX,
         cssY,
-        s.x * vp.k + vp.x,
-        s.y * vp.k * TILT + vp.y,
-        t.x * vp.k + vp.x,
-        t.y * vp.k * TILT + vp.y
+        sourcePosition.x * vp.k + vp.x,
+        sourcePosition.y * vp.k * TILT + vp.y,
+        targetPosition.x * vp.k + vp.x,
+        targetPosition.y * vp.k * TILT + vp.y
       )
 
       if (d < bestD) {
@@ -1053,20 +1094,6 @@ export function StarMap({
         return
       }
 
-      if (constellationMode) {
-        dragRef.current = {
-          id: null,
-          mode: 'none',
-          moved: false,
-          ring: null,
-          sx: 0,
-          sy: 0,
-          vp: viewportRef.current
-        }
-
-        return
-      }
-
       // Independent toggles: a date and a node can both be selected.
       if (drag.ring != null) {
         selectedRingRef.current = selectedRingRef.current === drag.ring ? null : drag.ring
@@ -1075,9 +1102,9 @@ export function StarMap({
 
         if (node?.aggregate) {
           onResolveAggregate?.(node.aggregate)
+        } else {
+          selectNode(selectedIdRef.current === drag.id ? null : drag.id)
         }
-
-        selectNode(selectedIdRef.current === drag.id ? null : drag.id)
       } else {
         selectedRingRef.current = null
         selectNode(null)
@@ -1132,9 +1159,9 @@ export function StarMap({
 
     e.preventDefault()
 
-    // Identity anchors and ownership lines are React overlays projected against
-    // the fitted constellation viewport, so this overview stays camera-locked.
-    if (constellationMode) {
+    // The shared nebula is already fitted to the viewport. Worker chips filter
+    // this stable composition; the isolated brain owns exploratory zoom.
+    if (nebulaMode) {
       return
     }
 
@@ -1252,7 +1279,7 @@ export function StarMap({
           <div className="pointer-events-auto absolute bottom-2 right-2 z-20 [-webkit-app-region:no-drag]">
             <ShareControls imported={imported} onImport={importCode} onResetMap={onResetMap} shareCode={shareCode} />
           </div>
-        ) : !constellationMode ? (
+        ) : !nebulaMode ? (
           <>
             {lodHint && graph.nodes.some(node => node.aggregate) ? (
               <div className="pointer-events-none absolute left-4 top-4 z-20 rounded-md border border-[#56c8ff]/12 bg-[#07121f]/80 px-2.5 py-1.5 text-[0.6rem] text-[#7896ad] shadow-lg backdrop-blur-md">
@@ -1285,7 +1312,7 @@ export function StarMap({
         ) : null}
       </div>
 
-      {cortex && !constellationMode ? (
+      {cortex && !nebulaMode ? (
         <div className="relative z-20 shrink-0 border-t border-white/8 bg-[#07111d]/94 px-4 py-2.5 shadow-[0_-14px_40px_rgba(0,0,0,0.2)] backdrop-blur-xl">
           <div className="flex min-w-0 flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[0.58rem] text-[#72899f]">
             <span className="text-[#536b82]">oldest at core · newer outward</span>

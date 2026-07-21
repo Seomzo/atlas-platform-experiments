@@ -242,7 +242,7 @@ describe('starmap Cortex loading', () => {
     expect(store.$cortexGraph.get()?.nodes[0]?.label).toBe('current-worker')
   })
 
-  it('loads one aggregate page per brain without a shared node ceiling', async () => {
+  it('loads one bounded real nebula page per brain without a shared node ceiling', async () => {
     const profiles = [profile('default', true), profile('parts'), profile('service'), profile('sales')]
     getCortexGraph.mockImplementation(async (_limit, brain) => {
       if (brain === 'service') {
@@ -252,41 +252,49 @@ describe('starmap Cortex loading', () => {
       return brain === 'sales' ? emptyCortex() : cortex(String(brain))
     })
 
-    await store.showStarmapConstellation(profiles)
+    await store.showStarmapNebula(profiles)
 
     expect(getCortexGraph).toHaveBeenCalledTimes(4)
-    expect(
-      getCortexGraph.mock.calls.every(
-        ([limit, , query]) => limit === 24 && query?.projection === 'communities' && query?.types?.[0] === 'community'
-      )
-    ).toBe(true)
-    expect(store.$starmapConstellation.get()?.partitions.map(partition => partition.status)).toEqual([
+    expect(getCortexGraph.mock.calls.every(([limit, , query]) => limit === 500 && query?.projection === 'growth')).toBe(
+      true
+    )
+    expect(store.$starmapNebula.get()?.brains.map(brain => brain.status)).toEqual([
       'ready',
       'ready',
       'empty',
       'disabled'
     ])
-    expect(store.$starmapConstellation.get()?.graph.nodes).toHaveLength(2)
-    expect(store.$starmapMode.get()).toBe('constellation')
+    expect(store.$starmapNebula.get()?.graph.nodes).toHaveLength(2)
+    expect(store.$starmapNebula.get()?.graph.nodes.map(node => node.brainProfile)).toEqual(['default', 'parts'])
+    expect(store.$starmapMode.get()).toBe('nebula')
   })
 
-  it('transitions from constellation to an isolated brain with one aggregate page', async () => {
+  it('uses chip selection as a dimming filter and isolate as navigation', async () => {
     const profiles = [profile('default', true), profile('service')]
     getCortexGraph.mockImplementation(async (_limit, brain) => cortex(String(brain)))
 
-    await store.showStarmapConstellation(profiles)
+    await store.showStarmapNebula(profiles)
+    const callsAfterSkyLoad = getCortexGraph.mock.calls.length
+
+    store.selectStarmapBrainFilter('service')
+
+    expect(store.$starmapMode.get()).toBe('nebula')
+    expect(store.$starmapBrainFilter.get()).toBe('service')
+    expect(getCortexGraph).toHaveBeenCalledTimes(callsAfterSkyLoad)
+
     await store.selectStarmapBrain('service')
 
     expect(store.$starmapMode.get()).toBe('brain')
     expect(store.$starmapBrainProfile.get()).toBe('service')
+    expect(store.$starmapBrainFilter.get()).toBeNull()
     expect(getCortexGraph).toHaveBeenLastCalledWith(24, 'service', {
       projection: 'communities',
       types: ['community']
     })
 
-    await store.showStarmapConstellation(profiles)
+    await store.showStarmapNebula(profiles)
 
-    expect(store.$starmapMode.get()).toBe('constellation')
+    expect(store.$starmapMode.get()).toBe('nebula')
     expect(store.$starmapBrainProfile.get()).toBe('default')
   })
 })

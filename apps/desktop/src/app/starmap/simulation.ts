@@ -13,7 +13,6 @@ import {
 import type { StarmapGraph, StarmapNode } from '@/types/hermes'
 
 import { RING_STEPS, TILT } from './constants'
-import type { ConstellationScene } from './constellation'
 import { clamp, hash, nodeRadius, radiusForRecency } from './geometry'
 import { formatDate } from './text'
 import { computeRecency, recForRatio } from './time-axis'
@@ -26,8 +25,6 @@ export interface BuiltSim {
   rings: Ring[]
   sim: Simulation<SimNode, SimLink>
 }
-
-export type ConstellationSimulationLayout = Pick<ConstellationScene, 'outerRadius' | 'partitions'>
 
 /** Freeze resolved detail outside the viewport and make force work zero-cost for
  * those nodes. The renderer separately culls their pixels and incident links. */
@@ -323,52 +320,49 @@ function buildLayout(
   }
 }
 
-function buildConstellationSimulation(
-  graph: StarmapGraph,
-  onTick: () => void,
-  constellation: ConstellationSimulationLayout
-): BuiltSim {
+const NEBULA_WELLS = [
+  [-0.68, -0.48],
+  [0.64, -0.54],
+  [-0.58, 0.54],
+  [0.58, 0.5],
+  [0, -0.02],
+  [-0.84, 0.02],
+  [0.84, 0.05],
+  [0.02, -0.74],
+  [-0.02, 0.72],
+  [-0.32, -0.2],
+  [0.32, 0.23],
+  [-0.3, 0.25],
+  [0.34, -0.24]
+] as const
+
+/** Stable category-biased well assignment. There is no owner-to-well mapping,
+ * so workers interleave spatially instead of claiming regions. */
+export function nebulaWellIndex(node: Pick<StarmapNode, 'category' | 'id'>, wellCount: number): number {
+  const count = Math.max(1, wellCount)
+  const neighborhood = hash(node.category || 'general') % count
+  const variation = hash(`${node.id}:nebula-variant`) % count
+
+  return (neighborhood + variation) % count
+}
+
+function buildNebulaSimulation(graph: StarmapGraph, onTick: () => void, size: { h: number; w: number }): BuiltSim {
   const { rec } = computeRecency(graph.nodes)
   const targets = new Map<string, { x: number; y: number }>()
 
-  for (const partition of constellation.partitions) {
-    const partitionNodes = graph.nodes
-      .filter(node => partition.nodeIds.includes(node.id))
-      .sort((left, right) => left.id.localeCompare(right.id))
+  const wellCount = Math.min(NEBULA_WELLS.length, Math.max(5, Math.ceil(graph.nodes.length / 70)))
+  const halfWidth = Math.max(190, (size.w - 150) / 2)
+  const halfHeight = Math.max(140, (size.h - 150) / (2 * TILT))
+  const wellRadius = clamp(Math.min(size.w, size.h) * 0.085, 24, 68)
 
-    const rankById = new Map(partitionNodes.map((node, index) => [node.id, index + 1]))
-    const byDomain = new Map<string, StarmapNode[]>()
+  for (const node of graph.nodes) {
+    const well = NEBULA_WELLS[nebulaWellIndex(node, wellCount)] ?? NEBULA_WELLS[0]
+    const angle = ((hash(`${node.id}:nebula-angle`) % 10_000) / 10_000) * Math.PI * 2
+    const distance = Math.sqrt((hash(`${node.id}:nebula-radius`) % 10_000) / 10_000) * wellRadius
 
-    for (const node of partitionNodes) {
-      const domain = node.category || 'general'
-      byDomain.set(domain, [...(byDomain.get(domain) ?? []), node])
-    }
-
-    const domains = [...byDomain].sort(([left], [right]) => left.localeCompare(right))
-
-    domains.forEach(([domain, domainNodes], domainIndex) => {
-      const domainCenter = (domainIndex / Math.max(1, domains.length)) * Math.PI * 2 - Math.PI / 2
-      const sector = domains.length > 1 ? (Math.PI * 2 * 0.72) / domains.length : Math.PI * 2
-
-      domainNodes.forEach((node, nodeIndex) => {
-        const spread = domainNodes.length === 1 ? 0 : (nodeIndex / (domainNodes.length - 1) - 0.5) * sector
-        const jitter = ((hash(`${node.id}:constellation`) % 1_000) / 1_000 - 0.5) * Math.min(0.45, sector * 0.24)
-        const angle = domainCenter + spread + jitter
-        const rank = rankById.get(node.id) ?? 1
-
-        const anchorAtCenter =
-          Math.hypot(partition.anchor.x - partition.center.x, partition.anchor.y - partition.center.y) < 1
-
-        const radius = Math.max(
-          anchorAtCenter ? 42 : 18,
-          partition.radius * 0.84 * Math.sqrt(rank / Math.max(1, partitionNodes.length))
-        )
-
-        targets.set(node.id, {
-          x: partition.center.x + Math.cos(angle) * radius,
-          y: partition.center.y + Math.sin(angle) * radius
-        })
-      })
+    targets.set(node.id, {
+      x: well[0] * halfWidth + Math.cos(angle) * distance,
+      y: well[1] * halfHeight + Math.sin(angle) * distance
     })
   }
 
@@ -394,34 +388,34 @@ function buildConstellationSimulation(
     .map(edge => ({ ...edge, source: edge.source, target: edge.target }))
 
   const sim = forceSimulation(nodes)
-    .alphaDecay(0.08)
-    .velocityDecay(0.68)
+    .alphaDecay(0.045)
+    .velocityDecay(0.66)
     .force(
       'charge',
-      forceManyBody<SimNode>().strength(node => (node.lodActive === false ? 0 : -9))
+      forceManyBody<SimNode>().strength(node => (node.lodActive === false ? 0 : -7))
     )
     .force(
       'link',
       forceLink<SimNode, SimLink>(links)
         .id(node => node.id)
-        .distance(18)
-        .strength(0.02)
+        .distance(22)
+        .strength(0.035)
     )
     .force(
       'collide',
       forceCollide<SimNode>()
-        .radius(node => (node.lodActive === false ? 0 : nodeRadius(node) + 3))
+        .radius(node => (node.lodActive === false ? 0 : nodeRadius(node) + 2.5))
         .iterations(2)
     )
-    .force('partition-x', forceX<SimNode>(node => targets.get(node.id)?.x ?? 0).strength(0.24))
-    .force('partition-y', forceY<SimNode>(node => targets.get(node.id)?.y ?? 0).strength(0.24))
+    .force('nebula-x', forceX<SimNode>(node => targets.get(node.id)?.x ?? 0).strength(0.2))
+    .force('nebula-y', forceY<SimNode>(node => targets.get(node.id)?.y ?? 0).strength(0.2))
     .on('tick', onTick)
 
   return {
     byId,
     links,
     nodes,
-    rings: [{ label: null, r: constellation.outerRadius, ratio: 1 }],
+    rings: [{ label: null, r: Math.max(halfWidth, halfHeight), ratio: 1 }],
     sim
   }
 }
@@ -432,10 +426,11 @@ function buildConstellationSimulation(
 export function buildSimulation(
   graph: StarmapGraph,
   onTick: () => void,
-  constellation?: ConstellationSimulationLayout
+  nebula = false,
+  size: { h: number; w: number } = { h: 700, w: 1_000 }
 ): BuiltSim {
-  if (constellation) {
-    return buildConstellationSimulation(graph, onTick, constellation)
+  if (nebula) {
+    return buildNebulaSimulation(graph, onTick, size)
   }
 
   const { maxTs, minTs, rec: recById, timed } = computeRecency(graph.nodes)

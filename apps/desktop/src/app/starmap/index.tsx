@@ -10,21 +10,21 @@ import { useI18n } from '@/i18n'
 import {
   $starmapBrainProfile,
   $starmapBrainStatus,
-  $starmapConstellation,
   $starmapError,
   $starmapGraph,
   $starmapLoading,
   $starmapMode,
+  $starmapNebula,
   selectStarmapBrain,
-  showStarmapConstellation
+  showStarmapNebula
 } from '@/store/starmap'
 import type { ProfileInfo, StarmapGraph } from '@/types/hermes'
 
 import { Panel, PanelEmpty } from '../overlays/panel'
 
-import { normalizeConstellationProfiles } from './constellation'
-import { ConstellationOverview } from './constellation-overview'
 import { CortexWorkspace } from './cortex-workspace'
+import { normalizeNebulaProfiles } from './nebula'
+import { NebulaOverview } from './nebula-overview'
 import { decodeStarmapViewState, encodeStarmapViewState } from './share-code'
 import { StarMap } from './star-map'
 
@@ -52,7 +52,7 @@ function BrainUnavailable({
           type="button"
         >
           <Codicon name="arrow-left" size="0.75rem" />
-          {t.starmap.cortex.constellation.backToConstellation}
+          {t.starmap.cortex.nebula.backToNebula}
           <span className="text-white/20">/</span>
           <span className="text-[#d9efff]">{brainName}</span>
         </button>
@@ -85,7 +85,7 @@ function BrainUnavailable({
   )
 }
 
-// The default route is the full constellation. A `view=brain&brain=...` query
+// The default route is the shared nebula. A `view=brain&brain=...` query
 // is a validated deep link into the existing isolated Cortex workspace.
 export function StarmapView({ onClose }: { onClose: () => void }) {
   const { t } = useI18n()
@@ -96,7 +96,7 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
   const error = useStore($starmapError)
   const brainProfile = useStore($starmapBrainProfile)
   const brainStatus = useStore($starmapBrainStatus)
-  const constellation = useStore($starmapConstellation)
+  const nebula = useStore($starmapNebula)
   const mode = useStore($starmapMode)
 
   const [imported, setImported] = useState<StarmapGraph | null>(null)
@@ -125,7 +125,7 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
     return () => void (cancelled = true)
   }, [])
 
-  const brains = useMemo(() => normalizeConstellationProfiles(profiles), [profiles])
+  const brains = useMemo(() => normalizeNebulaProfiles(profiles), [profiles])
 
   useEffect(() => {
     if (!profilesLoaded) {
@@ -142,7 +142,7 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
         navigate(STARMAP_ROUTE, { replace: true })
       }
 
-      void showStarmapConstellation(brains)
+      void showStarmapNebula(brains)
     }
   }, [brains, location.search, navigate, profilesLoaded])
 
@@ -155,13 +155,13 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
     navigate(`${STARMAP_ROUTE}?${encodeStarmapViewState({ brainProfile: profile, mode: 'brain' })}`)
   }
 
-  const backToConstellation = () => navigate(STARMAP_ROUTE)
+  const backToNebula = () => navigate(STARMAP_ROUTE)
   const selectedProfile = brains.find(profile => profile.name === brainProfile)
   const brainName = selectedProfile?.display_name.trim() || selectedProfile?.name || brainProfile
   const shown = imported ?? graph
   const cortex = mode === 'brain' && !imported && shown?.source === 'cortex'
-  const immersive = mode === 'constellation' || cortex || brainStatus === 'disabled' || brainStatus === 'unavailable'
-  const copy = t.starmap.cortex.constellation
+  const immersive = mode === 'nebula' || cortex || brainStatus === 'disabled' || brainStatus === 'unavailable'
+  const copy = t.starmap.cortex.nebula
 
   return (
     <Panel
@@ -174,16 +174,16 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
       contentClassName={immersive ? 'p-0!' : undefined}
       onClose={onClose}
     >
-      {!profilesLoaded || (loading && mode === 'constellation' && !constellation) ? (
+      {!profilesLoaded || (loading && mode === 'nebula' && !nebula) ? (
         <PageLoader aria-label={t.starmap.loading} className="min-h-0 flex-1" />
-      ) : mode === 'constellation' && constellation ? (
-        <ConstellationOverview onOpenBrain={openBrain} scene={constellation} />
+      ) : mode === 'nebula' && nebula ? (
+        <NebulaOverview onIsolateBrain={openBrain} scene={nebula} />
       ) : mode === 'brain' && brainStatus === 'disabled' ? (
         <BrainUnavailable
           brainName={brainName}
           detail={copy.disabledBrainDescription(brainName)}
           disabled
-          onBack={backToConstellation}
+          onBack={backToNebula}
           title={copy.disabledBrainTitle}
         />
       ) : mode === 'brain' && brainStatus === 'unavailable' ? (
@@ -191,7 +191,7 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
           brainName={brainName}
           detail={copy.unavailableBrainDescription(brainName)}
           disabled={false}
-          onBack={backToConstellation}
+          onBack={backToNebula}
           title={copy.unavailableBrainTitle}
         />
       ) : error ? (
@@ -205,7 +205,7 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
           brainName={brainName}
           brainProfile={brainProfile}
           graph={shown}
-          onBack={backToConstellation}
+          onBack={backToNebula}
           onSelectNode={setSelectedCortexNode}
           selectedNodeId={selectedCortexNode}
         />
@@ -215,10 +215,10 @@ export function StarmapView({ onClose }: { onClose: () => void }) {
             <div className="shrink-0 border-b px-4 py-2">
               <button
                 className="text-xs text-muted-foreground hover:text-foreground"
-                onClick={backToConstellation}
+                onClick={backToNebula}
                 type="button"
               >
-                ← {copy.backToConstellation} / {brainName}
+                ← {copy.backToNebula} / {brainName}
               </button>
             </div>
           ) : null}

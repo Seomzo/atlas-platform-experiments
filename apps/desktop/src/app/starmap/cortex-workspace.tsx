@@ -252,11 +252,11 @@ export function CortexWorkspace({
           <button
             className="flex h-9 max-w-56 shrink-0 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.045] px-3 text-[#8da4ba] transition hover:border-[#56c8ff]/25 hover:bg-white/[0.065] hover:text-[#d9efff]"
             onClick={onBack}
-            title={t.starmap.cortex.constellation.backToConstellation}
+            title={t.starmap.cortex.nebula.backToNebula}
             type="button"
           >
             <Codicon name="arrow-left" size="0.75rem" />
-            <span className="truncate text-[0.66rem]">{t.starmap.cortex.constellation.backToConstellation}</span>
+            <span className="truncate text-[0.66rem]">{t.starmap.cortex.nebula.backToNebula}</span>
             <span className="text-white/20">/</span>
             <span className="truncate text-[0.66rem] text-[#c5d8e9]">{brainName}</span>
           </button>
