@@ -6,6 +6,9 @@ interface ModelOptionsRequest {
    *  providers are listed (#56974). */
   explicitOnly?: boolean
   gateway?: HermesGateway
+  /** Explicit worker scope. Named-worker pickers use REST so the inventory is
+   *  resolved from that worker's config and credentials, not the active chat. */
+  profile?: string
   refresh?: boolean
   sessionId?: null | string
 }
@@ -13,10 +16,11 @@ interface ModelOptionsRequest {
 export function requestModelOptions({
   explicitOnly = true,
   gateway,
+  profile,
   refresh = false,
   sessionId
 }: ModelOptionsRequest): Promise<ModelOptionsResponse> {
-  if (gateway) {
+  if (gateway && !profile) {
     const params: Record<string, unknown> = {}
 
     if (sessionId) {
@@ -34,5 +38,5 @@ export function requestModelOptions({
     return gateway.request<ModelOptionsResponse>('model.options', params)
   }
 
-  return getGlobalModelOptions({ explicitOnly, ...(refresh ? { refresh: true } : {}) })
+  return getGlobalModelOptions({ explicitOnly, profile, ...(refresh ? { refresh: true } : {}) })
 }

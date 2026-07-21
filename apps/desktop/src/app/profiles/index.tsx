@@ -11,6 +11,7 @@ import { RowButton } from '@/components/ui/row-button'
 import { getProfileSoul, type ProfileInfo, updateProfileSoul } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { AlertTriangle, Save } from '@/lib/icons'
+import { displayModelName } from '@/lib/model-status-label'
 import { normalize } from '@/lib/text'
 import { cn } from '@/lib/utils'
 import { notify, notifyError } from '@/store/notifications'
@@ -26,6 +27,7 @@ import { DeleteProfileDialog } from './delete-profile-dialog'
 import { IdentityEditor } from './identity-editor'
 import { RenameProfileDialog } from './rename-profile-dialog'
 import { WorkerAvatar } from './worker-avatar'
+import { WorkerModelSection } from './worker-model-section'
 
 export function ProfilesView(props: React.ComponentProps<'section'>) {
   const { t } = useI18n()
@@ -243,7 +245,10 @@ function WorkerRow({
         <WorkerAvatar className="size-9 rounded-lg text-[0.7rem] ring-1 ring-white/5" profile={profile} />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[0.78rem] font-medium text-foreground/90">{displayName}</span>
-          <span className="block truncate text-[0.65rem] text-muted-foreground/60">{profile.role || p.roleNotSet}</span>
+          <span className="block truncate text-[0.65rem] text-muted-foreground/60">
+            {profile.role || p.roleNotSet}
+            {profile.model ? ` · ${displayModelName(profile.model)}` : ''}
+          </span>
         </span>
         <span className="flex shrink-0 items-center gap-1 text-[0.6rem] font-medium text-muted-foreground/60">
           <StatusDot tone={state.tone} />
@@ -312,17 +317,6 @@ function ProfileDetail({
                 </span>
               )
             },
-            {
-              label: p.modelLabel,
-              value: profile.model ? (
-                <span className="font-mono">
-                  {profile.model}
-                  {profile.provider ? <span className="text-muted-foreground/55"> · {profile.provider}</span> : null}
-                </span>
-              ) : (
-                <span className="text-muted-foreground/55">{p.notSet}</span>
-              )
-            },
             { label: p.skillsLabel, value: p.skills(profile.skill_count) },
             {
               label: p.workerHomeLabel,
@@ -336,6 +330,7 @@ function ProfileDetail({
         />
       </section>
 
+      <WorkerModelSection onUpdated={onUpdated} profile={profile} />
       <IdentityEditor onUpdated={onUpdated} profile={profile} />
       <SoulEditor profileName={profile.name} />
     </div>

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 
+import { ModelPickerDialog } from '@/components/model-picker'
 import { ActionStatus } from '@/components/ui/action-status'
 import { Button } from '@/components/ui/button'
 import {
@@ -10,12 +11,14 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
+import { DisclosureCaret } from '@/components/ui/disclosure-caret'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { createProfile, getProfileNameSuggestion, updateProfileIdentity, updateProfileSoul } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { AlertTriangle } from '@/lib/icons'
+import { displayModelName } from '@/lib/model-status-label'
 import type { ProfileInfo } from '@/types/hermes'
 
 const PROFILE_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
@@ -87,6 +90,9 @@ export function CreateProfileDialog({
   const [displayName, setDisplayName] = useState('')
   const [role, setRole] = useState('')
   const [tagline, setTagline] = useState('')
+  const [modelExpanded, setModelExpanded] = useState(false)
+  const [modelPickerOpen, setModelPickerOpen] = useState(false)
+  const [modelSelection, setModelSelection] = useState<null | { model: string; provider: string }>(null)
   const [step, setStep] = useState<'identity' | 'profile'>('identity')
   const [status, setStatus] = useState<'done' | 'idle' | 'saving'>('idle')
   const [error, setError] = useState<null | string>(null)
@@ -102,6 +108,9 @@ export function CreateProfileDialog({
     setDisplayName('')
     setRole('')
     setTagline('')
+    setModelExpanded(false)
+    setModelPickerOpen(false)
+    setModelSelection(null)
     setStep('identity')
     setError(null)
     setStatus('idle')
@@ -109,6 +118,15 @@ export function CreateProfileDialog({
 
   const derivedName = deriveProfileName(displayName)
   const busy = status === 'saving' || status === 'done'
+  const atlasProfile = profiles.find(profile => profile.is_default)
+  const currentModel = modelSelection?.model || atlasProfile?.model || ''
+  const currentProvider = modelSelection?.provider || atlasProfile?.provider || ''
+
+  const createModel =
+    modelSelection ||
+    (atlasProfile?.model && atlasProfile.provider
+      ? { model: atlasProfile.model, provider: atlasProfile.provider }
+      : null)
 
   useEffect(() => {
     if (!open || !displayName.trim()) {
@@ -183,7 +201,11 @@ export function CreateProfileDialog({
     }
 
     try {
-      await createProfile({ name: finalName, clone_from: cloneFrom })
+      await createProfile({
+        name: finalName,
+        clone_from: cloneFrom,
+        ...(createModel ? { model: createModel.model, provider: createModel.provider } : {})
+      })
 
       await updateProfileIdentity(finalName, {
         display_name: displayName,
@@ -246,6 +268,40 @@ export function CreateProfileDialog({
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">{p.cloneFromDesc}</p>
+              </div>
+
+              <div className="rounded-md bg-foreground/[0.025] px-3 py-2.5">
+                <button
+                  aria-expanded={modelExpanded}
+                  className="flex w-full items-center gap-3 text-left"
+                  onClick={() => setModelExpanded(value => !value)}
+                  type="button"
+                >
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-xs font-medium">{p.modelLabel}</span>
+                    <span className="mt-0.5 block truncate text-[0.68rem] text-muted-foreground">
+                      {modelSelection
+                        ? `${displayModelName(modelSelection.model)} · ${modelSelection.provider}`
+                        : p.sameAsAtlas}
+                    </span>
+                  </span>
+                  <DisclosureCaret className="shrink-0 text-muted-foreground" open={modelExpanded} />
+                </button>
+                {modelExpanded ? (
+                  <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 border-t border-border/70 pt-2.5">
+                    <p className="max-w-64 text-xs text-muted-foreground">{p.createModelDesc}</p>
+                    <div className="flex items-center gap-1.5">
+                      {modelSelection ? (
+                        <Button onClick={() => setModelSelection(null)} size="sm" type="button" variant="ghost">
+                          {p.useAtlasModel}
+                        </Button>
+                      ) : null}
+                      <Button onClick={() => setModelPickerOpen(true)} size="sm" type="button" variant="outline">
+                        {p.chooseModel}
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
               </div>
 
               <div className="grid gap-1.5">
@@ -338,6 +394,19 @@ export function CreateProfileDialog({
             )}
           </DialogFooter>
         </form>
+
+        {modelPickerOpen ? (
+          <ModelPickerDialog
+            contentClassName="z-[140]"
+            currentModel={currentModel}
+            currentProvider={currentProvider}
+            onOpenChange={setModelPickerOpen}
+            onSelect={setModelSelection}
+            open
+            profile={atlasProfile?.name}
+            showAddProvider={false}
+          />
+        ) : null}
       </DialogContent>
     </Dialog>
   )

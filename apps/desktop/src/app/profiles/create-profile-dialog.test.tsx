@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import type * as React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type * as HermesApi from '@/hermes'
@@ -7,6 +9,7 @@ import type { ProfileInfo } from '@/types/hermes'
 
 const api = vi.hoisted(() => ({
   createProfile: vi.fn(),
+  getGlobalModelOptions: vi.fn(),
   getProfileNameSuggestion: vi.fn(),
   updateProfileIdentity: vi.fn(),
   updateProfileSoul: vi.fn()
@@ -34,8 +37,22 @@ const defaultProfile: ProfileInfo = {
 }
 
 beforeEach(() => {
+  vi.stubGlobal(
+    'ResizeObserver',
+    class {
+      disconnect() {}
+      observe() {}
+      unobserve() {}
+    }
+  )
   api.createProfile.mockResolvedValue({ name: 'worker', ok: true, path: '/tmp/atlas/workers/worker' })
   api.getProfileNameSuggestion.mockResolvedValue({ available: true, name: 'worker', suggestion: 'worker' })
+  api.getGlobalModelOptions.mockResolvedValue({
+    providers: [
+      { authenticated: true, models: ['gpt-5.4'], name: 'OpenAI Codex', slug: 'openai-codex' },
+      { authenticated: true, models: ['claude-haiku-4-5'], name: 'Anthropic', slug: 'anthropic' }
+    ]
+  })
   api.updateProfileIdentity.mockResolvedValue({ avatar: null, display_name: 'Worker', role: '', tagline: '' })
   api.updateProfileSoul.mockResolvedValue({ ok: true })
 })
@@ -43,6 +60,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+  vi.unstubAllGlobals()
 })
 
 async function advanceToCreate(displayName: string) {
@@ -52,13 +70,23 @@ async function advanceToCreate(displayName: string) {
   fireEvent.click(screen.getByRole('button', { name: 'Create worker' }))
 }
 
+function renderDialog(props: React.ComponentProps<typeof CreateProfileDialog>) {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <CreateProfileDialog {...props} />
+    </QueryClientProvider>
+  )
+}
+
 describe('CreateProfileDialog', () => {
   it('derives the worker id and automatically suffixes a reserved collision', async () => {
     const onCreated = vi.fn()
 
     api.getProfileNameSuggestion.mockResolvedValue({ available: false, name: 'test', suggestion: 'test-2' })
 
-    render(<CreateProfileDialog onClose={vi.fn()} onCreated={onCreated} open profiles={[defaultProfile]} />)
+    renderDialog({ onClose: vi.fn(), onCreated, open: true, profiles: [defaultProfile] })
 
     fireEvent.change(screen.getByLabelText('Display name'), { target: { value: 'Test' } })
 
@@ -66,13 +94,42 @@ describe('CreateProfileDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
     fireEvent.click(screen.getByRole('button', { name: 'Create worker' }))
 
-    await waitFor(() => expect(api.createProfile).toHaveBeenCalledWith({ clone_from: 'default', name: 'test-2' }))
+    await waitFor(() =>
+      expect(api.createProfile).toHaveBeenCalledWith({
+        clone_from: 'default',
+        model: 'gpt-5.4',
+        name: 'test-2',
+        provider: 'openai-codex'
+      })
+    )
     expect(api.updateProfileIdentity).toHaveBeenCalledWith('test-2', {
       display_name: 'Test',
       role: '',
       tagline: ''
     })
     expect(onCreated).toHaveBeenCalledWith('test-2')
+  })
+
+  it('defaults to Atlas and can assign a different chat model during creation', async () => {
+    renderDialog({ onClose: vi.fn(), open: true, profiles: [defaultProfile] })
+
+    fireEvent.change(screen.getByLabelText('Display name'), { target: { value: 'Writer' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+    expect(screen.getByText('Same as Atlas')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { expanded: false, name: /Model/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Choose model' }))
+    fireEvent.click(await screen.findByText('claude-haiku-4-5'))
+    fireEvent.click(screen.getByRole('button', { name: 'Create worker' }))
+
+    await waitFor(() =>
+      expect(api.createProfile).toHaveBeenCalledWith({
+        clone_from: 'default',
+        model: 'claude-haiku-4-5',
+        name: 'worker',
+        provider: 'anthropic'
+      })
+    )
   })
 
   it.each([
@@ -89,7 +146,7 @@ describe('CreateProfileDialog', () => {
     api.getProfileNameSuggestion.mockResolvedValue({ available: true, name: 'writer', suggestion: 'writer' })
     api.createProfile.mockRejectedValue(new Error(error))
 
-    render(<CreateProfileDialog onClose={vi.fn()} open profiles={[defaultProfile]} />)
+    renderDialog({ onClose: vi.fn(), open: true, profiles: [defaultProfile] })
 
     await advanceToCreate('Writer')
 

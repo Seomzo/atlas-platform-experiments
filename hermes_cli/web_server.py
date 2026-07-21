@@ -6921,7 +6921,33 @@ def _denormalize_config_from_web(config: Dict[str, Any]) -> Dict[str, Any]:
                 }
         except Exception:
             pass  # can't read disk config — just use the string form
+    elif _is_main_model_assignment(config):
+        # Worker model editing sends the same minimal assignment persisted by
+        # the main picker, but through the profile-scoped config API. Route that
+        # exact shape through the shared assignment chokepoint so switching
+        # providers cannot retain the previous provider's endpoint or key.
+        provider = str(model_val.get("provider") or "").strip()
+        model = str(model_val.get("default") or "").strip()
+        if provider and model:
+            try:
+                disk_model = load_config().get("model", {})
+                provider, model = _normalize_main_model_assignment(provider, model)
+                config["model"] = _apply_main_model_assignment(
+                    disk_model, provider, model
+                )
+            except Exception:
+                pass  # fall back to the ordinary deep merge below
     return config
+
+
+def _is_main_model_assignment(config: Dict[str, Any]) -> bool:
+    model = config.get("model")
+    return (
+        isinstance(model, dict)
+        and set(model) <= {"default", "provider"}
+        and bool(str(model.get("default") or "").strip())
+        and bool(str(model.get("provider") or "").strip())
+    )
 
 
 @app.put("/api/config")
@@ -6942,6 +6968,11 @@ async def update_config(body: ConfigUpdate, profile: Optional[str] = None):
                 effective_candidate,
             )
             existing = read_raw_config()
+            if _is_main_model_assignment(body.config):
+                # The assignment chokepoint intentionally removes stale model
+                # subkeys. Do not let the outer root-level deep merge resurrect
+                # those deleted keys from the previous provider.
+                existing.pop("model", None)
             save_config(_deep_merge(existing, incoming))
         return {"ok": True}
     except HTTPException:

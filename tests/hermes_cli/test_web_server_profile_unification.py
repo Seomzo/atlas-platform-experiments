@@ -60,6 +60,46 @@ class TestProfileScopedConfig:
         assert _cfg(isolated_profiles["worker_beta"]).get("timezone") == "Mars/Olympus"
         assert _cfg(isolated_profiles["default"]).get("timezone") != "Mars/Olympus"
 
+    def test_config_put_writes_worker_model_without_touching_default(
+        self, client, isolated_profiles
+    ):
+        (isolated_profiles["worker_beta"] / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "model": {
+                        "provider": "custom",
+                        "default": "frontier-model",
+                        "base_url": "https://old-worker.example/v1",
+                        "api_key": "old-worker-key",
+                        "context_length": 1234,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        default_before = _cfg(isolated_profiles["default"])
+
+        resp = client.put(
+            "/api/config",
+            json={
+                "config": {
+                    "model": {
+                        "provider": "openrouter",
+                        "default": "google/gemini-3.1-flash-lite",
+                    }
+                },
+                "profile": "worker_beta",
+            },
+        )
+
+        assert resp.status_code == 200
+        assert _cfg(isolated_profiles["worker_beta"])["model"] == {
+            "provider": "openrouter",
+            "default": "google/gemini-3.1-flash-lite",
+            "base_url": "",
+        }
+        assert _cfg(isolated_profiles["default"]) == default_before
+
     def test_config_get_reads_target_profile(self, client, isolated_profiles):
         (isolated_profiles["worker_beta"] / "config.yaml").write_text(
             "timezone: Venus/Cloud\n", encoding="utf-8"
