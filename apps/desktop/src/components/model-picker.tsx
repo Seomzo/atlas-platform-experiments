@@ -25,6 +25,11 @@ interface ModelPickerDialogProps {
   currentModel: string
   currentProvider: string
   onSelect: (selection: { provider: string; model: string }) => void
+  /** Resolve options against a named worker rather than the active chat. */
+  profile?: string
+  /** Provider setup is active-profile UI. Named-worker pickers hide it until
+   *  that flow can be scoped without changing the foreground worker. */
+  showAddProvider?: boolean
   /**
    * Optional class to apply to DialogContent. Use to override z-index when
    * stacking the picker on top of another fixed overlay (e.g. the desktop
@@ -42,6 +47,8 @@ export function ModelPickerDialog({
   currentModel,
   currentProvider,
   onSelect,
+  profile,
+  showAddProvider = true,
   contentClassName
 }: ModelPickerDialogProps) {
   const { t } = useI18n()
@@ -54,8 +61,8 @@ export function ModelPickerDialog({
   const [search, setSearch] = useState('')
 
   const modelOptions = useQuery({
-    queryKey: ['model-options', sessionId || 'global'],
-    queryFn: () => requestModelOptions({ gateway: gw, sessionId }),
+    queryKey: ['model-options', sessionId || 'global', profile || 'active'],
+    queryFn: () => requestModelOptions({ gateway: gw, profile, sessionId }),
     enabled: open
   })
 
@@ -117,9 +124,11 @@ export function ModelPickerDialog({
         </Command>
 
         <DialogFooter className="flex-row items-center justify-end gap-2 bg-card p-3">
-          <Button onClick={addProvider} variant="ghost">
-            {copy.addProvider}
-          </Button>
+          {showAddProvider ? (
+            <Button onClick={addProvider} variant="ghost">
+              {copy.addProvider}
+            </Button>
+          ) : null}
           <Button onClick={() => onOpenChange(false)} variant="outline">
             {t.common.cancel}
           </Button>

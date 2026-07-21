@@ -348,9 +348,9 @@ export function renameSession(
   })
 }
 
-export function getGlobalModelInfo(): Promise<ModelInfoResponse> {
+export function getGlobalModelInfo(profile?: string): Promise<ModelInfoResponse> {
   return window.hermesDesktop.api<ModelInfoResponse>({
-    ...profileScoped(),
+    ...profileScoped(profile),
     path: '/api/model/info',
     timeoutMs: STARTUP_REQUEST_TIMEOUT_MS
   })
@@ -459,7 +459,7 @@ export function saveHermesConfigForProfile(config: HermesConfigRecord, profile: 
     ...profileScoped(profile),
     path: '/api/config',
     method: 'PUT',
-    body: { config }
+    body: { config, profile }
   })
 }
 

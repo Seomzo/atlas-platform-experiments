@@ -778,6 +778,8 @@ export interface ProfileCreatePayload {
   clone_from_default?: boolean
   name: string
   no_skills?: boolean
+  model?: string
+  provider?: string
 }
 
 export interface ProfileNameSuggestion {

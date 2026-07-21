@@ -1178,6 +1178,20 @@ export interface Translations {
     copySetup: string
     copying: string
     modelLabel: string
+    modelSectionDesc: string
+    changeModel: string
+    savingModel: string
+    modelSaved: string
+    failedLoadModel: string
+    failedSaveModel: string
+    modelNeedsSetupBadge: string
+    modelNeedsApiKey: (provider: string) => string
+    providerNotReady: (provider: string) => string
+    configuredProvidersOnly: string
+    sameAsAtlas: string
+    createModelDesc: string
+    chooseModel: string
+    useAtlasModel: string
     skillsLabel: string
     runtimeSection: string
     runtimeDesc: string

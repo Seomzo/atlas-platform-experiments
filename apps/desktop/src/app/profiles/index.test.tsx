@@ -9,10 +9,16 @@ import type { ProfileInfo } from '@/types/hermes'
 const getProfiles = vi.fn()
 const getProfileIdentity = vi.fn()
 const getProfileSoul = vi.fn()
+const getHermesConfigRecordForProfile = vi.fn()
+const getGlobalModelInfo = vi.fn()
+const getGlobalModelOptions = vi.fn()
 
 vi.mock('@/hermes', async importOriginal => ({
   ...(await importOriginal<typeof HermesApi>()),
   getProfiles: () => getProfiles(),
+  getGlobalModelInfo: (profile: string) => getGlobalModelInfo(profile),
+  getGlobalModelOptions: (opts: unknown) => getGlobalModelOptions(opts),
+  getHermesConfigRecordForProfile: (profile: string) => getHermesConfigRecordForProfile(profile),
   getProfileIdentity: (name: string) => getProfileIdentity(name),
   getProfileSoul: (name: string) => getProfileSoul(name)
 }))
@@ -70,6 +76,20 @@ beforeEach(async () => {
     tagline: ''
   }))
   getProfileSoul.mockResolvedValue({ content: '', exists: false })
+  getHermesConfigRecordForProfile.mockImplementation(async (name: string) => ({
+    model: name === 'default' ? 'gpt-5.4' : 'claude-sonnet-4-5'
+  }))
+  getGlobalModelInfo.mockImplementation(async (name: string) =>
+    name === 'default'
+      ? { capabilities: {}, model: 'gpt-5.4', provider: 'openai-codex' }
+      : { capabilities: {}, model: 'claude-sonnet-4-5', provider: 'anthropic' }
+  )
+  getGlobalModelOptions.mockResolvedValue({
+    providers: [
+      { authenticated: true, models: ['gpt-5.4'], name: 'OpenAI Codex', slug: 'openai-codex' },
+      { authenticated: true, models: ['claude-sonnet-4-5'], name: 'Anthropic', slug: 'anthropic' }
+    ]
+  })
 })
 
 afterEach(() => {
@@ -104,7 +124,7 @@ describe('Workers page', () => {
     expect(selectWorker).not.toBeNull()
     fireEvent.click(selectWorker!)
 
-    expect(await screen.findByText('claude-sonnet-4-5')).toBeTruthy()
+    expect(await screen.findByText('Anthropic · claude-sonnet-4-5')).toBeTruthy()
     expect(screen.getByText('7 skills')).toBeTruthy()
     expect(screen.getByText('/tmp/atlas/workers/service-advisor')).toBeTruthy()
     expect(screen.getAllByText('Standby').length).toBeGreaterThan(0)
