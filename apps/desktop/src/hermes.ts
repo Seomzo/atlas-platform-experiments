@@ -48,6 +48,7 @@ import type {
   PaginatedSessions,
   ProfileCreatePayload,
   ProfileIdentity,
+  ProfileNameSuggestion,
   ProfileSetupCommand,
   ProfileSoul,
   ProfilesResponse,
@@ -157,6 +158,7 @@ export type {
   ProfileCreatePayload,
   ProfileIdentity,
   ProfileInfo,
+  ProfileNameSuggestion,
   ProfileSetupCommand,
   ProfileSoul,
   ProfilesResponse,
@@ -960,6 +962,12 @@ export function getProfiles(): Promise<ProfilesResponse> {
   return window.hermesDesktop.api<ProfilesResponse>({
     path: '/api/profiles',
     timeoutMs: STARTUP_REQUEST_TIMEOUT_MS
+  })
+}
+
+export function getProfileNameSuggestion(name: string): Promise<ProfileNameSuggestion> {
+  return window.hermesDesktop.api<ProfileNameSuggestion>({
+    path: `/api/profiles/name-suggestion?name=${encodeURIComponent(name)}`
   })
 }
 

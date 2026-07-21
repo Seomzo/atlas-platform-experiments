@@ -33,6 +33,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import List, Optional, Tuple
 
 from agent.skill_utils import is_excluded_skill_path
+from hermes_cli.brand import brand_text
 
 _PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
@@ -343,10 +344,40 @@ def validate_profile_name(name: str) -> None:
         )
     if name in _RESERVED_NAMES:
         raise ValueError(
-            f"Profile name {name!r} is reserved — it collides with either "
-            f"the Hermes installation itself or a common system binary.  "
-            f"Pick a different name."
+            brand_text(
+                f"Profile name {name!r} is reserved — it collides with either "
+                f"the Hermes installation itself or a common system binary.  "
+                f"Pick a different name."
+            )
         )
+
+
+def suggest_profile_name(name: str) -> str:
+    """Return the first valid, unused profile id based on *name*.
+
+    The unsuffixed id wins when available. Reserved or existing ids advance to
+    ``-2``, ``-3``, and so on while staying within the 64-character limit.
+    """
+    canon = normalize_profile_name(name)
+    if not _PROFILE_ID_RE.match(canon):
+        validate_profile_name(canon)
+    attempt = 1
+
+    while True:
+        suffix = "" if attempt == 1 else f"-{attempt}"
+        base = canon[: 64 - len(suffix)].rstrip("_-") or "worker"
+        candidate = f"{base}{suffix}"
+
+        try:
+            validate_profile_name(candidate)
+        except ValueError:
+            attempt += 1
+            continue
+
+        if not profile_exists(candidate):
+            return candidate
+
+        attempt += 1
 
 
 def validate_alias_name(name: str) -> None:

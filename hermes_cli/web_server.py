@@ -14058,6 +14058,24 @@ async def list_profiles_endpoint():
         return {"profiles": _fallback_profile_dicts(profiles_mod)}
 
 
+@app.get("/api/profiles/name-suggestion")
+async def profile_name_suggestion_endpoint(name: str):
+    """Resolve a derived worker id before the desktop submits creation."""
+    from hermes_cli import profiles as profiles_mod
+
+    try:
+        canon = profiles_mod.normalize_profile_name(name)
+        suggestion = profiles_mod.suggest_profile_name(canon)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "available": suggestion == canon,
+        "name": canon,
+        "suggestion": suggestion,
+    }
+
+
 @app.post("/api/profiles")
 async def create_profile_endpoint(body: ProfileCreate):
     from hermes_cli import profiles as profiles_mod

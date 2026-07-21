@@ -780,6 +780,12 @@ export interface ProfileCreatePayload {
   no_skills?: boolean
 }
 
+export interface ProfileNameSuggestion {
+  available: boolean
+  name: string
+  suggestion: string
+}
+
 export interface ProfileInfo {
   display_name: string
   gateway_running: boolean

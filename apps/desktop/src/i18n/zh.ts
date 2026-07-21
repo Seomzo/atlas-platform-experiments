@@ -1532,7 +1532,6 @@ export const zh: Translations = {
   profiles: {
     close: '关闭员工管理',
     nameHint: '小写字母、数字、连字符和下划线。必须以字母或数字开头。',
-    namePlaceholder: 'service-advisor',
     title: '员工',
     count: count => `${count} 位员工`,
     search: '搜索员工…',
@@ -1624,7 +1623,7 @@ export const zh: Translations = {
     deleting: '删除中…',
     createDesc: '每位员工都是独立的 Atlas 环境，拥有自己的配置、技能和指令。',
     createIdentityDesc: '设置这位员工对外显示的姓名、角色和简介。',
-    workerIdLabel: '员工 ID',
+    workerIdPreview: name => `员工 ID：${name}`,
     nameLabel: '名称',
     cloneFrom: '克隆来源',
     cloneFromNone: '无（空白）',
@@ -1632,6 +1631,8 @@ export const zh: Translations = {
     cloneFromDefault: '从默认员工克隆',
     cloneFromDefaultDesc: '从你的默认员工复制配置、技能和 SOUL.md。',
     invalidName: hint => `名称无效。${hint}`,
+    reservedName: '该名称为保留名称，请尝试其他名称。',
+    takenName: '该名称已被使用，请尝试其他名称。',
     nameRequired: '名称为必填项。',
     creating: '创建中…',
     createAction: '创建员工',
@@ -1652,7 +1653,7 @@ export const zh: Translations = {
     failedCopy: '复制安装命令失败',
     failedLoadSoul: '加载 SOUL.md 失败',
     failedSaveSoul: '保存 SOUL.md 失败',
-    failedCreate: '创建员工失败',
+    failedCreate: '无法创建该员工，请重试。',
     failedRename: '重命名员工失败'
   },
 

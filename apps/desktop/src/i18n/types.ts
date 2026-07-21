@@ -1131,7 +1131,6 @@ export interface Translations {
   profiles: {
     close: string
     nameHint: string
-    namePlaceholder: string
     title: string
     count: (count: number) => string
     search: string
@@ -1223,7 +1222,7 @@ export interface Translations {
     deleting: string
     createDesc: string
     createIdentityDesc: string
-    workerIdLabel: string
+    workerIdPreview: (name: string) => string
     nameLabel: string
     cloneFrom: string
     cloneFromNone: string
@@ -1231,6 +1230,8 @@ export interface Translations {
     cloneFromDefault: string
     cloneFromDefaultDesc: string
     invalidName: (hint: string) => string
+    reservedName: string
+    takenName: string
     nameRequired: string
     creating: string
     createAction: string

@@ -42,6 +42,67 @@ def _profile_home(default_home: Path, name: str) -> Path:
     return home
 
 
+def test_profile_name_suggestion_suffixes_reserved_and_existing_names(
+    client,
+    profile_env,
+):
+    _profile_home(profile_env, "writer")
+
+    reserved = client.get(
+        "/api/profiles/name-suggestion",
+        params={"name": "test"},
+    )
+    existing = client.get(
+        "/api/profiles/name-suggestion",
+        params={"name": "writer"},
+    )
+    available = client.get(
+        "/api/profiles/name-suggestion",
+        params={"name": "researcher"},
+    )
+    invalid = client.get(
+        "/api/profiles/name-suggestion",
+        params={"name": "bad name"},
+    )
+
+    assert reserved.status_code == 200
+    assert reserved.json() == {
+        "available": False,
+        "name": "test",
+        "suggestion": "test-2",
+    }
+    assert existing.status_code == 200
+    assert existing.json() == {
+        "available": False,
+        "name": "writer",
+        "suggestion": "writer-2",
+    }
+    assert available.status_code == 200
+    assert available.json() == {
+        "available": True,
+        "name": "researcher",
+        "suggestion": "researcher",
+    }
+    assert invalid.status_code == 400
+    assert "Invalid profile name" in invalid.json()["detail"]
+
+
+def test_reserved_profile_create_error_uses_public_brand(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setenv("HERMES_PUBLIC_BRAND", "atlas")
+
+    response = client.post(
+        "/api/profiles",
+        json={"name": "test", "clone_from": None},
+    )
+
+    assert response.status_code == 400
+    assert "Atlas installation" in response.json()["detail"]
+    assert "Hermes" not in response.json()["detail"]
+
+
 @pytest.mark.parametrize("name", ["default", "writer"])
 def test_identity_defaults_when_file_is_missing(client, profile_env, name):
     _profile_home(profile_env, name)

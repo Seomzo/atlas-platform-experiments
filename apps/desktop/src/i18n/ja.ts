@@ -1332,7 +1332,6 @@ export const ja = defineLocale({
   profiles: {
     close: 'ワーカー管理を閉じる',
     nameHint: '小文字、数字、ハイフン、アンダースコア。文字または数字で始める必要があります。',
-    namePlaceholder: 'service-advisor',
     title: 'ワーカー',
     count: count => `${count} 人のワーカー`,
     search: 'ワーカーを検索...',
@@ -1426,7 +1425,7 @@ export const ja = defineLocale({
     deleting: '削除中...',
     createDesc: 'ワーカーは独立した Atlas 環境で、それぞれ固有の設定、スキル、指示を持ちます。',
     createIdentityDesc: 'このワーカーの表示名、役割、紹介文を設定します。',
-    workerIdLabel: 'ワーカー ID',
+    workerIdPreview: name => `ワーカー ID：${name}`,
     nameLabel: '名前',
     cloneFrom: '複製元',
     cloneFromNone: 'なし（空）',
@@ -1434,6 +1433,8 @@ export const ja = defineLocale({
     cloneFromDefault: 'デフォルトワーカーから設定を複製',
     cloneFromDefaultDesc: 'デフォルトワーカーから設定、スキル、SOUL.md をコピーします。',
     invalidName: hint => `無効なワーカー ID。${hint}`,
+    reservedName: 'その名前は予約されています。別の名前をお試しください。',
+    takenName: 'その名前はすでに使用されています。別の名前をお試しください。',
     nameRequired: '名前は必須です',
     creating: '作成中...',
     createAction: 'ワーカーを作成',
@@ -1454,7 +1455,7 @@ export const ja = defineLocale({
     failedCopy: 'セットアップコマンドのコピーに失敗しました',
     failedLoadSoul: 'SOUL.md の読み込みに失敗しました',
     failedSaveSoul: 'SOUL.md の保存に失敗しました',
-    failedCreate: 'ワーカーの作成に失敗しました',
+    failedCreate: 'このワーカーを作成できませんでした。もう一度お試しください。',
     failedRename: 'ワーカーの名前変更に失敗しました'
   },
 

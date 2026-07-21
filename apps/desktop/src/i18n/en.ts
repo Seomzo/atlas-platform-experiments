@@ -1360,7 +1360,6 @@ export const en: Translations = {
   profiles: {
     close: 'Close workers',
     nameHint: 'Lowercase letters, digits, hyphens, and underscores. Must start with a letter or digit.',
-    namePlaceholder: 'service-advisor',
     title: 'Workers',
     count: count => `${count} ${count === 1 ? 'worker' : 'workers'}`,
     search: 'Search workers...',
@@ -1453,7 +1452,7 @@ export const en: Translations = {
     deleting: 'Deleting...',
     createDesc: 'Workers are independent Atlas environments with their own config, skills, and directives.',
     createIdentityDesc: 'Give this worker a customer-facing name, role, and tagline.',
-    workerIdLabel: 'Worker ID',
+    workerIdPreview: name => `Worker ID: ${name}`,
     nameLabel: 'Name',
     cloneFrom: 'Clone from',
     cloneFromNone: 'None (blank)',
@@ -1461,6 +1460,8 @@ export const en: Translations = {
     cloneFromDefault: 'Clone from default',
     cloneFromDefaultDesc: 'Copy config, skills, and SOUL.md from your default worker.',
     invalidName: hint => `Invalid name. ${hint}`,
+    reservedName: 'That name is reserved — try a different one.',
+    takenName: 'That name is already in use — try a different one.',
     nameRequired: 'Name is required.',
     creating: 'Creating...',
     createAction: 'Create worker',
@@ -1481,7 +1482,7 @@ export const en: Translations = {
     failedCopy: 'Failed to copy setup command',
     failedLoadSoul: 'Failed to load SOUL.md',
     failedSaveSoul: 'Failed to save SOUL.md',
-    failedCreate: 'Failed to create worker',
+    failedCreate: 'Could not create this worker. Try again.',
     failedRename: 'Failed to rename worker'
   },
 
