@@ -29,6 +29,33 @@ export function hash(input: string): number {
   return h >>> 0
 }
 
+export function ambientNodePosition(
+  node: Pick<StarmapNode, 'id'> & { x: number; y: number },
+  time: null | number
+): { x: number; y: number } {
+  if (time === null) {
+    return node
+  }
+
+  const phase = ((hash(`${node.id}:nebula-motion`) % 10_000) / 10_000) * Math.PI * 2
+
+  return {
+    x: node.x + Math.cos(time * 0.00016 + phase) * 1.35,
+    y: node.y + Math.sin(time * 0.00013 + phase * 1.37) * 1.1
+  }
+}
+
+export function ambientNodeTwinkle(node: Pick<StarmapNode, 'aggregate' | 'id'>, time: null | number): number {
+  if (time === null) {
+    return 1
+  }
+
+  const phase = ((hash(`${node.id}:nebula-twinkle`) % 10_000) / 10_000) * Math.PI * 2
+  const wave = 0.5 + Math.sin(time * 0.0011 + phase) * 0.5
+
+  return node.aggregate ? 0.9 + wave * 0.1 : 0.68 + wave * 0.32
+}
+
 export function nodeRadius(n: StarmapNode): number {
   if (n.aggregate) {
     return aggregateStarRadius(n.aggregate.count, n.aggregate.kind)

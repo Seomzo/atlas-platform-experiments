@@ -12,6 +12,7 @@ import { cortexToStarmap } from './cortex'
 export const LOD_COMMUNITY_PAGE_SIZE = 24
 export const LOD_DETAIL_PAGE_SIZE = 160
 export const LOD_DETAIL_PAGES_PER_RESOLVE = 2
+export const NEBULA_PAGE_SIZE = 500
 
 export type LodTier = 'aggregate' | 'detail'
 
@@ -23,10 +24,6 @@ export function aggregateStarRadius(count: number, kind: StarmapAggregate['kind'
   const base = kind === 'community' ? 7.2 : 6.2
 
   return base + Math.log10(Math.max(0, count) + 1) * 2.1
-}
-
-export function brainRegionRadius(totalNodes: number, main: boolean): number {
-  return (main ? 118 : 72) + Math.sqrt(Math.max(0, totalNodes)) * (main ? 0.62 : 0.5)
 }
 
 function aggregateNode(
@@ -109,6 +106,100 @@ export function cortexAggregatesToStarmap(response: CortexGraphResponse): Starma
       totalNodes: response.aggregates.total_nodes
     }
   }
+}
+
+/** Build the default dense-nebula projection from one bounded real graph page.
+ * Native nodes and edges remain inspectable, while one exact residual star per
+ * type represents rows beyond the page. This keeps a large brain bounded
+ * without turning the whole sky into a single aggregate badge. */
+export function cortexNebulaToStarmap(response: CortexGraphResponse): StarmapGraph {
+  const graph = cortexToStarmap(response)
+  const visibleByType = new Map<CortexNodeType, number>()
+  const communityCounts = new Map(response.communities.map(item => [item.id, item.member_count]))
+
+  const nodes = graph.nodes.map(node => {
+    const type = node.cortexType
+
+    if (type) {
+      visibleByType.set(type, (visibleByType.get(type) ?? 0) + 1)
+    }
+
+    const memberCount = type === 'community' ? communityCounts.get(node.id) : undefined
+
+    if (!memberCount) {
+      return node
+    }
+
+    return {
+      ...node,
+      aggregate: {
+        count: memberCount,
+        key: `community:${node.id}`,
+        kind: 'community' as const,
+        sourceId: node.id
+      },
+      summary: `${memberCount} attested community members`,
+      useCount: memberCount
+    }
+  })
+
+  for (const item of response.aggregates.types) {
+    const remaining = Math.max(0, item.count - (visibleByType.get(item.type) ?? 0))
+
+    if (!remaining) {
+      continue
+    }
+
+    const aggregate: StarmapAggregate = {
+      count: remaining,
+      key: `remaining:${item.type}`,
+      kind: 'type',
+      type: item.type
+    }
+
+    nodes.push(
+      aggregateNode(aggregate, {
+        category: 'unresolved',
+        cortexType: item.type,
+        id: `aggregate:${aggregate.key}`,
+        label: item.type,
+        timestamp: null
+      })
+    )
+  }
+
+  return {
+    ...graph,
+    clusters: response.aggregates.types.map(item => ({ category: item.type, count: item.count })),
+    nodes,
+    stats: {
+      ...graph.stats,
+      aggregateTier: response.aggregates.total_nodes > graph.nodes.length,
+      relationCount: response.aggregates.relation_count,
+      totalNodes: response.aggregates.total_nodes,
+      visibleRealNodes: graph.nodes.length
+    }
+  }
+}
+
+/** Every real node counts as one row; only residual type stars expand to their
+ * exact count. Community stars remain real community rows whose glow encodes
+ * membership, so their member count must not inflate the graph's type totals. */
+export function hasCompleteNebulaTypeCounts(graph: StarmapGraph, response: CortexGraphResponse): boolean {
+  const totals = new Map<CortexNodeType, number>()
+
+  for (const node of graph.nodes) {
+    const type = node.cortexType
+
+    if (!type) {
+      return false
+    }
+
+    const count = node.aggregate?.key.startsWith('remaining:') ? node.aggregate.count : 1
+    totals.set(type, (totals.get(type) ?? 0) + count)
+  }
+
+  return response.aggregates.types.every(item => (totals.get(item.type) ?? 0) === item.count)
 }
 
 export function hasOnlyAttestedAggregates(graph: StarmapGraph, response: CortexGraphResponse): boolean {

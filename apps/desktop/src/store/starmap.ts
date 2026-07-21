@@ -1,21 +1,22 @@
 import { atom } from 'nanostores'
 
 import {
-  buildConstellationScene,
-  type ConstellationBrainInput,
-  type ConstellationBrainStatus,
-  type ConstellationScene,
-  constellationStatusFromError,
-  normalizeConstellationProfiles
-} from '@/app/starmap/constellation'
-import {
   cortexAggregatesToStarmap,
   LOD_COMMUNITY_PAGE_SIZE,
   LOD_DETAIL_PAGE_SIZE,
   mergeResolvedRegion,
+  NEBULA_PAGE_SIZE,
   ProgressiveCortexResolver,
   regionQuery
 } from '@/app/starmap/lod'
+import {
+  buildNebulaScene,
+  type NebulaBrainInput,
+  type NebulaBrainStatus,
+  type NebulaScene,
+  nebulaStatusFromError,
+  normalizeNebulaProfiles
+} from '@/app/starmap/nebula'
 import { getCortexDream, getCortexGraph, getCortexHealth, getStarmapGraph, runCortexDream } from '@/hermes'
 import type {
   CortexGraphResponse,
@@ -37,14 +38,15 @@ export const $cortexHealth = atom<CortexHealthResponse | null>(null)
 export const $cortexDreamJob = atom<CortexJobResponse | null>(null)
 export const $cortexStatusError = atom<null | string>(null)
 export const $starmapBrainProfile = atom('default')
-export const $starmapBrainStatus = atom<ConstellationBrainStatus | null>(null)
-export const $starmapConstellation = atom<ConstellationScene | null>(null)
-export const $starmapMode = atom<'brain' | 'constellation'>('constellation')
+export const $starmapBrainStatus = atom<NebulaBrainStatus | null>(null)
+export const $starmapBrainFilter = atom<null | string>(null)
+export const $starmapNebula = atom<NebulaScene | null>(null)
+export const $starmapMode = atom<'brain' | 'nebula'>('nebula')
 export const $starmapLodResolving = atom(false)
 export const $starmapLodError = atom<null | string>(null)
 
 let brainInflight: Promise<void> | null = null
-let constellationInflight: Promise<void> | null = null
+let nebulaInflight: Promise<void> | null = null
 let requestEpoch = 0
 let aggregateBase: StarmapGraph | null = null
 const resolvedRegionKeys = new Map<string, Set<string>>()
@@ -163,7 +165,7 @@ export async function loadStarmapGraph(force = false): Promise<void> {
     } catch (err) {
       if (epoch === requestEpoch) {
         $starmapError.set(message(err))
-        $starmapBrainStatus.set(constellationStatusFromError(err))
+        $starmapBrainStatus.set(nebulaStatusFromError(err))
       }
     } finally {
       if (epoch === requestEpoch) {
@@ -181,51 +183,48 @@ export async function loadStarmapGraph(force = false): Promise<void> {
   return task
 }
 
-export async function loadStarmapConstellation(profiles: ProfileInfo[], force = false): Promise<void> {
-  if (constellationInflight) {
-    return constellationInflight
+export async function loadStarmapNebula(profiles: ProfileInfo[], force = false): Promise<void> {
+  if (nebulaInflight) {
+    return nebulaInflight
   }
 
-  if ($starmapConstellation.get() && !force) {
+  if ($starmapNebula.get() && !force) {
     return
   }
 
   const epoch = requestEpoch
-  const brains = normalizeConstellationProfiles(profiles)
+  const brains = normalizeNebulaProfiles(profiles)
   $starmapLoading.set(true)
   $starmapError.set(null)
 
   let task!: Promise<void>
   task = (async () => {
     const inputs = await Promise.all(
-      brains.map(async (profile): Promise<ConstellationBrainInput> => {
+      brains.map(async (profile): Promise<NebulaBrainInput> => {
         try {
-          const graph = await getCortexGraph(LOD_COMMUNITY_PAGE_SIZE, profile.name, {
-            projection: 'communities',
-            types: ['community']
-          })
+          const graph = await getCortexGraph(NEBULA_PAGE_SIZE, profile.name, { projection: 'growth' })
 
           return { graph, profile, status: graph.aggregates.total_nodes ? 'ready' : 'empty' }
         } catch (error) {
-          return { graph: null, profile, status: constellationStatusFromError(error) }
+          return { graph: null, profile, status: nebulaStatusFromError(error) }
         }
       })
     )
 
     if (epoch === requestEpoch) {
-      $starmapConstellation.set(buildConstellationScene(inputs))
+      $starmapNebula.set(buildNebulaScene(inputs))
     }
   })().finally(() => {
     if (epoch === requestEpoch) {
       $starmapLoading.set(false)
     }
 
-    if (constellationInflight === task) {
-      constellationInflight = null
+    if (nebulaInflight === task) {
+      nebulaInflight = null
     }
   })
 
-  constellationInflight = task
+  nebulaInflight = task
 
   return task
 }
@@ -346,9 +345,10 @@ export function selectStarmapBrain(profile: string): Promise<void> {
 
   requestEpoch += 1
   brainInflight = null
-  constellationInflight = null
+  nebulaInflight = null
   $starmapMode.set('brain')
   $starmapBrainProfile.set(selected)
+  $starmapBrainFilter.set(null)
   $starmapGraph.set(null)
   $cortexGraph.set(null)
   $cortexHealth.set(null)
@@ -363,22 +363,23 @@ export function selectStarmapBrain(profile: string): Promise<void> {
   return loadStarmapGraph(true)
 }
 
-export function showStarmapConstellation(profiles: ProfileInfo[], force = false): Promise<void> {
-  if ($starmapMode.get() === 'constellation' && !force) {
-    if (constellationInflight) {
-      return constellationInflight
+export function showStarmapNebula(profiles: ProfileInfo[], force = false): Promise<void> {
+  if ($starmapMode.get() === 'nebula' && !force) {
+    if (nebulaInflight) {
+      return nebulaInflight
     }
 
-    if ($starmapConstellation.get()) {
+    if ($starmapNebula.get()) {
       return Promise.resolve()
     }
   }
 
   requestEpoch += 1
   brainInflight = null
-  constellationInflight = null
-  $starmapMode.set('constellation')
+  nebulaInflight = null
+  $starmapMode.set('nebula')
   $starmapBrainProfile.set('default')
+  $starmapBrainFilter.set(null)
   $starmapGraph.set(null)
   $cortexGraph.set(null)
   $cortexHealth.set(null)
@@ -391,7 +392,18 @@ export function showStarmapConstellation(profiles: ProfileInfo[], force = false)
   aggregateBase = null
   $starmapLoading.set(false)
 
-  return loadStarmapConstellation(profiles, force)
+  return loadStarmapNebula(profiles, force)
+}
+
+export function selectStarmapBrainFilter(profile: null | string): void {
+  if ($starmapMode.get() !== 'nebula') {
+    return
+  }
+
+  const selected = profile?.trim() || null
+  const scene = $starmapNebula.get()
+
+  $starmapBrainFilter.set(selected && scene?.brains.some(brain => brain.profile.name === selected) ? selected : null)
 }
 
 /** Drop one legacy node from the cached graph immediately; return rollback. */
@@ -419,7 +431,7 @@ export function evictStarmapNode(id: string): () => void {
 export function resetStarmapGraph(): void {
   requestEpoch += 1
   brainInflight = null
-  constellationInflight = null
+  nebulaInflight = null
   $starmapGraph.set(null)
   $cortexGraph.set(null)
   $cortexHealth.set(null)
@@ -428,9 +440,10 @@ export function resetStarmapGraph(): void {
   $starmapError.set(null)
   $starmapLoading.set(false)
   $starmapBrainProfile.set('default')
+  $starmapBrainFilter.set(null)
   $starmapBrainStatus.set(null)
-  $starmapConstellation.set(null)
-  $starmapMode.set('constellation')
+  $starmapNebula.set(null)
+  $starmapMode.set('nebula')
   $starmapLodError.set(null)
   $starmapLodResolving.set(false)
   aggregateBase = null

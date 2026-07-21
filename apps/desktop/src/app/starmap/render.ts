@@ -10,7 +10,7 @@ import {
   WHITE,
   WHITEISH_SHEEN
 } from './constants'
-import { clamp, fitScale, nodeRadius, recencyInk, shapePath } from './geometry'
+import { ambientNodePosition, ambientNodeTwinkle, clamp, fitScale, nodeRadius, recencyInk, shapePath } from './geometry'
 import { countLabel, ellipsize, metaBadges, nodeFooter, wrapText } from './text'
 import type {
   FadeBuckets,
@@ -27,6 +27,9 @@ import type {
 
 export interface Scene {
   adjacency: Map<string, Set<string>>
+  ambientTime?: null | number
+  brainFilter?: null | string
+  brainLabels?: ReadonlyMap<string, string>
   byId: Map<string, SimNode>
   ctx: CanvasRenderingContext2D
   dpr: number
@@ -37,6 +40,8 @@ export interface Scene {
   hoverRing: null | number
   links: SimLink[]
   memById: Map<string, MemoryCard>
+  inspectHint?: string
+  nebula?: boolean
   nodes: SimNode[]
   palette: Palette
   // Time scrubber: only paint nodes/links whose recency has been reached. 1 =
@@ -44,12 +49,16 @@ export interface Scene {
   reveal: number
   rings: Ring[]
   selectedRing: null | number
-  /** Constellation mode keeps the shared sky but omits one misleading global time disk. */
+  /** Dense-nebula mode keeps the shared sky but omits one misleading global time disk. */
   showStructure?: boolean
   size: { h: number; w: number }
   // Scrub jumps: snap every ease to its target this frame (no birth/fade replay).
   snapMotion?: boolean
   vp: Viewport
+}
+
+export function brainFilterAlpha(owner: string | undefined, filter: null | string | undefined): number {
+  return !filter || owner === filter ? 1 : 0.07
 }
 
 export interface DrawResult {
@@ -168,6 +177,9 @@ const rectsOverlap = (a: Rect, b: Rect) => a.x < b.x + b.w && a.x + a.w > b.x &&
 export function drawScene(scene: Scene): DrawResult {
   const {
     adjacency,
+    ambientTime = null,
+    brainFilter = null,
+    brainLabels,
     byId,
     ctx,
     dpr,
@@ -178,6 +190,8 @@ export function drawScene(scene: Scene): DrawResult {
     hoverRing,
     links,
     memById,
+    inspectHint,
+    nebula = false,
     nodes,
     palette,
     reveal,
@@ -258,12 +272,15 @@ export function drawScene(scene: Scene): DrawResult {
   const shade = (a: number) => `rgba(${base.r},${base.g},${base.b},${a})`
   const projX = (wx: number) => wx * vp.k + vp.x
   const projY = (wy: number) => wy * vp.k * TILT + vp.y
+  const position = (node: SimNode) => ambientNodePosition(node, ambientTime)
   // Baseline node scale: the rested fit, held stable while the playback camera
   // dives into the core — so t≈0 nodes don't balloon (see fitScale).
 
-  const nodeK = cortexScene
-    ? Math.max(0.9, fitScale(w, h, rings, { contain: true, padding: 64 }))
-    : fitScale(w, h, rings)
+  const nodeK = nebula
+    ? 1
+    : cortexScene
+      ? Math.max(0.9, fitScale(w, h, rings, { contain: true, padding: 64 }))
+      : fitScale(w, h, rings)
 
   // Two composable layers: node highlight (selected ?? hovered) in full ink, and
   // a selection-only ring/date filter that only shifts alpha.
@@ -418,8 +435,14 @@ export function drawScene(scene: Scene): DrawResult {
       continue
     }
 
-    const sVisible = Math.abs(projX(s.x) - w / 2) <= w / 2 + 40 && Math.abs(projY(s.y) - h / 2) <= h / 2 + 40
-    const tVisible = Math.abs(projX(t.x) - w / 2) <= w / 2 + 40 && Math.abs(projY(t.y) - h / 2) <= h / 2 + 40
+    const sourcePosition = position(s)
+    const targetPosition = position(t)
+
+    const sVisible =
+      Math.abs(projX(sourcePosition.x) - w / 2) <= w / 2 + 40 && Math.abs(projY(sourcePosition.y) - h / 2) <= h / 2 + 40
+
+    const tVisible =
+      Math.abs(projX(targetPosition.x) - w / 2) <= w / 2 + 40 && Math.abs(projY(targetPosition.y) - h / 2) <= h / 2 + 40
 
     if (!sVisible && !tVisible) {
       continue
@@ -433,10 +456,10 @@ export function drawScene(scene: Scene): DrawResult {
       !!focusId &&
       (s.id === focusId || t.id === focusId || (!!focusSet && focusSet.has(s.id) && focusSet.has(t.id)))
 
-    let x1 = projX(s.x)
-    let y1 = projY(s.y)
-    let x2 = projX(t.x)
-    let y2 = projY(t.y)
+    let x1 = projX(sourcePosition.x)
+    let y1 = projY(sourcePosition.y)
+    let x2 = projX(targetPosition.x)
+    let y2 = projY(targetPosition.y)
 
     if (s.id === focusId) {
       const d = Math.hypot(x2 - x1, y2 - y1) || 1
@@ -454,19 +477,20 @@ export function drawScene(scene: Scene): DrawResult {
     const ambient = recencyInk(erec((s.rec + t.rec) / 2)) * c.lineAlpha
 
     // Hovering a line fades it in a bit (×2, capped — never full white).
-    const targetAlpha = !revealed
-      ? 0
-      : lit
-        ? cortexScene
-          ? denseFocus
-            ? 0.1
-            : 0.42
-          : 1
-        : key === hoverLink
-          ? clamp(ambient * 2, 0, 0.7)
-          : focusId || ring
-            ? 0.025
-            : ambient
+    const targetAlpha =
+      (!revealed
+        ? 0
+        : lit
+          ? cortexScene
+            ? denseFocus
+              ? 0.1
+              : 0.42
+            : 1
+          : key === hoverLink
+            ? clamp(ambient * 2, 0, 0.7)
+            : focusId || ring
+              ? 0.025
+              : ambient) * brainFilterAlpha(link.brainProfile, brainFilter)
 
     const linkAlpha = fadeAlpha(fades.links, key, targetAlpha, lit)
 
@@ -490,8 +514,8 @@ export function drawScene(scene: Scene): DrawResult {
       const ux = dx / length
       const uy = dy / length
       const pad = nodeRadius(t) * nodeK + 3
-      const tipX = projX(t.x) - ux * pad
-      const tipY = projY(t.y) - uy * pad
+      const tipX = projX(targetPosition.x) - ux * pad
+      const tipY = projY(targetPosition.y) - uy * pad
       const arrow = lit ? 4 : 3
       const backX = tipX - ux * arrow * 2
       const backY = tipY - uy * arrow * 2
@@ -544,7 +568,8 @@ export function drawScene(scene: Scene): DrawResult {
     // of flashing. Focus snaps (no drift).
     const rawBorn = fadeAlpha(fades.appear, n.id, revealed ? 1 : 0, nodeHigh || inRing, NODE_BIRTH)
     const born = ease(rawBorn)
-    const vis = alpha * born
+    const twinkle = nodeHigh ? 1 : ambientNodeTwinkle(n, ambientTime)
+    const vis = alpha * born * brainFilterAlpha(n.brainProfile, brainFilter) * twinkle
 
     if (vis < 0.004) {
       continue
@@ -553,8 +578,9 @@ export function drawScene(scene: Scene): DrawResult {
     // Warp-in: streak outward from WARP_FROM·radius and decelerate hard onto the
     // ring (origin = disk core), echoing an EVE ship dropping out of warp.
     const posScale = WARP_FROM + (1 - WARP_FROM) * warpIn(rawBorn)
-    const sx = projX(n.x * posScale)
-    const sy = projY(n.y * posScale)
+    const nodePosition = position(n)
+    const sx = projX(nodePosition.x * posScale)
+    const sy = projY(nodePosition.y * posScale)
 
     if (sx < -40 || sx > w + 40 || sy < -40 || sy > h + 40) {
       continue
@@ -679,7 +705,9 @@ export function drawScene(scene: Scene): DrawResult {
     // The date (index 0) stays sans; the rest of the tags are monospace.
     const badgeFontFor = (i: number) => (i === 0 ? badgeFont : monoFont)
 
-    const badges = metaBadges(tip)
+    const baseBadges = metaBadges(tip)
+    const ownerLabel = tip.brainProfile ? brainLabels?.get(tip.brainProfile) : undefined
+    const badges = ownerLabel ? [baseBadges[0] ?? '', ownerLabel, ...baseBadges.slice(1)].filter(Boolean) : baseBadges
     const use = countLabel(tip)
     const titleText = tip.kind === 'memory' ? memById.get(tip.id)?.body.split('\n')[0]?.trim() || tip.label : tip.label
 
@@ -701,14 +729,15 @@ export function drawScene(scene: Scene): DrawResult {
     const titleBgW = titleW + PADX * 2
     const titleBgH = titleLines.length * LINE_H + PADY * 2
 
-    const footerText = nodeFooter(tip)
+    const footerText = [nodeFooter(tip), tip.aggregate ? null : inspectHint].filter(Boolean).join(' · ') || null
     ctx.font = footerFont
     const footerW = footerText ? ctx.measureText(footerText).width : 0
 
     const totalW = Math.max(metaW, footerW, titleBgW)
     const totalH = BADGE_H + ROW_GAP + titleBgH + (footerText ? ROW_GAP + FOOTER_H : 0)
-    const bx = clamp(projX(tip.x) - totalW / 2, 4, Math.max(4, w - totalW - 4))
-    const by = clamp(projY(tip.y) - (nodeRadius(tip) * nodeK + 8) - totalH, 4, Math.max(4, h - totalH - 4))
+    const tipPosition = position(tip)
+    const bx = clamp(projX(tipPosition.x) - totalW / 2, 4, Math.max(4, w - totalW - 4))
+    const by = clamp(projY(tipPosition.y) - (nodeRadius(tip) * nodeK + 8) - totalH, 4, Math.max(4, h - totalH - 4))
     tipRect = { h: totalH, w: totalW, x: bx, y: by }
 
     ctx.textAlign = 'left'
@@ -784,8 +813,9 @@ export function drawScene(scene: Scene): DrawResult {
 
     const label = ellipsize(ctx, n.label, Math.min(180, w * 0.32))
     const bw = ctx.measureText(label).width + 8
-    const x = clamp(projX(n.x) - bw / 2, LBL_M, Math.max(LBL_M, w - bw - LBL_M))
-    const top = projY(n.y) - (nodeRadius(n) * nodeK + 7) - LBL_H + 4
+    const neighborPosition = position(n)
+    const x = clamp(projX(neighborPosition.x) - bw / 2, LBL_M, Math.max(LBL_M, w - bw - LBL_M))
+    const top = projY(neighborPosition.y) - (nodeRadius(n) * nodeK + 7) - LBL_H + 4
     const clampY = (v: number) => clamp(v, LBL_M, Math.max(LBL_M, h - LBL_H - LBL_M))
     const step = LBL_H + 3
     let y: null | number = null

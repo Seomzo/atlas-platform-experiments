@@ -795,23 +795,30 @@ export interface Translations {
     cortex: {
       brainLabel: string
       clearFilters: string
-      constellation: {
+      nebula: {
         ariaLabel: string
-        backToConstellation: string
-        lodOverview: string
+        backToNebula: string
+        clickToInspect: string
         cortexDisabled: string
         description: string
         disabledBrainDescription: (brain: string) => string
         disabledBrainTitle: string
+        emptySkyDescription: string
+        emptySkyTitle: string
         eyebrow: string
+        filterByBrain: string
+        filterToBrain: (brain: string) => string
+        isolateBrain: (brain: string) => string
         noMemoryYet: string
         nodes: (count: number) => string
-        openBrain: (brain: string) => string
+        ownerBrain: (brain: string) => string
+        showWholeSky: string
         title: string
         unavailable: string
         unavailableBrainDescription: (brain: string) => string
         unavailableBrainTitle: string
         totalNodes: string
+        wholeSky: string
         workers: string
       }
       defaultBrain: string
