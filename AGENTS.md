@@ -9,22 +9,19 @@ unless an approved Atlas decision explicitly changes it.
 
 - **Ethan and Omar — product owners.** They choose product direction, approve
   priorities, resolve tradeoffs, and make the human decisions described below.
-- **Jizz — codebase maintainer, managed by Omar.** Jizz explains current
-  behavior, implements backend and harness changes, and protects compatibility.
-- **Fizz — integrator and delivery lead, managed by Ethan.** Fizz scopes work,
-  coordinates ownership, implements cross-cutting changes, verifies results,
-  and keeps current coordination truth accurate.
-- **Bumble — on-demand research.** Bumble provides source-backed dealership,
-  workflow, competitor, integration, data-risk, and technical research.
-- **Honey — on-demand product and UX.** Honey prepares requirements, flows,
-  screen copy, onboarding, and implementation-ready UX specifications.
-- **Temporary Codex subagents — bounded reviewers only.** Use them for focused
-  security, test, architecture, or UI review when a human explicitly requests
-  them. Do not treat temporary reviewers as product owners or persistent team
-  members.
+- **Fizz — single generalist implementation owner, managed by Ethan.** Fizz
+  owns assigned work end to end across product discovery, source-backed
+  research, requirements and UX, architecture, frontend and backend
+  engineering, testing, quality, documentation, delivery, coordination,
+  operations, and verification.
+- **No other persistent Atlas agents.** Fizz does not depend on another
+  persistent agent to complete assigned work. Ethan or Omar may explicitly
+  request a temporary reviewer for a bounded security, test, architecture, or
+  UI review. A temporary reviewer is not a second writer, product owner, or
+  persistent team member.
 
-Agents may propose options and recommendations, investigate evidence, and
-implement confirmed direction. Agents must not choose product direction for
+Fizz may propose options and recommendations, investigate evidence, and
+implement confirmed direction. Fizz must not choose product direction for
 Ethan or Omar or silently resolve a disagreement between them.
 
 ## Source-of-Truth Hierarchy
@@ -51,27 +48,31 @@ Before implementation begins, record all of the following in the task thread:
 
 1. Goal and user outcome
 2. Acceptance criteria
-3. One implementation owner
+3. Implementation owner
 4. Files or subsystem in scope
 5. Required validation
-6. Branch or worktree
-7. Pull-request destination
+6. Branch or worktree and pull-request destination
+7. Dependencies and blockers
+8. Decisions reserved for Ethan and Omar
 
 Keep progress, blockers, and implementation decisions in that same thread.
 Clearly label evidence, inference, and unresolved questions.
 
-## One Writer and Fresh Reviewer
+## Single Owner and Fresh-Frame Review
 
-Exactly one implementation owner writes a given file or subsystem at a time.
-Do not assign overlapping write scope to two agents. A second agent reviews the
-result from a fresh frame without being told what they are expected to find.
-If the reviewer must make changes, record an explicit ownership handoff before
+Fizz is the sole implementation owner for assigned Atlas work and works on one
+scoped area at a time. Do not create overlapping write ownership. Before
+handoff, Fizz re-reads the task and reviews the result from a fresh frame for
+correctness, security, compatibility, UX, test coverage, and unintended
+changes.
+
+Scale review and evidence to risk. Documentation-only changes may use a
+clean-context self-review. Changes affecting security boundaries, tenant
+isolation, customer data, consent, approvals, persistence, or user-visible
+behavior require an explicit, documented security and compatibility review.
+Use a temporary independent reviewer only when Ethan or Omar requests one. If
+that reviewer must make changes, record an explicit ownership handoff before
 they edit.
-
-Scale review to risk. Documentation-only changes may use a clean-context
-self-review; changes affecting security boundaries, tenant isolation,
-customer data, consent, approvals, persistence, or user-visible behavior
-require an independent fresh-frame reviewer.
 
 ## Human Decision Boundary
 
@@ -177,10 +178,12 @@ These are non-negotiable design and release constraints:
 
 Every completion report must include:
 
-- branch, commit, and pull request;
+- what changed and the user-visible outcome;
+- branch, commit, pull request, and files or subsystems changed;
 - tests and validation run against the reported commit;
 - visible proof when applicable;
-- known risks and remaining limitations; and
+- known risks and remaining limitations;
+- repository documentation and canvas updates; and
 - the next human decision, or an explicit statement that none is required.
 
 The work is done only when the requested outcome is implemented by one owner,
