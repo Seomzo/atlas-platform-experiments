@@ -7,8 +7,9 @@
 - Baseline: `7a4d7529dc9b5ef0361800d8d94f05e79d716269`
 - Last validated: 2026-07-25 America/Los_Angeles
 - Protocol: `atlas.collab.protocol.v1`
-- Overall: implementation and deterministic dogfood complete; live Buzz
-  provisioning/dogfood blocked at human credential/owner gates
+- Overall: implementation and deterministic dogfood complete; the coordinator
+  credential is enrolled locally, while live Buzz provisioning/dogfood remains
+  blocked at owner approval and the two remaining role credentials
 
 ## Goal and scope
 
@@ -37,10 +38,11 @@ runtime dependencies.
 
 ## Deferred decisions
 
-- A human must rotate the Buzz Desktop identity whose credential was emitted by
-  a local conversion error, then personally unlock the login Keychain.
-- A Buzz owner must approve three role identities and confirm whether
-  owner-reviewed agent drafts can bind the locally generated public keys.
+- A human must confirm rotation of the Buzz Desktop identity whose credential
+  was emitted by a local conversion error. The login Keychain is now unlocked
+  and holds the coordinator credential.
+- A Buzz owner must approve the enrolled coordinator identity, then approve the
+  implementer and reviewer identities after their keys are generated.
 - Three isolated Hermes profiles now exist for coordinator, implementer, and
   reviewer. Hermes ACP 0.18.2 completed a real Buzz ACP protocol-v2 handshake
   through the credential-stripping runtime shim. Codex and Claude remain
@@ -63,6 +65,8 @@ The following non-secret values were re-verified in Buzz Desktop and GitHub on
 - Existing coordination channel UUID:
   `154f9a6e-1d2f-459e-833e-9112e72bf06d`
 - Designated primary host node: `nLaZ3gqWVb11CNTRL`
+- Primary coordinator public fingerprint:
+  `b899d99472dff5de95c1c0358dd798b8d337b54a3bad3406b6ab4cefd9422086`
 - Authoritative Fizz public identity:
   `780657f350a3fd0dbada848cda9ac9deb7c64280ae37ee074276539445a1782c`
 - Authoritative Fizz npub:
@@ -79,9 +83,15 @@ host the implementer or reviewer only after their distinct identities complete
 owner review. The approved enrollment procedure is section 2 of
 `docs/altas/COLLABORATION_RUNBOOK.md`, using
 `scripts/atlas-collab agents enroll --role <role> --apply` on the designated
-host. The primary coordinator fingerprint remains a one-time generated value:
-it must come from that command and the OS credential vault, never be invented
-or copied from Fizz.
+host. The primary coordinator fingerprint is now enrolled: it was generated
+once on the designated host on 2026-07-25. Its private half is
+stored only in the macOS login Keychain under service
+`io.atlas.collab.buzz`, account `coordinator`; state, config, inventory, and
+this handoff contain only the public fingerprint. The three LaunchAgent
+definitions remain installed but stopped. Relay profile publication returned
+`403 relay_membership_required`, so a Buzz owner must now approve that exact
+public identity. Do not generate a replacement merely to clear the membership
+gate.
 
 ## Files changed
 
@@ -204,11 +214,13 @@ cherry-picked the implementation chain in order and ran union validation.
 
 ## Exact next actions
 
-1. Human rotates the current Buzz Desktop identity and unlocks login Keychain.
-2. Re-run `scripts/atlas-collab doctor`.
-3. Enroll coordinator, implementer, and reviewer; verify their three public
-   keys against the already provisioned isolated Hermes profiles, then complete
-   Buzz owner review.
+1. Human confirms the previously exposed Buzz Desktop identity was rotated.
+2. A Buzz owner approves coordinator fingerprint
+   `b899d99472dff5de95c1c0358dd798b8d337b54a3bad3406b6ab4cefd9422086`;
+   `doctor` currently reports `403 relay_membership_required` for that identity.
+3. Enroll implementer and reviewer; verify all three public keys against the
+   already provisioned isolated Hermes profiles, then complete Buzz owner
+   review for those two remaining identities.
 4. Add only the rotated human owner public key to local config.
 5. Run bootstrap apply twice and verify channel reuse. The three LaunchAgent
    definitions may remain installed but stopped; do not start them until every
