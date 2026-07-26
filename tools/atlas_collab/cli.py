@@ -219,15 +219,33 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _is_non_applying(args: argparse.Namespace) -> bool:
+    if args.command == "doctor":
+        return True
+    if args.command == "bootstrap":
+        return args.dry_run
+    if args.command == "agents":
+        return args.agents_command == "enroll" and not args.apply
+    if args.command == "services":
+        return args.services_command == "install" and not args.apply
+    if args.command == "task":
+        return (
+            args.task_command == "create"
+            and not args.apply
+            or (args.task_command in {"pause", "resume", "cancel"} and not args.apply)
+        )
+    if args.command == "cleanup":
+        return args.dry_run
+    return False
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     root = _repo_root()
     if args.command == "bootstrap" and args.apply:
         write_default_config(config_path(), DEFAULTS)
     config = load_config()
-    read_only_without_state = (
-        args.command == "doctor" or (args.command == "bootstrap" and args.dry_run)
-    ) and not state_path().exists()
+    read_only_without_state = _is_non_applying(args) and not state_path().exists()
     selected_state = Path(":memory:") if read_only_without_state else state_path()
     with StateStore(selected_state) as store:
         if args.command == "doctor":

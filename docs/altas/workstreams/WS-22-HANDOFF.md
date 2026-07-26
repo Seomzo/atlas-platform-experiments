@@ -181,6 +181,12 @@ developer's real non-secret inventory with fake task paths. The collaboration
 test fixture now redirects that home to a per-test temporary directory and the
 intake test verifies the inventory is created there.
 
+Finally, a real non-applying `agents enroll` preview created `state.db` in an
+isolated reproduction home. The CLI now uses in-memory state for every
+documented non-applying command when no persistent state exists. Parameterized
+coverage verifies bootstrap, agent, service, task-state, and cleanup previews
+leave no database behind.
+
 Validation for the follow-up:
 
 ```text
