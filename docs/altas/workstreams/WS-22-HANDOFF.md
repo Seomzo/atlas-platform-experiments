@@ -3,13 +3,14 @@
 ## Status
 
 - Branch: `codex/ws-22-development-collaboration-plane`
-- Draft PR: <https://github.com/Seomzo/atlas-platform-experiments/pull/3>
+- Draft PR: <https://github.com/Seomzo/atlas-platform-experiments/pull/5>
 - Baseline: `7a4d7529dc9b5ef0361800d8d94f05e79d716269`
 - Last validated: 2026-07-25 America/Los_Angeles
 - Protocol: `atlas.collab.protocol.v1`
-- Overall: implementation and deterministic dogfood complete; the coordinator
-  credential is enrolled locally, while live Buzz provisioning/dogfood remains
-  blocked at owner approval and the two remaining role credentials
+- Overall: implementation, deterministic dogfood, three Keychain-backed role
+  identities, services, GitHub draft/CI, and the live resume path are ready.
+  Live Buzz provisioning/dogfood remains blocked at the external community
+  owner/admin membership grant.
 
 ## Goal and scope
 
@@ -38,60 +39,55 @@ runtime dependencies.
 
 ## Deferred decisions
 
-- A human must confirm rotation of the Buzz Desktop identity whose credential
-  was emitted by a local conversion error. The login Keychain is now unlocked
-  and holds the coordinator credential.
-- A Buzz owner must approve the enrolled coordinator identity, then approve the
-  implementer and reviewer identities after their keys are generated.
+- An actual `atlas-platform` owner/admin must add the enrolled coordinator,
+  implementer, and reviewer public identities as relay members.
 - Three isolated Hermes profiles now exist for coordinator, implementer, and
-  reviewer. Hermes ACP 0.18.2 completed a real Buzz ACP protocol-v2 handshake
+  reviewer. Hermes ACP completed a real Buzz ACP protocol-v2 handshake
   through the credential-stripping runtime shim. Codex and Claude remain
-  optional and must not be selected until their own Buzz ACP authentication is
-  proven.
+  optional; Claude's authentication probe succeeds, while Codex must not be
+  selected until Buzz ACP API-key authentication is proven.
 - GitHub branch protection/rulesets are manual-pending because the private
   repository/account plan does not expose them.
-- GitHub Actions accepted the draft-PR events but did not start any job because
-  the account has a payment/spending-limit gate.
+- Rotation of the unrelated Buzz Desktop identity is explicitly deferred by
+  the operator. The framework never reads or reuses that private identity, so
+  rotation is not a WS-22 prerequisite.
 
 ## Authoritative collaborator routing
 
-The following non-secret values were re-verified in Buzz Desktop and GitHub on
-2026-07-25. They replace the ambiguous candidates in the collaborator preflight:
+The following non-secret values were re-verified locally and in GitHub on
+2026-07-25:
 
-- Framework: <https://github.com/Seomzo/atlas-platform-experiments/pull/3>
+- Framework: <https://github.com/Seomzo/atlas-platform-experiments/pull/5>
 - Protocol: `atlas.collab.protocol.v1`
 - Buzz community: `atlas-platform`
-- Existing coordination channel: `atlas-dealership`
-- Existing coordination channel UUID:
-  `154f9a6e-1d2f-459e-833e-9112e72bf06d`
+- Stable channels to create/reuse after relay authorization:
+  `atlas-dev-control`, `atlas-dev-decisions`, and `atlas-dev-reviews`
 - Designated primary host node: `nLaZ3gqWVb11CNTRL`
-- Primary coordinator public fingerprint:
+- Coordinator public fingerprint:
   `b899d99472dff5de95c1c0358dd798b8d337b54a3bad3406b6ab4cefd9422086`
-- Authoritative Fizz public identity:
-  `780657f350a3fd0dbada848cda9ac9deb7c64280ae37ee074276539445a1782c`
-- Authoritative Fizz npub:
-  `npub10qr90u6s507smwk6sjxd4xkfm6muvs5q4cm7up6zwefeg3dp0qkqyd89h7`
+- Implementer public fingerprint:
+  `2d653a50657aa74146a5bfcd04cb4178d36d09d97eee8929e02aa757fa18cc17`
+- Reviewer public fingerprint:
+  `fb4821cfac469529ffae1b9b19a005c6e4355be8583ebd112dd50939dd18e450`
 
-The alternative Fizz candidate beginning `0b5d34` is not authoritative for
-this enrollment. Until a Buzz owner explicitly approves separate development
-channels, local config must map `control_channel`, `decisions_channel`, and
-`reviews_channel` to the existing `atlas-dealership` name. Bootstrap will then
-reuse that single channel instead of creating a duplicate collaboration plane.
-
-The collaborator workstation must not start an alternate coordinator. It may
-host the implementer or reviewer only after their distinct identities complete
-owner review. The approved enrollment procedure is section 2 of
-`docs/altas/COLLABORATION_RUNBOOK.md`, using
-`scripts/atlas-collab agents enroll --role <role> --apply` on the designated
-host. The primary coordinator fingerprint is now enrolled: it was generated
-once on the designated host on 2026-07-25. Its private half is
+Each identity was generated once on the designated host. Its private half is
 stored only in the macOS login Keychain under service
-`io.atlas.collab.buzz`, account `coordinator`; state, config, inventory, and
-this handoff contain only the public fingerprint. The three LaunchAgent
-definitions remain installed but stopped. Relay profile publication returned
-`403 relay_membership_required`, so a Buzz owner must now approve that exact
-public identity. Do not generate a replacement merely to clear the membership
-gate.
+`io.atlas.collab.buzz` and its role account. State, config, inventory, and this
+handoff contain only public fingerprints. Do not generate replacements merely
+to clear the membership gate.
+
+The current Ethan Buzz Desktop identity can use the private community but does
+not expose the owner/admin `Invites` control. The actual owner/admin must use
+Buzz Desktop **Settings → Invites** to add all three fingerprints with role
+`member`. Builderlab signup is not required for that owner action. After the
+grant, re-running each applying enrollment reuses the existing identity and
+retries profile publication; it cannot rotate the key accidentally.
+
+Bootstrap then creates/reuses the three stable private channels and
+idempotently adds every configured role as a channel bot. Task intake does the
+same for the private WS-22 task channel. The three LaunchAgent definitions
+remain installed and stopped until `doctor` verifies relay auth, channel IDs,
+profiles, task/worktree bindings, and author gates.
 
 ## Files changed
 
@@ -159,38 +155,43 @@ correction, and deliberately unmet live requirements are in
   that shim.
 - No code path merges, deploys, publishes, marks ready, force-pushes, deletes a
   branch, changes repository settings, or widens product permissions.
-- Security incident: one existing Buzz Desktop credential appeared in a local
-  conversion-error tool output. It was immediately abandoned and is not
-  repeated here. Rotate that identity before further use.
+- One unrelated Buzz Desktop credential appeared in a local conversion-error
+  tool output. It was immediately abandoned and is not repeated here. The
+  operator explicitly deferred rotation; WS-22 uses three separately generated
+  Keychain credentials and never reads or reuses the Desktop identity.
 
 ## Visual evidence
 
-Buzz Desktop was inspected read-only during preflight. It showed the private
-`atlas-dealership` channel, existing agent membership, a healthy Fizz response,
-and another agent reporting that Codex login configuration was missing.
+Buzz Desktop was inspected read-only during preflight. The installed app and a
+locally built current official-source app both opened the existing private
+`atlas-platform` session without copying identity material. The current-source
+settings did not expose `Invites`, which is direct UI evidence that this
+Desktop identity is not recognized as an owner/admin. The temporary build was
+quit and the normal `/Applications/Buzz.app` instance was restored.
 
 No live task-channel visual is claimed. The provisioning gate prevented safely
 creating it. No screenshot with credential material was captured.
 
 ## Known risks and limitations
 
-- Live AC-02, AC-03, AC-05, AC-06, AC-08, AC-10, AC-13, and AC-16 are not
-  satisfied.
-- Keychain is currently locked; secure role credential creation is blocked.
-- Buzz agent creation is owner-reviewed and may not bind a pre-generated key.
+- Live AC-03, AC-05, AC-06, AC-08, AC-10, AC-13, and AC-16 are not satisfied.
+- Keychain is unlocked and contains all three role credentials. The live gate
+  is relay membership, not local credential creation.
+- The three exact pre-generated public identities must be added as ordinary
+  relay members by an owner/admin; creating replacement managed agents would
+  break the identity/vault binding.
 - The three isolated Hermes profiles exist and authenticate to their configured
-  provider, but no role may start until Buzz identity enrollment, task
-  binding, and owner allowlisting all pass.
+  provider, but no role may start until relay membership, channel/profile
+  publication, task binding, and author allowlisting all pass.
 - The three macOS LaunchAgent definitions are installed with `RunAtLoad=false`
   and confirmed unloaded. Their fingerprints/status are durable inventory
   records; the CLI refuses start/restart while `doctor.ready` is false.
 - No collaborator fresh-operator run was observed.
 - Branch protection is not configured.
-- Draft-PR CI jobs did not start because of the repository account's
-  payment/spending-limit gate; this is an infrastructure block, not a test
-  failure.
-- Codex ACP and Claude cannot currently be claimed as authenticated Buzz
-  runtimes.
+- The prior GitHub billing gate is resolved; the contract and full public CI
+  have both passed on the draft branch.
+- Claude authentication currently probes healthy. Codex ACP API-key readiness
+  is still unproven and is not selected.
 - Live relay recovery behavior remains unexercised; deterministic adapter
   recovery is covered.
 
@@ -207,6 +208,10 @@ Workstream commit order:
 7. `d9d35e020` — completion-audit hardening for worktree/Git
    identity validation, real runtime profiles/shim, schema/recovery, retries,
    prompt-injection rejection, service lifecycle, and exact handoff behavior
+8. `e96f15139` — async/sync session finalizer compatibility that restored the
+   full public CI run
+9. `857a7806f` — idempotent relay-profile publication retry for already
+   enrolled identities
 
 The dogfood implementer branch is descended from `cdc849c19` and changes only
 the fixture/test pair. The reviewer branch has no edits. The integration branch
@@ -214,22 +219,25 @@ cherry-picked the implementation chain in order and ran union validation.
 
 ## Exact next actions
 
-1. Human confirms the previously exposed Buzz Desktop identity was rotated.
-2. A Buzz owner approves coordinator fingerprint
-   `b899d99472dff5de95c1c0358dd798b8d337b54a3bad3406b6ab4cefd9422086`;
-   `doctor` currently reports `403 relay_membership_required` for that identity.
-3. Enroll implementer and reviewer; verify all three public keys against the
-   already provisioned isolated Hermes profiles, then complete Buzz owner
-   review for those two remaining identities.
-4. Add only the rotated human owner public key to local config.
-5. Run bootstrap apply twice and verify channel reuse. The three LaunchAgent
-   definitions may remain installed but stopped; do not start them until every
-   identity, owner, channel, profile, worktree, and Git identity check is true.
-6. Execute the same WS-22 task live in Buzz with at least two real processes,
-   append real deep links/evidence, and update the AC matrix.
-7. Resolve the GitHub Actions payment/spending-limit gate and rerun draft-PR CI.
-8. Human reviews the draft PR/CI; do not mark ready or merge until the live
-   requirements and identity incident are resolved.
+1. An actual `atlas-platform` owner/admin adds the three fingerprints in
+   **Buzz Desktop → Settings → Invites** with role `member`.
+2. Re-run applying enrollment for all three roles. It must reuse each Keychain
+   identity and report `profile-published`; then re-run `doctor`.
+3. Run bootstrap apply twice. Verify the same private
+   `atlas-dev-control`, `atlas-dev-decisions`, and `atlas-dev-reviews` channel
+   IDs are reused and all three role fingerprints are members. Verify the
+   configured human/operator author allowlist against the actual owner/admin
+   public identity and correct the public allowlist if needed.
+4. Apply the WS-22 dogfood task, bind the three exact branches/worktrees and
+   role-local Git identities, require `doctor.ready: true`, then start the
+   stopped LaunchAgents.
+5. Execute the WS-22 task live with at least two real role processes, retaining
+   explicit plan, routed question/answer, seeded-defect review, correction,
+   union-test, recovery, and human-gate events/deep links.
+6. Append the live evidence, update every partial/blocked AC honestly, run the
+   full validation suite, and push the scoped draft-PR update.
+7. A human reviews draft PR #5 and CI. Do not mark ready, merge, deploy, or
+   delete branches automatically.
 
 ## Collaborator enrollment follow-up — runtime probe timeout
 
