@@ -1,11 +1,28 @@
 from pathlib import Path
+import subprocess
 
 import pytest
 
 from tools.atlas_collab.adapters.buzz import FakeBuzzAdapter
 from tools.atlas_collab.adapters.github import FakeGitHubAdapter
+from tools.atlas_collab.adapters.process import CommandError, CommandRunner
 from tools.atlas_collab.models import CollaborationEvent
 from tools.atlas_collab.orchestrator import Orchestrator
+
+
+def test_command_timeout_is_a_bounded_sanitized_result(monkeypatch):
+    def time_out(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", time_out)
+
+    result = CommandRunner().run(["claude", "auth", "status"], check=False, timeout=15)
+    assert result.code == 124
+    assert result.stdout == ""
+    assert result.stderr == "command timed out after 15 seconds"
+
+    with pytest.raises(CommandError, match="timed out after 15 seconds"):
+        CommandRunner().run(["claude", "auth", "status"], timeout=15)
 
 
 def test_external_message_and_comment_writes_are_idempotent(store, contract):
@@ -44,7 +61,7 @@ def test_external_message_and_comment_writes_are_idempotent(store, contract):
 
 
 def test_fake_task_intake_creates_exactly_one_record_channel_canvas_and_event(
-    tmp_path, store, contract, config
+    tmp_path, store, contract, config, collab_home
 ):
     (tmp_path / "AGENTS.md").write_text("canonical", encoding="utf-8")
     buzz = FakeBuzzAdapter()
@@ -67,6 +84,7 @@ def test_fake_task_intake_creates_exactly_one_record_channel_canvas_and_event(
     assert len(buzz.channels_by_name) == 1
     assert len(buzz.messages) == 1
     assert len(github.comments) == 1
+    assert (collab_home / "inventory.json").is_file()
 
 
 def test_degraded_systems_fail_closed_without_duplicate_replay(

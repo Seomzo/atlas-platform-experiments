@@ -4,6 +4,8 @@ import pytest
 import yaml
 
 from tools.atlas_collab import PROTOCOL_VERSION
+from tools.atlas_collab.cli import main
+from tools.atlas_collab.config import state_path
 from tools.atlas_collab.models import (
     CollaborationEvent,
     ContractError,
@@ -11,6 +13,26 @@ from tools.atlas_collab.models import (
 )
 from tools.atlas_collab.redaction import SecretMaterialError, assert_non_secret, redact
 from tools.atlas_collab.validation import _parse_added_text, validate_task_file
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["bootstrap", "--dry-run"],
+        ["agents", "enroll", "--role", "implementer"],
+        ["services", "install"],
+        ["task", "pause", "WS-22"],
+    ],
+)
+def test_non_applying_commands_do_not_create_persistent_state(argv):
+    assert main(argv) == 0
+    assert not state_path().exists()
+
+
+def test_missing_task_cleanup_preview_does_not_create_persistent_state():
+    with pytest.raises(KeyError, match="WS-22"):
+        main(["cleanup", "--task", "WS-22", "--dry-run"])
+    assert not state_path().exists()
 
 
 def test_task_requires_observable_unique_acceptance_criteria(contract):

@@ -192,3 +192,40 @@ cherry-picked the implementation chain in order and ran union validation.
 7. Resolve the GitHub Actions payment/spending-limit gate and rerun draft-PR CI.
 8. Human reviews the draft PR/CI; do not mark ready or merge until the live
    requirements and identity incident are resolved.
+
+## Collaborator enrollment follow-up — runtime probe timeout
+
+On a fresh collaborator workstation at framework commit
+`955f708a4926084778f69cf3943ff25eca59649e`, the real
+`claude auth status` probe exceeded its 15-second deadline. The uncaught
+`subprocess.TimeoutExpired` aborted `atlas-collab doctor`, preventing the
+remaining non-mutating readiness checks from being reported.
+
+The follow-up fix converts any bounded command timeout into a sanitized
+exit-124 result when the caller requested `check=False`, and into the existing
+`CommandError` boundary otherwise. This is general to all external probes and
+does not change credentials, permissions, product behavior, or applying
+bootstrap semantics.
+
+The collaborator validation also found that fake-orchestrator tests which
+write an inventory did not isolate `ATLAS_COLLAB_HOME`. They could replace a
+developer's real non-secret inventory with fake task paths. The collaboration
+test fixture now redirects that home to a per-test temporary directory and the
+intake test verifies the inventory is created there.
+
+Finally, a real non-applying `agents enroll` preview created `state.db` in an
+isolated reproduction home. The CLI now uses in-memory state for every
+documented non-applying command when no persistent state exists. Parameterized
+coverage verifies bootstrap, agent, service, task-state, and cleanup previews
+leave no database behind.
+
+Validation for the follow-up:
+
+```text
+scripts/run_tests.sh tests/atlas_collab/test_adapters_orchestrator.py -q
+scripts/atlas-collab doctor
+scripts/atlas-collab bootstrap --dry-run
+```
+
+The collaborator branch and draft PR remain separate from the WS-22 branch and
+must not be merged automatically.

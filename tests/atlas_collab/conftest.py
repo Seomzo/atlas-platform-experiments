@@ -7,6 +7,13 @@ from tools.atlas_collab.models import TaskContract
 from tools.atlas_collab.state import StateStore
 
 
+@pytest.fixture(autouse=True)
+def collab_home(tmp_path: Path, monkeypatch) -> Path:
+    path = tmp_path / "collab-home"
+    monkeypatch.setenv("ATLAS_COLLAB_HOME", str(path))
+    return path
+
+
 @pytest.fixture
 def store(tmp_path: Path):
     with StateStore(tmp_path / "state.db") as value:
