@@ -105,6 +105,7 @@ def test_drain_fires_queued_prompt_and_claims_running(monkeypatch):
         lambda rid, sid, session, text: fired.update(rid=rid, sid=sid, text=text),
     )
     session = _session(queued_prompt={"text": "go", "transport": "ws-9"})
+    monkeypatch.setitem(server._sessions, "sid", session)
 
     assert server._drain_queued_prompt("r1", "sid", session) is True
     assert fired == {"rid": "r1", "sid": "sid", "text": "go"}
@@ -134,6 +135,7 @@ def test_drain_releases_running_on_dispatch_failure(monkeypatch):
         raise RuntimeError("dispatch failed")
     monkeypatch.setattr(server, "_run_prompt_submit", _boom)
     session = _session(queued_prompt={"text": "go", "transport": None})
+    monkeypatch.setitem(server._sessions, "sid", session)
 
     assert server._drain_queued_prompt("r1", "sid", session) is True
     # Failure must not leave the session wedged as running.

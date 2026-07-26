@@ -164,6 +164,10 @@ class Orchestrator:
                 )
                 item["created"] = created
                 item["channel_id"] = _channel_id(channel)
+                item["members"] = self._ensure_role_channel_members(
+                    item["channel_id"],
+                    tuple(self.config["roles"]),
+                )
                 for name_key, id_key in channel_id_keys.items():
                     if item["target"] == self.config["buzz"][name_key]:
                         self.config["buzz"][id_key] = item["channel_id"]
@@ -185,7 +189,12 @@ class Orchestrator:
             None,
         )
         if existing:
-            return {"agent": existing, "created": False}
+            relay_status = self._publish_role_profile(role)
+            return {
+                "agent": existing,
+                "created": False,
+                "relay_status": relay_status,
+            }
         private_key, public_key = generate_nostr_keypair()
         vault.set(role, private_key)
         settings = self.config["roles"][role]
@@ -200,22 +209,50 @@ class Orchestrator:
         )
         self.config["roles"][role]["public_key"] = public_key
         write_config(config_path(), self.config)
-        relay_status = "not-attempted"
-        if self.buzz:
-            try:
-                self.buzz.set_profile(
-                    name=settings["display_name"],
-                    about=(
-                        f"Atlas development-only {role}; cannot merge, deploy, "
-                        "or widen permissions."
-                    ),
-                )
-                relay_status = "profile-published"
-            except Exception as exc:
-                relay_status = f"owner-approval-or-relay-pending: {exc}"
+        relay_status = self._publish_role_profile(role)
         self.write_inventory()
         agent = next(agent for agent in self.store.agents() if agent["role"] == role)
         return {"agent": agent, "created": True, "relay_status": relay_status}
+
+    def _publish_role_profile(self, role: str) -> str:
+        if not self.buzz:
+            return "not-attempted"
+        settings = self.config["roles"][role]
+        try:
+            self.buzz.set_profile(
+                name=settings["display_name"],
+                about=(
+                    f"Atlas development-only {role}; cannot merge, deploy, "
+                    "or widen permissions."
+                ),
+            )
+        except Exception as exc:
+            return f"owner-approval-or-relay-pending: {exc}"
+        return "profile-published"
+
+    def _ensure_role_channel_members(
+        self,
+        channel_id: str,
+        roles: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        if not self.buzz:
+            return []
+        results = []
+        for role in roles:
+            public_key = str(self.config["roles"].get(role, {}).get("public_key") or "")
+            if not public_key:
+                continue
+            _, created = self.buzz.ensure_channel_member(
+                channel_id,
+                public_key,
+                role="bot",
+            )
+            results.append({
+                "role": role,
+                "public_key": public_key,
+                "created": created,
+            })
+        return results
 
     def create_task(
         self,
@@ -242,6 +279,10 @@ class Orchestrator:
                 visibility=self.config["buzz"]["visibility"],
             )
             channel_id = _channel_id(channel)
+            self._ensure_role_channel_members(
+                channel_id,
+                contract.requested_roles,
+            )
             canvas = (
                 f"# {contract.workstream_id} — {contract.title}\n\n"
                 f"State: `intake`\n\n"

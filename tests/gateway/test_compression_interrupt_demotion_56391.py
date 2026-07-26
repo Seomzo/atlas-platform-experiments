@@ -77,8 +77,7 @@ def _make_runner(*, session_id: str = "parent-session") -> GatewayRunner:
     session_store._ensure_loaded_locked = lambda: None
     runner.session_store = session_store
     runner._session_db = MagicMock()
-    runner._session_db._db = MagicMock()
-    runner._session_db._db.get_compression_lock_holder.return_value = None
+    runner._session_db.get_compression_lock_holder = AsyncMock(return_value=None)
     return runner
 
 
@@ -105,22 +104,25 @@ def _make_parent_no_subagents() -> MagicMock:
 
 
 class TestSessionHasCompressionInFlight:
-    def test_returns_false_without_session_store(self) -> None:
+    @pytest.mark.asyncio
+    async def test_returns_false_without_session_store(self) -> None:
         runner = _make_runner()
         runner.session_store = None
-        assert runner._session_has_compression_in_flight("sk") is False
+        assert await runner._session_has_compression_in_flight("sk") is False
 
-    def test_returns_true_when_lock_held(self) -> None:
+    @pytest.mark.asyncio
+    async def test_returns_true_when_lock_held(self) -> None:
         runner = _make_runner()
         sk = build_session_key(_make_event().source)
-        runner._session_db._db.get_compression_lock_holder.return_value = "holder-1"
-        assert runner._session_has_compression_in_flight(sk) is True
+        runner._session_db.get_compression_lock_holder.return_value = "holder-1"
+        assert await runner._session_has_compression_in_flight(sk) is True
 
-    def test_returns_false_when_lock_free(self) -> None:
+    @pytest.mark.asyncio
+    async def test_returns_false_when_lock_free(self) -> None:
         runner = _make_runner()
         sk = build_session_key(_make_event().source)
-        runner._session_db._db.get_compression_lock_holder.return_value = None
-        assert runner._session_has_compression_in_flight(sk) is False
+        runner._session_db.get_compression_lock_holder.return_value = None
+        assert await runner._session_has_compression_in_flight(sk) is False
 
 
 class TestBusyHandlerDemotesInterruptForCompression:
@@ -133,7 +135,7 @@ class TestBusyHandlerDemotesInterruptForCompression:
         parent = _make_parent_no_subagents()
         runner._running_agents[sk] = parent
         runner.adapters[event.source.platform] = adapter
-        runner._session_db._db.get_compression_lock_holder.return_value = "compressing"
+        runner._session_db.get_compression_lock_holder.return_value = "compressing"
 
         handled = await runner._handle_active_session_busy_message(event, sk)
 
@@ -151,7 +153,7 @@ class TestBusyHandlerDemotesInterruptForCompression:
         runner._running_agents[sk] = parent
         runner._running_agents_ts[sk] = time.time() - 120
         runner.adapters[event.source.platform] = adapter
-        runner._session_db._db.get_compression_lock_holder.return_value = "compressing"
+        runner._session_db.get_compression_lock_holder.return_value = "compressing"
 
         with patch("gateway.run.merge_pending_message_event"):
             await runner._handle_active_session_busy_message(event, sk)
@@ -172,7 +174,7 @@ class TestBusyHandlerDemotesInterruptForCompression:
         parent = _make_parent_no_subagents()
         runner._running_agents[sk] = parent
         runner.adapters[event.source.platform] = adapter
-        runner._session_db._db.get_compression_lock_holder.return_value = None
+        runner._session_db.get_compression_lock_holder.return_value = None
 
         with patch("gateway.run.merge_pending_message_event"):
             await runner._handle_active_session_busy_message(event, sk)
@@ -187,7 +189,7 @@ class TestBusyHandlerDemotesInterruptForCompression:
         sk = build_session_key(event.source)
         runner._running_agents[sk] = _AGENT_PENDING_SENTINEL
         runner.adapters[event.source.platform] = adapter
-        runner._session_db._db.get_compression_lock_holder.return_value = "compressing"
+        runner._session_db.get_compression_lock_holder.return_value = "compressing"
 
         with patch("gateway.run.merge_pending_message_event"):
             handled = await runner._handle_active_session_busy_message(event, sk)

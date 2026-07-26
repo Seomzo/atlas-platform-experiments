@@ -1938,6 +1938,7 @@ def test_sync_session_key_after_compress_reanchors_active_session_lease(
         surface="tui",
         config={"max_concurrent_sessions": 1},
         metadata={"live_session_id": "ui-1"},
+        hermes_home=home,
     )
     assert message is None
     assert lease is not None
@@ -1959,7 +1960,7 @@ def test_sync_session_key_after_compress_reanchors_active_session_lease(
     with patch.dict(sys.modules, {"tools.approval": fake_approval}):
         server._sync_session_key_after_compress("ui-1", session)
 
-    snapshot = active_session_registry_snapshot()
+    snapshot = active_session_registry_snapshot(home)
     assert session["session_key"] == "session-new"
     assert lease.session_id == "session-new"
     assert [entry["session_id"] for entry in snapshot] == ["session-new"]

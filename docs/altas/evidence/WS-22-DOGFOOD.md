@@ -4,11 +4,12 @@
 
 Task: `WS-22-DOGFOOD` from `config/tasks/WS-22-dogfood.yaml`.
 
-The executed scenario is a deterministic fake-adapter collaboration plus real
-Git worktrees, branches, commits, tests, and integration. It is **not** a live
-Buzz dogfood. Real Buzz role enrollment was stopped because the macOS login
-Keychain requires personal unlock and Buzz 0.4.26 requires owner-reviewed agent
-authorization.
+The completed scenario remains a deterministic fake-adapter collaboration plus
+real Git worktrees, branches, commits, tests, and integration. It is **not yet**
+a live Buzz dogfood. The macOS login Keychain is now unlocked and all three
+role credentials are enrolled, but the private relay returns
+`403 relay_membership_required` until an actual `atlas-platform` owner/admin
+adds the three public identities.
 
 ## Shared context
 
@@ -19,11 +20,20 @@ authorization.
   `ee60c920ca344363f7507071ed4a59bdb1a729e4f6a5f6ff6428a00db7b31ec3`
 - Simulated role profiles: `fake-coordinator-profile`,
   `fake-implementer-profile`, and `fake-reviewer-profile`
+- Real role public identities:
+  - coordinator:
+    `b899d99472dff5de95c1c0358dd798b8d337b54a3bad3406b6ab4cefd9422086`
+  - implementer:
+    `2d653a50657aa74146a5bfcd04cb4178d36d09d97eee8929e02aa757fa18cc17`
+  - reviewer:
+    `fb4821cfac469529ffae1b9b19a005c6e4355be8583ebd112dd50939dd18e450`
 - Durable fake event count: 14
 - Final deterministic state: `human_approval_required`
 
-The fake identities are deliberately obvious test values and are not claimed
-as Buzz identities.
+The fake identities are deliberately obvious test values. The three real
+fingerprints above are public identity material only; their private halves
+remain in Keychain and are not printed, logged, committed, or passed to the
+model runtime.
 
 ## Timeline
 
@@ -83,7 +93,7 @@ Executed on the integration branch:
 
 ```text
 scripts/run_tests.sh tests/atlas_collab tests/skills/test_atlas_collaboration_skill.py -q
-59 tests passed
+66 tests passed
 
 scripts/run_tests.sh tests/test_project_metadata.py tests/test_packaging_metadata.py -q
 22 tests passed
@@ -110,6 +120,13 @@ combined branch also passed 443 focused Atlas/upstream-dispatch regression
 tests. The two emitted warnings are pre-existing deprecation/resource warnings,
 not failures.
 
+After the GitHub billing gate was resolved, the collaboration contract workflow
+(`30189152764`) and full public CI (`30189153095`) both passed at
+`857a7806f32c08d987bcfae4d875ee710f2a9a49` on the live draft-PR branch. The
+documented `scripts/atlas-collab` wrapper was also exercised from
+`/usr/bin/python3` with no active virtualenv; it re-executed through the locked
+repository `.venv` and returned a valid doctor report.
+
 Additional safety coverage includes clean-home bootstrap/idempotency and
 permissions; task/event validation; deterministic prompt-injection rejection;
 vague intake; coordinator-only transitions; exact role acknowledgements;
@@ -125,7 +142,7 @@ task-scoped process-tree cancellation that leaves an unrelated process alive.
 
 The three real non-secret Hermes profiles
 `atlas-collab-coordinator`, `atlas-collab-implementer`, and
-`atlas-collab-reviewer` were provisioned and left stopped. Hermes 0.18.2 then
+`atlas-collab-reviewer` were provisioned and left stopped. Hermes then
 completed a real Buzz ACP protocol-v2 initialization/model handshake through
 the credential-stripping runtime shim. This proves the model-runtime seam, not
 Buzz role identity authorization.
@@ -133,20 +150,44 @@ Buzz role identity authorization.
 All three user LaunchAgent definitions were installed with `RunAtLoad=false`
 and confirmed `installed: true`, `loaded: false`. No service was started.
 
+The real `WS-22-DOGFOOD` contract was also applied to the durable local store.
+The command created/reused exactly one task in `intake`, preserved contract hash
+`84a63e1cbde77499af75b6d20f7ad5dec6758ef1c5ee96fe0154a6785012ccb5`,
+and then failed closed on the expected `403 relay_membership_required` before
+recording a Buzz channel, canvas, or event. This leaves an auditable,
+idempotently resumable recovery boundary rather than a second task.
+
+All three exact live role bindings are already persisted:
+
+| Role | Branch | Persistent session | Worktree-local Git identity |
+| --- | --- | --- | --- |
+| Coordinator | `codex/ws-22-development-collaboration-plane` | `ws22-coordinator-live` | `Atlas Coordinator <atlas-coordinator@users.noreply.github.com>` |
+| Implementer | `codex/ws-22-dogfood-implementer` | `ws22-implementer-live` | `Atlas Implementer <atlas-implementer@users.noreply.github.com>` |
+| Reviewer | `codex/ws-22-dogfood-reviewer` | `ws22-reviewer-live` | `Atlas Reviewer <atlas-reviewer@users.noreply.github.com>` |
+
+Each binding currently fails readiness for one explicit reason only:
+`bound task has no live Buzz channel`. Its branch/worktree identity checks will
+run again automatically after task intake resumes and records that channel.
+
 ## Deliberately unmet live requirements
 
-- No real `atlas-coordinator`, `atlas-implementer`, or `atlas-reviewer` Buzz
-  public identity was created.
-- No role credential was written to Keychain.
+- The three real public identities exist and their private credentials are in
+  Keychain, but none is yet a relay member.
 - No real Buzz development channel/canvas/event or deep link was created.
 - No live ACP role process or user LaunchAgent was started.
-- The existing Buzz Desktop identity must be rotated after a local conversion
-  failure emitted its credential once. That value was not reused or committed.
-- Claude is unauthenticated. Codex Buzz ACP API-key readiness is unproven.
-- The three Hermes profiles are runtime-ready but deliberately cannot become
-  live roles without separate Buzz keys, owner approval, author allowlisting,
-  and task/worktree bindings.
-- The real AC-16 live dogfood remains blocked on personal Keychain unlock,
-  desktop identity rotation, and Buzz owner approval.
+- The existing Buzz Desktop identity is not used by the framework. Per operator
+  direction, rotating it is explicitly deferred and is not treated as a WS-22
+  prerequisite; the previously observed value was never reused or committed.
+- Claude's authentication probe now succeeds. Codex Buzz ACP API-key readiness
+  remains unproven and Codex is not selected.
+- The three Hermes profiles are runtime-ready but cannot become live roles
+  without relay membership, profile publication, and channel membership. Exact
+  task/worktree/session/Git bindings are already persisted.
+- Stable and task channel creation now idempotently adds every configured role
+  as a channel bot in deterministic coverage. The live apply remains gated on
+  relay membership.
+- The real AC-16 live dogfood is blocked only at the external owner/admin
+  membership grant and the live setup that is designed to resume from the
+  pre-staged task and bindings.
 
 The deterministic evidence never substitutes for these live gates.

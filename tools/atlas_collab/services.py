@@ -25,6 +25,15 @@ def _launch_agents_dir() -> Path:
     return Path.home() / "Library" / "LaunchAgents"
 
 
+def _gui_domain() -> str:
+    if platform.system() != "Darwin":
+        raise RuntimeError("launchctl GUI domains are only available on macOS")
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:
+        raise RuntimeError("macOS service control requires user ID support")
+    return f"gui/{getuid()}"
+
+
 def _service_program(role: str) -> list[str]:
     return [
         sys.executable,
@@ -89,7 +98,7 @@ def uninstall_services(*, apply: bool) -> list[dict[str, Any]]:
         raise RuntimeError("service uninstall currently supports macOS LaunchAgents")
     config = load_config()
     archive_dir = collab_home() / "service-archive"
-    gui_domain = f"gui/{os.getuid()}"
+    gui_domain = _gui_domain()
     actions = []
     for role in config["roles"]:
         label = f"{SERVICE_PREFIX}.{role}"
@@ -137,7 +146,7 @@ def service_action(action: str) -> list[dict[str, Any]]:
         raise RuntimeError("service control currently supports macOS LaunchAgents")
     config = load_config()
     results = []
-    gui_domain = f"gui/{os.getuid()}"
+    gui_domain = _gui_domain()
     for role in config["roles"]:
         label = f"{SERVICE_PREFIX}.{role}"
         path = _launch_agents_dir() / f"{label}.plist"

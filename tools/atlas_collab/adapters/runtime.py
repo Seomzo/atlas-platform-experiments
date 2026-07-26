@@ -66,6 +66,15 @@ class RuntimeInventory:
             }
         executable = shutil.which("hermes")
         if not executable:
+            if not apply:
+                return {
+                    "runtime": runtime,
+                    "profile": profile,
+                    "apply": False,
+                    "created": False,
+                    "status": "unavailable",
+                    "detail": "Hermes is required to provision this role profile",
+                }
             raise RuntimeError("Hermes is required to provision this role profile")
         existing = self.runner.run(
             [executable, "profile", "show", profile],

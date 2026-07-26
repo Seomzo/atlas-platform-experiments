@@ -4,6 +4,11 @@ Audience: Ethan and an authorized development collaborator. Commands run from
 the intended Atlas worktree. This system never authorizes dealership/customer
 actions.
 
+`scripts/atlas-collab` automatically re-executes through the repository's
+locked `.venv` when present, so these commands work from a clean shell after
+the normal project dependency sync. The packaged `atlas-collab` console entry
+point is equivalent.
+
 ## 1. Inspect before setup
 
 ```bash
@@ -31,20 +36,21 @@ Preview output is non-mutating. Review the exact paths/channels/identities, then
 scripts/atlas-collab bootstrap --apply
 ```
 
-For the current `atlas-platform` workspace, use the verified existing channel
-for all three logical streams until a Buzz owner approves a split:
+For the current `atlas-platform` workspace, keep the three stable private
+development streams distinct:
 
 ```yaml
 buzz:
   community: atlas-platform
-  control_channel: atlas-dealership
-  decisions_channel: atlas-dealership
-  reviews_channel: atlas-dealership
+  control_channel: atlas-dev-control
+  decisions_channel: atlas-dev-decisions
+  reviews_channel: atlas-dev-reviews
 ```
 
-This intentionally makes repeated bootstrap applies reuse
-`atlas-dealership` (`154f9a6e-1d2f-459e-833e-9112e72bf06d`). Do not create the
-three default channel names merely to satisfy a preflight.
+Do not map these names to an unrelated application channel. After the
+coordinator is a relay member, bootstrap creates or reuses exactly these
+channels and idempotently ensures all configured roles are channel bots.
+Repeated apply must return the same channel IDs and `created: false`.
 
 ## 2. Enroll role identities
 
@@ -61,23 +67,29 @@ scripts/atlas-collab agents list
 Apply generates separate secp256k1 keypairs. The private value is written
 directly through the OS credential-vault API under service
 `io.atlas.collab.buzz`; only the public key enters config/state/inventory.
+If the role is already enrolled, apply reuses the same vault credential and
+public identity and retries relay profile publication. It never generates a
+replacement merely because authorization is pending.
 
-Buzz 0.4.26 requires an owner-reviewed agent form. If publication reports
-`owner-approval-or-relay-pending`, use Buzz Desktop or:
+If publication reports `owner-approval-or-relay-pending` with
+`403 relay_membership_required`, the actual private-community owner/admin must
+open:
 
-```bash
-buzz agents draft-create \
-  --channel <CONTROL_CHANNEL_UUID> \
-  --display-name atlas-coordinator \
-  --system-prompt -
+```text
+Buzz Desktop → Settings → Invites → Invite to community
 ```
 
-Pipe the repository role prompt on stdin. The Buzz owner verifies the proposed
-name, role instructions, runtime, mention-only mode, and channel membership,
-then saves. Repeat for implementer and reviewer. Do not copy the
-desktop-generated private key into Atlas files or substitute one shared
-identity. If owner review cannot bind the locally generated public key, keep
-the service disabled and record the identity as manually pending.
+Add each exact role public key with relay role `member`. Do not create a
+replacement managed agent, promote a role to admin/owner, copy a
+desktop-generated private key into Atlas files, or substitute one shared
+identity. The current WS-22 fingerprints are recorded in
+`docs/altas/workstreams/WS-22-HANDOFF.md`.
+
+The owner/admin `Invites` section is intentionally hidden from ordinary relay
+members. If it is absent, stop and use the identity that actually owns/admins
+the community. Builderlab signup is not required for this in-app owner action.
+After all three grants, re-run the three applying enrollment commands and
+require `relay_status: profile-published`.
 
 Add only authorized human owner public keys to
 `buzz.owner_public_keys` in `~/.atlas/collab/config.yaml`. Never add private
@@ -123,8 +135,10 @@ scripts/atlas-collab task create --issue 123 --workstream WS-23 --apply
 ```
 
 Exactly one task record, task channel, canvas, context manifest, task-created
-event, and issue milestone marker are created/reused. A vague task enters
-`needs-clarification`; correct the contract instead of telling agents to infer.
+event, and issue milestone marker are created/reused. Every requested role with
+a configured public identity is idempotently added to the private task channel
+as a bot. A vague task enters `needs-clarification`; correct the contract
+instead of telling agents to infer.
 
 Create clean role worktrees, then preview and persist each role's exact task,
 branch, worktree, and persistent session binding:
