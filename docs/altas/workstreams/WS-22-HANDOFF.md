@@ -8,9 +8,10 @@
 - Last validated: 2026-07-25 America/Los_Angeles
 - Protocol: `atlas.collab.protocol.v1`
 - Overall: implementation, deterministic dogfood, three Keychain-backed role
-  identities, services, GitHub draft/CI, and the live resume path are ready.
-  Live Buzz provisioning/dogfood remains blocked at the external community
-  owner/admin membership grant.
+  identities, exact task/worktree/session/Git bindings, durable task intake,
+  services, GitHub draft/CI, and the live resume path are ready. Live Buzz
+  provisioning/dogfood remains blocked at the external community owner/admin
+  membership grant.
 
 ## Goal and scope
 
@@ -85,9 +86,11 @@ retries profile publication; it cannot rotate the key accidentally.
 
 Bootstrap then creates/reuses the three stable private channels and
 idempotently adds every configured role as a channel bot. Task intake does the
-same for the private WS-22 task channel. The three LaunchAgent definitions
-remain installed and stopped until `doctor` verifies relay auth, channel IDs,
-profiles, task/worktree bindings, and author gates.
+same for the private WS-22 task channel. The real task already exists once in
+durable local state and all three exact role bindings are persisted, so the
+post-grant apply resumes rather than duplicates intake. The three LaunchAgent
+definitions remain installed and stopped until `doctor` verifies relay auth,
+channel IDs, profiles, task/worktree bindings, and author gates.
 
 ## Files changed
 
@@ -182,7 +185,12 @@ creating it. No screenshot with credential material was captured.
   break the identity/vault binding.
 - The three isolated Hermes profiles exist and authenticate to their configured
   provider, but no role may start until relay membership, channel/profile
-  publication, task binding, and author allowlisting all pass.
+  publication, task-channel validation, and author allowlisting all pass.
+- `WS-22-DOGFOOD` exists once in durable state at `intake`, with its exact
+  contract hash and no live Buzz channel/canvas/event. All three role bindings,
+  persistent session IDs, worktrees, and worktree-local Git identities are
+  already persisted. `doctor` reports only `bound task has no live Buzz
+  channel` for those bindings until intake resumes after the owner grant.
 - The three macOS LaunchAgent definitions are installed with `RunAtLoad=false`
   and confirmed unloaded. Their fingerprints/status are durable inventory
   records; the CLI refuses start/restart while `doctor.ready` is false.
@@ -228,9 +236,10 @@ cherry-picked the implementation chain in order and ran union validation.
    IDs are reused and all three role fingerprints are members. Verify the
    configured human/operator author allowlist against the actual owner/admin
    public identity and correct the public allowlist if needed.
-4. Apply the WS-22 dogfood task, bind the three exact branches/worktrees and
-   role-local Git identities, require `doctor.ready: true`, then start the
-   stopped LaunchAgents.
+4. Re-apply the WS-22 dogfood task. It must resume the existing durable intake,
+   create one task channel/canvas/event, and validate the already-persisted
+   role bindings. Require `doctor.ready: true`, then start the stopped
+   LaunchAgents.
 5. Execute the WS-22 task live with at least two real role processes, retaining
    explicit plan, routed question/answer, seeded-defect review, correction,
    union-test, recovery, and human-gate events/deep links.

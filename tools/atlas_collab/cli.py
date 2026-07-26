@@ -236,6 +236,10 @@ def doctor(
         "buzz": buzz_health,
         "github": asdict(github.probe()),
         "runtime": runtime,
+        "runtime_environment": {
+            "python": sys.executable,
+            "virtual_env": os.environ.get("VIRTUAL_ENV", ""),
+        },
         "vault": {
             "backend_available": vault is not None,
             "detail": vault_detail,

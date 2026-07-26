@@ -150,6 +150,25 @@ Buzz role identity authorization.
 All three user LaunchAgent definitions were installed with `RunAtLoad=false`
 and confirmed `installed: true`, `loaded: false`. No service was started.
 
+The real `WS-22-DOGFOOD` contract was also applied to the durable local store.
+The command created/reused exactly one task in `intake`, preserved contract hash
+`84a63e1cbde77499af75b6d20f7ad5dec6758ef1c5ee96fe0154a6785012ccb5`,
+and then failed closed on the expected `403 relay_membership_required` before
+recording a Buzz channel, canvas, or event. This leaves an auditable,
+idempotently resumable recovery boundary rather than a second task.
+
+All three exact live role bindings are already persisted:
+
+| Role | Branch | Persistent session | Worktree-local Git identity |
+| --- | --- | --- | --- |
+| Coordinator | `codex/ws-22-development-collaboration-plane` | `ws22-coordinator-live` | `Atlas Coordinator <atlas-coordinator@users.noreply.github.com>` |
+| Implementer | `codex/ws-22-dogfood-implementer` | `ws22-implementer-live` | `Atlas Implementer <atlas-implementer@users.noreply.github.com>` |
+| Reviewer | `codex/ws-22-dogfood-reviewer` | `ws22-reviewer-live` | `Atlas Reviewer <atlas-reviewer@users.noreply.github.com>` |
+
+Each binding currently fails readiness for one explicit reason only:
+`bound task has no live Buzz channel`. Its branch/worktree identity checks will
+run again automatically after task intake resumes and records that channel.
+
 ## Deliberately unmet live requirements
 
 - The three real public identities exist and their private credentials are in
@@ -162,12 +181,13 @@ and confirmed `installed: true`, `loaded: false`. No service was started.
 - Claude's authentication probe now succeeds. Codex Buzz ACP API-key readiness
   remains unproven and Codex is not selected.
 - The three Hermes profiles are runtime-ready but cannot become live roles
-  without relay membership, profile publication, channel membership, and exact
-  task/worktree bindings.
+  without relay membership, profile publication, and channel membership. Exact
+  task/worktree/session/Git bindings are already persisted.
 - Stable and task channel creation now idempotently adds every configured role
   as a channel bot in deterministic coverage. The live apply remains gated on
   relay membership.
 - The real AC-16 live dogfood is blocked only at the external owner/admin
-  membership grant and its downstream live setup.
+  membership grant and the live setup that is designed to resume from the
+  pre-staged task and bindings.
 
 The deterministic evidence never substitutes for these live gates.
