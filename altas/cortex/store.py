@@ -2157,9 +2157,7 @@ class CortexStore:
             return 0
         now = utc_now()
         transaction = (
-            nullcontext(_connection)
-            if _connection is not None
-            else self.transaction()
+            nullcontext(_connection) if _connection is not None else self.transaction()
         )
         with transaction as connection:
             assert connection is not None
@@ -2204,9 +2202,10 @@ class CortexStore:
                     isinstance(metadata, Mapping)
                     and metadata.get("source_row_id") is not None
                 ):
-                    if isinstance(metadata, Mapping) and metadata.get(
-                        "source_row_id"
-                    ) is not None:
+                    if (
+                        isinstance(metadata, Mapping)
+                        and metadata.get("source_row_id") is not None
+                    ):
                         metadata_ids.add(str(metadata["source_row_id"]))
                 locator_match = any(f":row:{row_id}:" in locator for row_id in row_ids)
                 if (
@@ -2533,9 +2532,10 @@ class CortexStore:
                     f"WHERE brain_id=? AND id IN ({relation_marks})",
                     (self.brain_id, *relation_ids),
                 ).fetchall():
-                    entity_ids.update(
-                        (str(item["subject_entity_id"]), str(item["object_entity_id"]))
-                    )
+                    entity_ids.update((
+                        str(item["subject_entity_id"]),
+                        str(item["object_entity_id"]),
+                    ))
             if entity_ids:
                 entity_marks = ",".join("?" for _ in entity_ids)
                 relation_ids.update(
@@ -2785,7 +2785,12 @@ class CortexStore:
                     )
 
             scrub_resource_ids = set(lineage_ids).union(
-                evidence_ids, memory_ids, entity_ids, relation_ids, job_ids, admission_ids
+                evidence_ids,
+                memory_ids,
+                entity_ids,
+                relation_ids,
+                job_ids,
+                admission_ids,
             )
             if scrub_resource_ids:
                 resource_marks = ",".join("?" for _ in scrub_resource_ids)

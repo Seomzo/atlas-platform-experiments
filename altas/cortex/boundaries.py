@@ -26,9 +26,9 @@ def require_semantic_boundary_reason(reason: str) -> None:
     primitive that can admit end-of-session model work.
     """
 
-    normalized = re.sub(
-        r"[^a-z0-9]+", "_", str(reason or "").strip().lower()
-    ).strip("_")
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(reason or "").strip().lower()).strip(
+        "_"
+    )
     if normalized in _TRUE_SEMANTIC_BOUNDARY_REASONS:
         return
     root = normalized.partition("_")[0]

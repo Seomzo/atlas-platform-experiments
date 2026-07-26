@@ -429,9 +429,7 @@ class AltasWorker:
         payload = control_plane_job.get("payload")
         if not isinstance(payload, dict) or set(payload) != {"dispatch_admission"}:
             raise ValueError("Cortex control-plane payload is invalid")
-        admission = CortexDispatchAdmission.from_mapping(
-            payload["dispatch_admission"]
-        )
+        admission = CortexDispatchAdmission.from_mapping(payload["dispatch_admission"])
         recreated, dispatch_key = CortexDispatchAdmission.create(
             local_job_id=admission.local_job_id,
             admission_id=admission.admission_id,
@@ -490,9 +488,7 @@ class AltasWorker:
                     raw_config=raw_config,
                     environ=scoped,
                     secret_scope=scoped,
-                ).run_exact_managed_dispatch(
-                    authorization.cortex_dispatch_admission
-                )
+                ).run_exact_managed_dispatch(authorization.cortex_dispatch_admission)
         result = results
         if result.status in {"failed", "retention_failed", "locked", "disabled"}:
             raise RuntimeError("CortexMaintenanceFailed")

@@ -90,7 +90,9 @@ def test_quick_setup_cancel_stops_before_terminal_and_summary(
     monkeypatch.setattr(
         setup,
         "_print_setup_summary",
-        lambda *_args, **_kwargs: pytest.fail("completion summary ran after cancellation"),
+        lambda *_args, **_kwargs: pytest.fail(
+            "completion summary ran after cancellation"
+        ),
     )
 
     completed = setup._run_first_time_quick_setup(

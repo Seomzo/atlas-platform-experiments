@@ -597,9 +597,7 @@ def test_worker_can_idempotently_signal_dedicated_cortex_maintenance(
     assert job is not None
     assert job["capability"] == "cortex.memory_maintenance"
     assert job["device_id"] == DEMO_DEVICE_ID
-    assert job["payload"] == {
-        "dispatch_admission": payload["dispatch_admission"]
-    }
+    assert job["payload"] == {"dispatch_admission": payload["dispatch_admission"]}
     assert _job_allows_capability(job["capability"], "model.chat") is True
     assert _job_allows_capability(job["capability"], "fixed_ops.daily_report") is False
 
@@ -710,9 +708,7 @@ def test_invalid_claimed_cortex_payload_is_quarantined_and_cannot_poison_queue(
     )
 
     assert claimed.status_code == 403
-    assert claimed.json()["detail"]["code"] == (
-        "cortex_dispatch_admission_invalid"
-    )
+    assert claimed.json()["detail"]["code"] == ("cortex_dispatch_admission_invalid")
     quarantined = app.state.repository.get_job(job_id)
     assert quarantined is not None
     assert quarantined["status"] == "canceled"

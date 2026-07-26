@@ -12,7 +12,7 @@ from tools.atlas_collab.models import (
     TaskContract,
 )
 from tools.atlas_collab.redaction import SecretMaterialError, assert_non_secret, redact
-from tools.atlas_collab.validation import validate_task_file
+from tools.atlas_collab.validation import _parse_added_text, validate_task_file
 
 
 @pytest.mark.parametrize(
@@ -116,3 +116,33 @@ def test_sentinel_secrets_are_rejected_and_redacted():
         assert_non_secret({"private_key": "not-even-a-real-key"})
     # Public keys are identifiers and may be recorded.
     assert_non_secret({"public_key": "a" * 64})
+
+
+def test_repository_secret_scan_reads_only_introduced_lines():
+    sentinel = "sk-" + "test_SENTINEL_1234567890"
+    diff = """\
+diff --git a/example.py b/example.py
+index 1111111..2222222 100644
+--- a/example.py
++++ b/example.py
+@@ -1,2 +1,2 @@
+ PRIVATE_KEY = existing_vault_value
+-message = "before"
++message = "after"
+"""
+    assert _parse_added_text(diff) == {"example.py": 'message = "after"'}
+
+    added_secret = (
+        diff
+        + """\
+diff --git a/new.py b/new.py
+new file mode 100644
+--- /dev/null
++++ b/new.py
+@@ -0,0 +1 @@
++token = \""""
+        + sentinel
+        + """\"
+"""
+    )
+    assert sentinel in _parse_added_text(added_secret)["new.py"]

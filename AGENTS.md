@@ -1379,7 +1379,10 @@ SQLite under `~/.atlas/collab/` is non-secret recovery state.
   force-push, branch deletion, repository-setting, or product-authorization
   actions.
 - Use `scripts/run_tests.sh tests/atlas_collab` and the credential-free
-  repository validator. Live tests must keep failures and manual gates honest.
+  repository validator. Sentinel validation examines introduced text so a
+  formatting-only change to legacy secret-handling code is not a false
+  positive; new secret-like material still fails closed. Live tests must keep
+  failures and manual gates honest.
 
 See `docs/altas/DEVELOPMENT_COLLABORATION.md` and
 `docs/altas/COLLABORATION_RUNBOOK.md`.

@@ -443,7 +443,9 @@ def cortex_provider_is_approved(
         for item in (approved_providers or ())
         if str(item).strip()
     }
-    return not approved or _canonical_provider_id(str(provider or "").strip()) in approved
+    return (
+        not approved or _canonical_provider_id(str(provider or "").strip()) in approved
+    )
 
 
 def cortex_provider_is_managed(provider: str) -> bool:
@@ -677,9 +679,7 @@ def _validate_entities(value: Any) -> tuple[TriageEntity, ...]:
             # The prompt contract lists the allowed type values; cheap models
             # copy that list shape for a single value. Unwrapping is lossless.
             raw_type = raw_type[0]
-        entity_type = _required_string(
-            raw_type, "entity.type", maximum=100
-        ).lower()
+        entity_type = _required_string(raw_type, "entity.type", maximum=100).lower()
         if entity_type not in ENTITY_TYPES:
             raise CortexOutputError("entity.type is not in the Cortex vocabulary")
         aliases_value = item.get("aliases", [])
@@ -1366,12 +1366,15 @@ class DreamProcessor:
                 report_names = ", ".join(member_names[:12])
                 if len(member_names) > 12:
                     report_names += f", and {len(member_names) - 12} more"
-                community_id = "community_" + stable_hash(
-                    self.store.brain_id,
-                    COMMUNITY_ALGORITHM_VERSION,
-                    space_id,
-                    *member_ids,
-                )[:32]
+                community_id = (
+                    "community_"
+                    + stable_hash(
+                        self.store.brain_id,
+                        COMMUNITY_ALGORITHM_VERSION,
+                        space_id,
+                        *member_ids,
+                    )[:32]
+                )
                 connection.execute(
                     "INSERT INTO communities(id, brain_id, knowledge_space_id, level, "
                     "label, report, algorithm_version, member_ids_json, stale, generated_at) "
