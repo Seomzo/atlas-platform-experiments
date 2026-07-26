@@ -12,6 +12,26 @@ from typing import Protocol
 SERVICE = "io.atlas.collab.buzz"
 
 
+def vault_status() -> dict[str, object]:
+    if platform.system() != "Darwin":
+        return {"backend": "keyring", "unlocked": None}
+    result = subprocess.run(
+        ["/usr/bin/security", "show-keychain-info"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return {
+        "backend": "macOS login Keychain",
+        "unlocked": result.returncode == 0,
+        "detail": (
+            "ready"
+            if result.returncode == 0
+            else "login Keychain must be unlocked personally"
+        ),
+    }
+
+
 class CredentialVault(Protocol):
     def get(self, account: str) -> str | None: ...
 

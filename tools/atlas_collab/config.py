@@ -13,6 +13,7 @@ from .redaction import assert_non_secret
 
 DEFAULTS: dict[str, Any] = {
     "schema_version": "atlas.collab.config.v1",
+    "protocol_version": "atlas.collab.protocol.v1",
     "repository": "Seomzo/atlas-platform-experiments",
     "base_ref": "main",
     "buzz": {

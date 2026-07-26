@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     github_pr INTEGER,
     failure_count INTEGER NOT NULL DEFAULT 0,
     turn_count INTEGER NOT NULL DEFAULT 0,
+    clarification_count INTEGER NOT NULL DEFAULT 0,
+    cost_microusd INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -122,6 +124,15 @@ CREATE TABLE IF NOT EXISTS services (
     status TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS task_processes (
+    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+    pid INTEGER NOT NULL,
+    create_time REAL NOT NULL,
+    command_fingerprint TEXT NOT NULL,
+    registered_at TEXT NOT NULL,
+    stopped_at TEXT,
+    PRIMARY KEY(task_id, pid, create_time)
+);
 """
 
 
@@ -140,11 +151,25 @@ class StateStore:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.executescript(SCHEMA)
+        self._ensure_column(
+            "tasks", "clarification_count", "INTEGER NOT NULL DEFAULT 0"
+        )
+        self._ensure_column("tasks", "cost_microusd", "INTEGER NOT NULL DEFAULT 0")
         self.connection.execute(
             "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
         self.connection.commit()
+
+    def _ensure_column(self, table: str, column: str, declaration: str) -> None:
+        columns = {
+            row["name"]
+            for row in self.connection.execute(f"PRAGMA table_info({table})")
+        }
+        if column not in columns:
+            self.connection.execute(
+                f"ALTER TABLE {table} ADD COLUMN {column} {declaration}"
+            )
 
     def close(self) -> None:
         self.connection.close()
@@ -450,3 +475,38 @@ class StateStore:
             and row["context_hash"] == task["context_hash"]
             for row in rows
         )
+
+    def add_cost(self, task_id: str, amount_usd: float) -> int:
+        if amount_usd < 0:
+            raise ValueError("cost cannot be negative")
+        microusd = round(amount_usd * 1_000_000)
+        self.connection.execute(
+            """
+            UPDATE tasks
+            SET cost_microusd = cost_microusd + ?, updated_at = ?
+            WHERE task_id = ?
+            """,
+            (microusd, _now(), task_id),
+        )
+        self.connection.commit()
+        task = self.task(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        return int(task["cost_microusd"])
+
+    def record_clarification(self, task_id: str, *, limit: int = 2) -> bool:
+        if limit < 1:
+            raise ValueError("clarification limit must be positive")
+        self.connection.execute(
+            """
+            UPDATE tasks
+            SET clarification_count = clarification_count + 1, updated_at = ?
+            WHERE task_id = ?
+            """,
+            (_now(), task_id),
+        )
+        self.connection.commit()
+        task = self.task(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        return int(task["clarification_count"]) >= limit

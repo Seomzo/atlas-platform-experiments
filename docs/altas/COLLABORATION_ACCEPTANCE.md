@@ -5,24 +5,24 @@ This evidence matrix is updated only from executed results. `pending` and
 
 | ID | Status | Evidence |
 | --- | --- | --- |
-| AC-01 Idempotent bootstrap | pending | Focused tests plus clean temporary home and real-machine double apply required. |
-| AC-02 Distinct identities and vault | pending | Three public identities, OS-vault proof, process/config/log sentinel scan required. |
-| AC-03 Real Buzz connectivity | pending | Relay/channel/profile message and deep link required. |
-| AC-04 Task intake | pending | Valid and vague fake/live task intake evidence required. |
-| AC-05 Shared context before work | pending | Three role acknowledgements of identical hashes required. |
-| AC-06 Collaborative plan before edits | pending | Plan, reviewer feedback, implementer acceptance, final plan required. |
-| AC-07 Isolated execution | pending | Clean role worktrees/branches and non-overlapping claims required. |
-| AC-08 Live during-work collaboration | pending | Coordinator-routed question, peer answer, dependent continuation required. |
-| AC-09 Bounded routing/dedup | pending | Self/hop/terminal/active-turn/retry tests and replay evidence required. |
-| AC-10 Independent review | pending | Separate reviewer catches seeded defect and implementer fixes it. |
-| AC-11 Integration/evidence | pending | Ancestry, overlap, order, union tests, matrix, rollback evidence required. |
-| AC-12 GitHub recoverability | pending | Issue/commits/draft PR/CI/handoff must stand without Buzz. |
-| AC-13 Buzz live record | pending | Task-channel timeline and GitHub links required. |
-| AC-14 Degraded recovery | pending | Buzz/GitHub/runtime/orchestrator loss/replay tests required. |
-| AC-15 No widening/auto merge | pending | Negative tests, code inspection, draft human gate required. |
-| AC-16 Real dogfood | pending | Three identities, available real processes, Buzz, worktrees/commits/tests/PR required. |
-| AC-17 Product boundary | pending | Diff and architecture review required. |
-| AC-18 Operable by both humans | pending | Runbook and fresh `doctor` interpretation evidence required. |
+| AC-01 Idempotent bootstrap | partial | Clean-home dry-run and fake adapter/state idempotency pass. Real dry-run is accurate; double real apply is blocked by the role credential gate. |
+| AC-02 Distinct identities and vault | blocked | Fake identities/profiles and sentinel/no-argv tests pass. Login Keychain is locked, so no real role key was stored or claimed. |
+| AC-03 Real Buzz connectivity | blocked | Relay/community and Buzz CLI 0.4.26 were discovered; no new role is authorized, so no live task message/deep link is claimed. |
+| AC-04 Task intake | partial | Valid and vague fake intake create/reuse exactly one record/channel/canvas/comment; live intake is blocked. |
+| AC-05 Shared context before work | partial | Three simulated roles acknowledged base/contract/context hashes; no live role acknowledgement. |
+| AC-06 Collaborative plan before edits | partial | Deterministic plan, review challenge, implementer scope, and accepted plan precede real fixture edits; not live Buzz. |
+| AC-07 Isolated execution | pass | Real integration/implementer/reviewer worktrees and branches were clean and separate; deterministic claim conflicts pass. |
+| AC-08 Live during-work collaboration | blocked | Routed deterministic question/answer exists; no live Buzz processes. |
+| AC-09 Bounded routing/dedup | pass | Self/hop/terminal rejection, worker mediation, one active turn, turn/cost/failure/clarification bounds, replay, and write dedup tests pass. |
+| AC-10 Independent review | partial | Separate reviewer worktree/probe caught the seeded uppercase defect before approval and the implementer corrected it. No distinct live model identity participated. |
+| AC-11 Integration/evidence | pass | Base ancestry, two-path overlap, ordered cherry-picks, union tests, evidence, matrix, and rollback points are recorded. |
+| AC-12 GitHub recoverability | partial | Contract, four commits, templates/workflow, evidence, and handoff stand without Buzz; draft PR/CI still pending final publish. |
+| AC-13 Buzz live record | blocked | Only explicitly labeled fake event history exists. |
+| AC-14 Degraded recovery | partial | Deterministic Buzz/GitHub/runtime/orchestrator loss and replay pass; live relay recovery remains untested. |
+| AC-15 No widening/auto merge | pass | Negative tests/code inspection pass; no such mutator exists and final state remains human-gated. |
+| AC-16 Real dogfood | blocked | Real worktrees/commits/review/tests exist, but the required real Buzz identities/processes/transcript do not. |
+| AC-17 Product boundary | pass | Diff is confined to development tooling, tests, docs, templates, and skill; product runtime/authorization are unchanged. |
+| AC-18 Operable by both humans | partial | Exact setup-through-uninstall runbook and actionable `doctor` exist; collaborator fresh-run evidence is pending. |
 
 ## Known environment constraints
 

@@ -14,7 +14,7 @@ from typing import Any
 
 import yaml
 
-from . import __version__
+from . import PROTOCOL_VERSION, __version__
 from .adapters.buzz import BuzzAdapter
 from .adapters.github import GitHubAdapter
 from .adapters.runtime import RuntimeInventory
@@ -26,7 +26,7 @@ from .config import (
     state_path,
     write_default_config,
 )
-from .keychain import KeyringVault
+from .keychain import KeyringVault, vault_status
 from .models import ContractError
 from .orchestrator import Orchestrator, issue_contract, load_task_contract
 from .services import install_services, service_action, service_dependencies
@@ -145,10 +145,12 @@ def doctor(root: Path, config: dict[str, Any]) -> dict[str, Any]:
         "vault": {
             "backend_available": vault is not None,
             "detail": vault_detail,
+            "status": vault_status(),
             "role_credentials": role_credentials,
         },
         "services": dependencies,
         "boundaries": {
+            "protocol_version": PROTOCOL_VERSION,
             "development_only": True,
             "automatic_merge": False,
             "automatic_deploy": False,
@@ -306,9 +308,21 @@ def main(argv: list[str] | None = None) -> int:
                 changed = store.transition(
                     args.task_id, target, actor_role="coordinator"
                 )
+                stopped_processes = []
+                released_claims = 0
+                if args.task_command == "cancel":
+                    from .claims import release_claims
+                    from .process_control import TaskProcessController
+
+                    stopped_processes = TaskProcessController(store).cancel_task(
+                        args.task_id
+                    )
+                    released_claims = release_claims(store, args.task_id)
                 _json({
                     "apply": True,
                     "changed": changed,
+                    "stopped_processes": stopped_processes,
+                    "released_claims": released_claims,
                     "task": store.task(args.task_id),
                 })
                 return 0
@@ -402,9 +416,16 @@ def main(argv: list[str] | None = None) -> int:
                 # Cleanup releases orchestration leases/state only. Branches,
                 # worktrees, channels, and review artifacts are retained.
                 from .claims import release_claims
+                from .process_control import TaskProcessController
 
+                stopped = TaskProcessController(store).cancel_task(args.task)
                 released = release_claims(store, args.task)
-                _json({"apply": True, "released_claims": released, "plan": plan})
+                _json({
+                    "apply": True,
+                    "stopped_processes": stopped,
+                    "released_claims": released,
+                    "plan": plan,
+                })
             else:
                 _json({"apply": False, "plan": plan})
             return 0

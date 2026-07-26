@@ -3,6 +3,7 @@ import json
 import pytest
 import yaml
 
+from tools.atlas_collab import PROTOCOL_VERSION
 from tools.atlas_collab.models import (
     CollaborationEvent,
     ContractError,
@@ -13,6 +14,7 @@ from tools.atlas_collab.validation import validate_task_file
 
 
 def test_task_requires_observable_unique_acceptance_criteria(contract):
+    assert PROTOCOL_VERSION == "atlas.collab.protocol.v1"
     raw = contract.to_dict()
     raw["acceptance_criteria"] = []
     with pytest.raises(ContractError, match="at least one"):
@@ -84,7 +86,7 @@ def test_self_trigger_hop_limit_and_terminal_events_do_not_wake(contract):
 
 
 def test_sentinel_secrets_are_rejected_and_redacted():
-    sentinel = "sk-test_SENTINEL_1234567890"
+    sentinel = "sk-" + "test_SENTINEL_1234567890"
     assert "[REDACTED]" in redact(f"failure {sentinel}")
     with pytest.raises(SecretMaterialError):
         assert_non_secret({"note": sentinel})

@@ -1,10 +1,13 @@
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
 from tools.atlas_collab.adapters.runtime import FakeRuntime
 from tools.atlas_collab.claims import ClaimConflict, acquire_claim, release_claims
 from tools.atlas_collab.models import CollaborationEvent, ContractError
+from tools.atlas_collab.process_control import TaskProcessController
 from tools.atlas_collab.routing import Router, RoutingRejected
 
 
@@ -132,3 +135,34 @@ def test_pause_blocks_turn_and_resume_restores_state(store, contract):
         )
     store.transition(contract.task_id, "resume", actor_role="coordinator")
     assert store.task(contract.task_id)["state"] == "executing"
+
+
+def test_cost_and_repeated_clarification_budgets_fail_closed(store, contract):
+    store.create_task(contract, state="executing")
+    assert not store.record_clarification(contract.task_id, limit=2)
+    assert store.record_clarification(contract.task_id, limit=2)
+    store.add_cost(contract.task_id, 0.01)
+    with pytest.raises(RoutingRejected, match="cost budget"):
+        Router(store, cost_budget_usd=0.01).authorize(
+            _question(contract),
+            target_agent_id="agent-implementer",
+            target_role="implementer",
+        )
+
+
+def test_cancel_kills_only_registered_task_process(store, contract):
+    store.create_task(contract, state="executing")
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        start_new_session=True,
+    )
+    controller = TaskProcessController(store)
+    try:
+        controller.register(contract.task_id, process.pid, "fake-runtime-sleep")
+        stopped = controller.cancel_task(contract.task_id)
+        assert process.pid in stopped
+        process.wait(timeout=5)
+        assert process.poll() is not None
+    finally:
+        if process.poll() is None:
+            process.kill()

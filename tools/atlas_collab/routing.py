@@ -21,10 +21,12 @@ class Router:
         *,
         turn_budget: int = 40,
         max_failures: int = 3,
+        cost_budget_usd: float = 20.0,
     ):
         self.store = store
         self.turn_budget = turn_budget
         self.max_failures = max_failures
+        self.cost_budget_microusd = round(cost_budget_usd * 1_000_000)
 
     def authorize(
         self,
@@ -60,6 +62,8 @@ class Router:
             raise RoutingRejected("task turn budget exhausted")
         if task["failure_count"] >= self.max_failures:
             raise RoutingRejected("task circuit breaker is open")
+        if task["cost_microusd"] >= self.cost_budget_microusd:
+            raise RoutingRejected("task cost budget exhausted")
         active = self.store.connection.execute(
             """
             SELECT 1 FROM turns
@@ -165,4 +169,7 @@ class Router:
             agent_id=target_agent_id,
             success=True,
         )
+        cost = float(result.get("cost_usd", 0))
+        if cost:
+            self.store.add_cost(event.task_id, cost)
         return result

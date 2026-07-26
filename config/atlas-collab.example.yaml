@@ -1,4 +1,5 @@
 schema_version: atlas.collab.config.v1
+protocol_version: atlas.collab.protocol.v1
 repository: Seomzo/atlas-platform-experiments
 base_ref: main
 buzz:

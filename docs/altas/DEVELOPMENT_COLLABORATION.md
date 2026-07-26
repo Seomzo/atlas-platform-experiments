@@ -3,6 +3,8 @@
 Status: development-only implementation in WS-22. It is not an Atlas product
 runtime, customer dependency, or authorization source.
 
+Protocol version: `atlas.collab.protocol.v1`.
+
 ## Decision
 
 Atlas development collaboration uses a hybrid plane:
