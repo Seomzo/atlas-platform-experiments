@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://atlas.local/schemas/collab/event-v1.json",
+  "title": "Atlas Collaboration Event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "task_id",
+    "workstream_id",
+    "actor_id",
+    "actor_role",
+    "event_type",
+    "status",
+    "summary",
+    "reply_to",
+    "causation_id",
+    "requested_from",
+    "intended_for",
+    "base_sha",
+    "branch",
+    "worktree_id",
+    "path_claims",
+    "interface_claims",
+    "dependency_ids",
+    "acceptance_criteria_ids",
+    "evidence_links",
+    "decisions",
+    "assumptions",
+    "questions",
+    "blockers",
+    "next_action",
+    "hop_count",
+    "max_hops",
+    "timestamp"
+  ],
+  "properties": {
+    "schema_version": {"const": "atlas.collab.event.v1"},
+    "event_id": {"type": "string", "minLength": 8},
+    "task_id": {"type": "string", "minLength": 2},
+    "workstream_id": {"type": "string", "pattern": "^WS-[0-9]{2,}$"},
+    "actor_id": {"type": "string", "minLength": 1},
+    "actor_role": {
+      "enum": [
+        "coordinator",
+        "implementer",
+        "reviewer",
+        "integrator",
+        "architecture-security"
+      ]
+    },
+    "event_type": {
+      "enum": [
+        "TASK_CREATED",
+        "CONTEXT_READY",
+        "PLAN_PROPOSED",
+        "PLAN_FEEDBACK",
+        "PLAN_ACCEPTED",
+        "WORK_CLAIMED",
+        "STATUS_CHANGED",
+        "QUESTION",
+        "ANSWER",
+        "CONTRACT_CHANGE_PROPOSED",
+        "CONTRACT_CHANGE_ACCEPTED",
+        "BLOCKED",
+        "REPLAN_REQUESTED",
+        "COMMIT_READY",
+        "REVIEW_REQUESTED",
+        "REVIEW_FINDING",
+        "CHANGES_REQUESTED",
+        "REVIEW_APPROVED",
+        "INTEGRATION_STARTED",
+        "TEST_EVIDENCE",
+        "HUMAN_GATE_REQUIRED",
+        "HANDOFF_READY",
+        "TASK_COMPLETED",
+        "TASK_CANCELED"
+      ]
+    },
+    "status": {"type": "string", "minLength": 1},
+    "summary": {"type": "string", "minLength": 1},
+    "reply_to": {"type": "string"},
+    "causation_id": {"type": "string"},
+    "requested_from": {"$ref": "#/$defs/stringArray"},
+    "intended_for": {"$ref": "#/$defs/stringArray"},
+    "base_sha": {"type": "string"},
+    "branch": {"type": "string"},
+    "worktree_id": {"type": "string"},
+    "path_claims": {"$ref": "#/$defs/stringArray"},
+    "interface_claims": {"$ref": "#/$defs/stringArray"},
+    "dependency_ids": {"$ref": "#/$defs/stringArray"},
+    "acceptance_criteria_ids": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^AC-[0-9]{2,}$"}
+    },
+    "evidence_links": {"$ref": "#/$defs/stringArray"},
+    "decisions": {"$ref": "#/$defs/stringArray"},
+    "assumptions": {"$ref": "#/$defs/stringArray"},
+    "questions": {"$ref": "#/$defs/stringArray"},
+    "blockers": {"$ref": "#/$defs/stringArray"},
+    "next_action": {"type": "string"},
+    "hop_count": {"type": "integer", "minimum": 0, "maximum": 10},
+    "max_hops": {"type": "integer", "minimum": 1, "maximum": 10},
+    "timestamp": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "stringArray": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  }
+}

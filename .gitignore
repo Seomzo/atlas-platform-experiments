@@ -118,6 +118,8 @@ docs/superpowers/*
 # logs, and per-session caches are never artifacts of the codebase.
 .hermes/
 .altas/
+.atlas-collab/
+atlas-collab-inventory.json
 altas-control-plane.sqlite3*
 
 # Desktop/bootstrap install marker written into the managed checkout root by the

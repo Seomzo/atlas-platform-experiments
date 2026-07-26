@@ -1,0 +1,38 @@
+schema_version: atlas.collab.config.v1
+repository: Seomzo/atlas-platform-experiments
+base_ref: main
+buzz:
+  relay_url: https://replace-with-private-relay.example
+  community: replace-with-private-community
+  owner_public_keys: []
+  control_channel: atlas-dev-control
+  decisions_channel: atlas-dev-decisions
+  reviews_channel: atlas-dev-reviews
+  visibility: private
+github:
+  remote: origin
+  draft_prs: true
+routing:
+  mention_only: true
+  max_hops: 3
+  max_clarification_cycles: 2
+  max_retries: 3
+  task_turn_budget: 40
+  task_cost_budget_usd: 20
+  recovery_heartbeat_seconds: 0
+roles:
+  coordinator:
+    display_name: atlas-coordinator
+    runtime: hermes-acp
+    profile: atlas-collab-coordinator
+    permission_mode: plan
+  implementer:
+    display_name: atlas-implementer
+    runtime: codex-acp
+    profile: atlas-collab-implementer
+    permission_mode: accept-edits
+  reviewer:
+    display_name: atlas-reviewer
+    runtime: hermes-acp
+    profile: atlas-collab-reviewer
+    permission_mode: dont-ask

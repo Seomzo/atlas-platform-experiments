@@ -1354,3 +1354,32 @@ not the specific names.
 
 Reviewers should reject new change-detector tests; authors should convert
 them into invariants before re-requesting review.
+
+---
+
+## Atlas Development Collaboration
+
+The optional `atlas-collab` surface under `tools/atlas_collab/` is
+development-only orchestration. GitHub is authoritative for scope, code, CI,
+review, and human merge decisions; Buzz is the private live discussion record;
+SQLite under `~/.atlas/collab/` is non-secret recovery state.
+
+- Do not wire Buzz into agent core, Atlas Teams, the Control Plane, mobile
+  sequencing, product dispatch, or customer runtime dependencies.
+- Keep external integrations behind the official Buzz CLI plus `git`/`gh`.
+- Role identities, runtime profiles, sessions, worktrees, Git identities, and
+  credentials stay separate. Buzz membership never widens permissions.
+- Private keys live only in the OS credential vault and child process
+  environment, never arguments, YAML, SQLite, logs, screenshots, Buzz, GitHub,
+  tests, or handoffs.
+- Only the coordinator changes task-level state. Route worker questions through
+  the coordinator and enforce claims, causation, hop, turn, retry, and budget
+  bounds deterministically.
+- Never add automatic merge, ready-for-review, deployment, publication,
+  force-push, branch deletion, repository-setting, or product-authorization
+  actions.
+- Use `scripts/run_tests.sh tests/atlas_collab` and the credential-free
+  repository validator. Live tests must keep failures and manual gates honest.
+
+See `docs/altas/DEVELOPMENT_COLLABORATION.md` and
+`docs/altas/COLLABORATION_RUNBOOK.md`.

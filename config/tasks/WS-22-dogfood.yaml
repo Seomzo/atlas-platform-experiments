@@ -1,0 +1,50 @@
+schema_version: atlas.collab.task.v1
+task_id: WS-22-DOGFOOD
+workstream_id: WS-22
+repository: Seomzo/atlas-platform-experiments
+base_ref: main
+base_sha: 7a4d7529dc9b5ef0361800d8d94f05e79d716269
+title: Validate the collaboration protocol fixture
+goal: Prove bounded planning, routed collaboration, independent review, correction, recovery, and a human merge gate.
+in_scope:
+  - tools/atlas_collab/dogfood_fixture.py
+  - tests/atlas_collab/test_dogfood_fixture.py
+out_of_scope:
+  - Atlas customer runtime behavior
+  - Atlas Teams product state
+  - Control Plane authorization
+  - merge or deployment
+acceptance_criteria:
+  - id: AC-01
+    text: The coordinator publishes one reviewed plan before the implementer fixture commit.
+    required_evidence: Buzz planning thread and task event ledger
+  - id: AC-02
+    text: A coordinator-routed implementer question receives a peer answer before dependent work continues.
+    required_evidence: linked Buzz question and answer events
+  - id: AC-03
+    text: An independent reviewer catches the controlled lowercase-role defect before approval.
+    required_evidence: reviewer finding tied to this criterion
+  - id: AC-04
+    text: The corrected fixture and focused recovery tests pass on an integration branch.
+    required_evidence: commit SHAs and exact test output
+  - id: AC-05
+    text: The final result remains a draft pull request awaiting explicit human merge approval.
+    required_evidence: draft PR URL and handoff
+constraints:
+  - Use distinct coordinator, implementer, and reviewer identities.
+  - Never expose credentials or widen permissions.
+  - Never merge, deploy, mark ready, force-push, or delete branches.
+canonical_context:
+  - AGENTS.md
+  - docs/altas/PROJECT_CONTEXT.md
+  - docs/altas/DECISIONS.md
+  - docs/altas/SECURITY.md
+  - docs/altas/TESTING.md
+  - docs/altas/DEVELOPMENT_COLLABORATION.md
+dependencies: []
+human_gates:
+  - A human must approve any merge or deployment.
+requested_roles:
+  - coordinator
+  - implementer
+  - reviewer
