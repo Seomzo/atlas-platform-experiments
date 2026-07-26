@@ -16,7 +16,7 @@ This evidence matrix is updated only from executed results. `pending` and
 | AC-09 Bounded routing/dedup | pass | Self/hop/terminal rejection, worker mediation, one active turn, turn/cost/failure/clarification bounds, replay, and write dedup tests pass. |
 | AC-10 Independent review | partial | Separate reviewer worktree/probe caught the seeded uppercase defect before approval and the implementer corrected it. No distinct live model identity participated. |
 | AC-11 Integration/evidence | pass | Base ancestry, two-path overlap, ordered cherry-picks, union tests, evidence, matrix, and rollback points are recorded. |
-| AC-12 GitHub recoverability | partial | Contract, four commits, templates/workflow, evidence, and handoff stand without Buzz; draft PR/CI still pending final publish. |
+| AC-12 GitHub recoverability | partial | Draft PR #3, branch history, templates/workflow, evidence, and handoff stand without Buzz. CI events fired, but GitHub did not start the jobs because of an account payment/spending-limit gate. |
 | AC-13 Buzz live record | blocked | Only explicitly labeled fake event history exists. |
 | AC-14 Degraded recovery | partial | Deterministic Buzz/GitHub/runtime/orchestrator loss and replay pass; live relay recovery remains untested. |
 | AC-15 No widening/auto merge | pass | Negative tests/code inspection pass; no such mutator exists and final state remains human-gated. |
@@ -29,6 +29,8 @@ This evidence matrix is updated only from executed results. `pending` and
 - The private GitHub repository currently has no API-visible branch protection.
   Rulesets require a different GitHub plan. This is manually pending, while the
   tooling itself exposes no merge/deploy/settings action.
+- Draft-PR Actions jobs are infrastructure-blocked before startup by the
+  repository account's payment/spending-limit gate.
 - Buzz agent creation is owner-reviewed. Locally generated public identities
   are not called live until relay authorization succeeds.
 - Claude Code 2.1.215 is installed but unauthenticated.

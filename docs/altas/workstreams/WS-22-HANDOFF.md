@@ -3,7 +3,7 @@
 ## Status
 
 - Branch: `codex/ws-22-development-collaboration-plane`
-- Draft PR: pending final push/create
+- Draft PR: <https://github.com/Seomzo/atlas-platform-experiments/pull/3>
 - Baseline: `7a4d7529dc9b5ef0361800d8d94f05e79d716269`
 - Last validated: 2026-07-25 America/Los_Angeles
 - Protocol: `atlas.collab.protocol.v1`
@@ -46,6 +46,8 @@ runtime dependencies.
   provider-configured runtime.
 - GitHub branch protection/rulesets are manual-pending because the private
   repository/account plan does not expose them.
+- GitHub Actions accepted the draft-PR events but did not start any job because
+  the account has a payment/spending-limit gate.
 
 ## Files changed
 
@@ -122,6 +124,9 @@ creating it. No screenshot with credential material was captured.
 - Buzz agent creation is owner-reviewed and may not bind a pre-generated key.
 - No collaborator fresh-operator run was observed.
 - Branch protection is not configured.
+- Draft-PR CI jobs did not start because of the repository account's
+  payment/spending-limit gate; this is an infrastructure block, not a test
+  failure.
 - Codex ACP and Claude cannot currently be claimed as authenticated Buzz
   runtimes.
 - Live relay recovery behavior remains unexercised; deterministic adapter
@@ -135,7 +140,7 @@ Workstream commit order:
 2. `cdc849c19` — docs/GitHub/operator workflow
 3. `bda52df6e` — seeded dogfood fixture
 4. `9def05135` — independent-review correction
-5. final evidence/safety hardening commit
+5. `adf52ff99` — final evidence/safety hardening
 
 The dogfood implementer branch is descended from `cdc849c19` and changes only
 the fixture/test pair. The reviewer branch has no edits. The integration branch
@@ -152,5 +157,6 @@ cherry-picked the implementation chain in order and ran union validation.
    services until every runtime check is true.
 6. Execute the same WS-22 task live in Buzz with at least two real processes,
    append real deep links/evidence, and update the AC matrix.
-7. Human reviews the draft PR/CI; do not mark ready or merge until the live
+7. Resolve the GitHub Actions payment/spending-limit gate and rerun draft-PR CI.
+8. Human reviews the draft PR/CI; do not mark ready or merge until the live
    requirements and identity incident are resolved.
