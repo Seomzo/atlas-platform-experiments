@@ -472,6 +472,10 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(f"unknown configured role: {args.role}")
             role_settings = config["roles"][args.role]
             if not args.apply:
+                existing = next(
+                    (agent for agent in store.agents() if agent["role"] == args.role),
+                    None,
+                )
                 profile_plan = RuntimeInventory().ensure_profile(
                     runtime=role_settings["runtime"],
                     profile=role_settings["profile"],
@@ -485,12 +489,20 @@ def main(argv: list[str] | None = None) -> int:
                     "apply": False,
                     "role": args.role,
                     "profile": profile_plan,
-                    "actions": [
-                        "generate distinct secp256k1 keypair",
-                        "store private key in OS credential vault",
-                        "persist public identity and isolated runtime profile",
-                        "attempt relay profile publication",
-                    ],
+                    "actions": (
+                        [
+                            "reuse enrolled public identity and vault credential",
+                            "reuse isolated runtime profile",
+                            "retry relay profile publication",
+                        ]
+                        if existing
+                        else [
+                            "generate distinct secp256k1 keypair",
+                            "store private key in OS credential vault",
+                            "persist public identity and isolated runtime profile",
+                            "attempt relay profile publication",
+                        ]
+                    ),
                 })
                 return 0
             profile_result = RuntimeInventory().ensure_profile(
@@ -774,6 +786,7 @@ def main(argv: list[str] | None = None) -> int:
                         "create one durable task record",
                         "hash canonical context",
                         "ensure one task channel and canvas",
+                        "ensure requested role channel memberships",
                         "post one TASK_CREATED event",
                         "write one GitHub milestone comment when issue-backed",
                     ],

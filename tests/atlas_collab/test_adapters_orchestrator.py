@@ -143,6 +143,8 @@ def test_fake_task_intake_creates_exactly_one_record_channel_canvas_and_event(
     tmp_path, store, contract, config, collab_home
 ):
     (tmp_path / "AGENTS.md").write_text("canonical", encoding="utf-8")
+    for index, role in enumerate(config["roles"], start=1):
+        config["roles"][role]["public_key"] = f"{index:064x}"
     buzz = FakeBuzzAdapter()
     github = FakeGitHubAdapter()
     orchestrator = Orchestrator(
@@ -158,12 +160,52 @@ def test_fake_task_intake_creates_exactly_one_record_channel_canvas_and_event(
     assert len(buzz.canvases) == 1
     assert len(buzz.messages) == 1
     assert len(github.comments) == 1
+    task_channel = next(iter(buzz.channels_by_name.values()))
+    assert buzz.members_by_channel[task_channel["id"]] == {
+        config["roles"][role]["public_key"]: "bot" for role in config["roles"]
+    }
     replay = orchestrator.create_task(contract, issue=22)
     assert not replay["created"]
     assert len(buzz.channels_by_name) == 1
     assert len(buzz.messages) == 1
     assert len(github.comments) == 1
+    assert len(buzz.members_by_channel[task_channel["id"]]) == 3
     assert (collab_home / "inventory.json").is_file()
+
+
+def test_bootstrap_idempotently_adds_roles_to_every_stable_channel(
+    tmp_path, store, config
+):
+    for index, role in enumerate(config["roles"], start=1):
+        config["roles"][role]["public_key"] = f"{index:064x}"
+    buzz = FakeBuzzAdapter()
+    orchestrator = Orchestrator(
+        root=tmp_path,
+        store=store,
+        config=config,
+        buzz=buzz,
+    )
+
+    first = orchestrator.bootstrap()
+    second = orchestrator.bootstrap()
+
+    assert len(buzz.channels_by_name) == 3
+    assert all(
+        len(buzz.members_by_channel[channel["id"]]) == 3
+        for channel in buzz.channels_by_name.values()
+    )
+    assert all(
+        member["created"]
+        for item in first
+        if item["kind"] == "buzz-channel"
+        for member in item["members"]
+    )
+    assert all(
+        not member["created"]
+        for item in second
+        if item["kind"] == "buzz-channel"
+        for member in item["members"]
+    )
 
 
 def test_degraded_systems_fail_closed_without_duplicate_replay(

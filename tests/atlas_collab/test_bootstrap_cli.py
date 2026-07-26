@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from pathlib import Path
 import stat
+import subprocess
 
 import pytest
 
@@ -92,3 +95,52 @@ def test_services_refuse_to_start_before_doctor_is_ready(tmp_path, monkeypatch):
     monkeypatch.setenv("ATLAS_COLLAB_HOME", str(tmp_path / "collab"))
     with pytest.raises(RuntimeError, match="doctor is not ready"):
         main(["services", "start", "--apply"])
+
+
+def test_repository_wrapper_uses_locked_venv_from_clean_shell(tmp_path):
+    system_python = Path("/usr/bin/python3")
+    if not system_python.is_file():
+        pytest.skip("Unix system Python is unavailable")
+    root = Path(__file__).resolve().parents[2]
+    env = os.environ.copy()
+    env.pop("VIRTUAL_ENV", None)
+    env["ATLAS_COLLAB_HOME"] = str(tmp_path / "collab")
+
+    result = subprocess.run(
+        [str(system_python), "scripts/atlas-collab", "doctor"],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["boundaries"]["development_only"] is True
+
+
+def test_enroll_preview_reports_reuse_for_existing_identity(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("ATLAS_COLLAB_HOME", str(tmp_path / "collab"))
+    assert main(["bootstrap", "--apply"]) == 0
+    capsys.readouterr()
+    with StateStore(state_path()) as store:
+        store.register_agent(
+            agent_id="agent-coordinator",
+            role="coordinator",
+            display_name="atlas-coordinator",
+            public_key="1" * 64,
+            runtime="hermes-acp",
+            profile="atlas-collab-coordinator",
+        )
+
+    assert main(["agents", "enroll", "--role", "coordinator"]) == 0
+    preview = json.loads(capsys.readouterr().out)
+
+    assert preview["actions"] == [
+        "reuse enrolled public identity and vault credential",
+        "reuse isolated runtime profile",
+        "retry relay profile publication",
+    ]

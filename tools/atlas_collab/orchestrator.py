@@ -164,6 +164,10 @@ class Orchestrator:
                 )
                 item["created"] = created
                 item["channel_id"] = _channel_id(channel)
+                item["members"] = self._ensure_role_channel_members(
+                    item["channel_id"],
+                    tuple(self.config["roles"]),
+                )
                 for name_key, id_key in channel_id_keys.items():
                     if item["target"] == self.config["buzz"][name_key]:
                         self.config["buzz"][id_key] = item["channel_id"]
@@ -226,6 +230,30 @@ class Orchestrator:
             return f"owner-approval-or-relay-pending: {exc}"
         return "profile-published"
 
+    def _ensure_role_channel_members(
+        self,
+        channel_id: str,
+        roles: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        if not self.buzz:
+            return []
+        results = []
+        for role in roles:
+            public_key = str(self.config["roles"].get(role, {}).get("public_key") or "")
+            if not public_key:
+                continue
+            _, created = self.buzz.ensure_channel_member(
+                channel_id,
+                public_key,
+                role="bot",
+            )
+            results.append({
+                "role": role,
+                "public_key": public_key,
+                "created": created,
+            })
+        return results
+
     def create_task(
         self,
         contract: TaskContract,
@@ -251,6 +279,10 @@ class Orchestrator:
                 visibility=self.config["buzz"]["visibility"],
             )
             channel_id = _channel_id(channel)
+            self._ensure_role_channel_members(
+                channel_id,
+                contract.requested_roles,
+            )
             canvas = (
                 f"# {contract.workstream_id} — {contract.title}\n\n"
                 f"State: `intake`\n\n"

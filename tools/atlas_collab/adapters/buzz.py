@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+from pathlib import Path
 import shutil
 from typing import Any, Callable
 
@@ -28,13 +29,18 @@ class BuzzAdapter:
         private_key_provider: Callable[[], str | None],
         auth_tag_provider: Callable[[], str | None] | None = None,
         runner: CommandRunner | None = None,
-        binary: str = "buzz",
+        binary: str | None = None,
     ):
         self.relay_url = relay_url
         self._private_key_provider = private_key_provider
         self._auth_tag_provider = auth_tag_provider or (lambda: None)
         self.runner = runner or CommandRunner()
-        self.binary = binary
+        app_binary = Path("/Applications/Buzz.app/Contents/MacOS/buzz")
+        self.binary = (
+            binary
+            or shutil.which("buzz")
+            or (str(app_binary) if app_binary.is_file() else "buzz")
+        )
 
     def _env(self) -> dict[str, str]:
         key = self._private_key_provider()
@@ -131,6 +137,28 @@ class BuzzAdapter:
             "--role",
             role,
         ])
+
+    def channel_members(self, channel_id: str) -> list[str]:
+        payload = self._run(["channels", "members", "--channel", channel_id])
+        items = payload if isinstance(payload, list) else payload.get("members", [])
+        members = []
+        for item in items:
+            value = item.get("pubkey") if isinstance(item, dict) else item
+            if isinstance(value, str) and value:
+                members.append(value.lower())
+        return members
+
+    def ensure_channel_member(
+        self,
+        channel_id: str,
+        public_key: str,
+        *,
+        role: str = "bot",
+    ) -> tuple[Any, bool]:
+        normalized = public_key.lower()
+        if normalized in self.channel_members(channel_id):
+            return {"channel_id": channel_id, "pubkey": normalized, "role": role}, False
+        return self.add_member(channel_id, normalized, role), True
 
     def set_profile(self, *, name: str, about: str) -> Any:
         return self._run(["users", "set-profile", "--name", name, "--about", about])
@@ -253,6 +281,7 @@ class FakeBuzzAdapter:
     def __init__(self):
         self.online = True
         self.channels_by_name: dict[str, dict[str, Any]] = {}
+        self.members_by_channel: dict[str, dict[str, str]] = {}
         self.messages: list[dict[str, Any]] = []
         self.canvases: dict[str, str] = {}
 
@@ -273,7 +302,27 @@ class FakeBuzzAdapter:
             "visibility": visibility,
         }
         self.channels_by_name[name] = channel
+        self.members_by_channel[channel["id"]] = {}
         return channel, True
+
+    def ensure_channel_member(
+        self,
+        channel_id: str,
+        public_key: str,
+        *,
+        role: str = "bot",
+    ) -> tuple[dict[str, str], bool]:
+        if not self.online:
+            raise ConnectionError("fake Buzz offline")
+        members = self.members_by_channel.setdefault(channel_id, {})
+        normalized = public_key.lower()
+        created = normalized not in members
+        members.setdefault(normalized, role)
+        return {
+            "channel_id": channel_id,
+            "pubkey": normalized,
+            "role": members[normalized],
+        }, created
 
     def set_canvas(self, channel_id: str, content: str) -> dict[str, str]:
         if not self.online:

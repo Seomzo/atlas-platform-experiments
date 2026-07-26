@@ -1,10 +1,26 @@
 #!/usr/bin/env python3
 """Stable repository entry point for atlas-collab."""
 
+import os
 from pathlib import Path
 import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+SCRIPT_PATH = Path(__file__).resolve()
+ROOT = SCRIPT_PATH.parents[1]
+VENV_PYTHON = (
+    ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+)
+
+# Runbook commands use this wrapper from a clean shell. Prefer the repository's
+# locked environment when it exists instead of accidentally importing through
+# a dependency-incomplete system Python.
+if VENV_PYTHON.is_file() and Path(sys.executable).resolve() != VENV_PYTHON.resolve():
+    os.execv(
+        str(VENV_PYTHON),
+        [str(VENV_PYTHON), str(SCRIPT_PATH), *sys.argv[1:]],
+    )
+
+sys.path.insert(0, str(ROOT))
 
 from tools.atlas_collab.cli import entrypoint
 
