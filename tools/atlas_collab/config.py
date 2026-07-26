@@ -21,8 +21,11 @@ DEFAULTS: dict[str, Any] = {
         "community": "",
         "owner_public_keys": [],
         "control_channel": "atlas-dev-control",
+        "control_channel_id": "",
         "decisions_channel": "atlas-dev-decisions",
+        "decisions_channel_id": "",
         "reviews_channel": "atlas-dev-reviews",
+        "reviews_channel_id": "",
         "visibility": "private",
     },
     "github": {"remote": "origin", "draft_prs": True},
@@ -41,18 +44,33 @@ DEFAULTS: dict[str, Any] = {
             "runtime": "hermes-acp",
             "profile": "atlas-collab-coordinator",
             "permission_mode": "plan",
+            "git_name": "Atlas Coordinator",
+            "git_email": "atlas-coordinator@users.noreply.github.com",
+            "task_id": "",
+            "branch": "",
+            "worktree": "",
         },
         "implementer": {
             "display_name": "atlas-implementer",
-            "runtime": "codex-acp",
+            "runtime": "hermes-acp",
             "profile": "atlas-collab-implementer",
             "permission_mode": "accept-edits",
+            "git_name": "Atlas Implementer",
+            "git_email": "atlas-implementer@users.noreply.github.com",
+            "task_id": "",
+            "branch": "",
+            "worktree": "",
         },
         "reviewer": {
             "display_name": "atlas-reviewer",
             "runtime": "hermes-acp",
             "profile": "atlas-collab-reviewer",
             "permission_mode": "dont-ask",
+            "git_name": "Atlas Reviewer",
+            "git_email": "atlas-reviewer@users.noreply.github.com",
+            "task_id": "",
+            "branch": "",
+            "worktree": "",
         },
     },
 }
@@ -108,10 +126,14 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
 
 
 def write_default_config(path: Path, config: dict[str, Any]) -> bool:
-    assert_non_secret(config)
     if path.exists():
         return False
+    write_config(path, config)
+    return True
+
+
+def write_config(path: Path, config: dict[str, Any]) -> None:
+    assert_non_secret(config)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     path.chmod(0o600)
-    return True

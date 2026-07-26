@@ -13,7 +13,7 @@ import yaml
 
 from .adapters.buzz import BuzzAdapter
 from .adapters.github import GitHubAdapter
-from .config import config_path, inventory_path, load_config, state_path
+from .config import config_path, inventory_path, load_config, state_path, write_config
 from .context import build_context_manifest
 from .keychain import CredentialVault, generate_nostr_keypair
 from .models import (
@@ -22,7 +22,7 @@ from .models import (
     TaskContract,
     content_hash,
 )
-from .redaction import assert_non_secret
+from .redaction import assert_non_secret, assert_safe_untrusted
 from .state import StateStore
 
 
@@ -48,6 +48,10 @@ def issue_contract(
     base_ref: str = "main",
 ) -> TaskContract:
     body = str(issue.get("body") or "")
+    assert_safe_untrusted({
+        "title": str(issue.get("title") or ""),
+        "body": body,
+    })
     criteria = []
     for line in body.splitlines():
         match = re.match(r"\s*[-*]\s+\[[ xX]\]\s+(.+)", line)
@@ -145,6 +149,11 @@ class Orchestrator:
     def bootstrap(self) -> list[dict[str, Any]]:
         results = self.bootstrap_plan()
         if self.buzz:
+            channel_id_keys = {
+                "control_channel": "control_channel_id",
+                "decisions_channel": "decisions_channel_id",
+                "reviews_channel": "reviews_channel_id",
+            }
             for item in results:
                 if item["kind"] != "buzz-channel":
                     continue
@@ -155,6 +164,11 @@ class Orchestrator:
                 )
                 item["created"] = created
                 item["channel_id"] = _channel_id(channel)
+                for name_key, id_key in channel_id_keys.items():
+                    if item["target"] == self.config["buzz"][name_key]:
+                        self.config["buzz"][id_key] = item["channel_id"]
+                        break
+            write_config(config_path(), self.config)
         self.write_inventory()
         return results
 
@@ -185,12 +199,7 @@ class Orchestrator:
             profile=settings["profile"],
         )
         self.config["roles"][role]["public_key"] = public_key
-        config_path().parent.mkdir(parents=True, exist_ok=True)
-        config_path().write_text(
-            yaml.safe_dump(self.config, sort_keys=False),
-            encoding="utf-8",
-        )
-        config_path().chmod(0o600)
+        write_config(config_path(), self.config)
         relay_status = "not-attempted"
         if self.buzz:
             try:
@@ -400,6 +409,115 @@ class Orchestrator:
             "events": events,
         }
 
+    def transition_task(self, task_id: str, target: str) -> dict[str, Any]:
+        before = self.store.task(task_id)
+        if before is None:
+            raise KeyError(task_id)
+        changed = self.store.transition(
+            task_id,
+            target,
+            actor_role="coordinator",
+        )
+        after = self.store.task(task_id)
+        if after is None:
+            raise KeyError(task_id)
+        event_type = {
+            "blocked": "BLOCKED",
+            "review_requested": "REVIEW_REQUESTED",
+            "changes_requested": "CHANGES_REQUESTED",
+            "integrating": "INTEGRATION_STARTED",
+            "human_approval_required": "HUMAN_GATE_REQUIRED",
+            "completed": "TASK_COMPLETED",
+            "canceled": "TASK_CANCELED",
+        }.get(after["state"], "STATUS_CHANGED")
+        event = None
+        if not changed:
+            event = next(
+                (
+                    CollaborationEvent(**item)
+                    for item in reversed(self.store.events(task_id))
+                    if item["event_type"] == event_type
+                    and item["status"] == after["state"]
+                ),
+                None,
+            )
+        if event is None:
+            sequence = len(self.store.events(task_id)) + 1
+            event_identity = content_hash({
+                "task": task_id,
+                "from": before["state"],
+                "to": after["state"],
+                "sequence": sequence,
+            })
+            event = CollaborationEvent(
+                task_id=task_id,
+                workstream_id=after["workstream_id"],
+                actor_id="atlas-coordinator",
+                actor_role="coordinator",
+                event_type=event_type,
+                status=after["state"],
+                summary=(
+                    f"Coordinator changed task state from "
+                    f"{before['state']} to {after['state']}."
+                ),
+                base_sha=after["base_sha"],
+                branch=after.get("branch") or "",
+                worktree_id=after.get("worktree") or "",
+                acceptance_criteria_ids=tuple(
+                    item["id"]
+                    for item in after["contract"].get("acceptance_criteria", [])
+                ),
+                next_action=(
+                    "No further agent turns are authorized."
+                    if after["state"] == "canceled"
+                    else "Resume only through an explicit coordinator action."
+                    if after["state"] == "paused"
+                    else "Continue within the accepted task contract."
+                ),
+                event_id=f"evt-{event_identity[:32]}",
+            )
+            self.store.record_event(event)
+        result = {
+            "changed": changed,
+            "task": after,
+            "event": event.to_dict(),
+            "buzz_link": "",
+            "github_link": "",
+            "degraded": [],
+        }
+        channel_id = str(after.get("buzz_channel_id") or "")
+        if channel_id and self.buzz:
+            try:
+                buzz_event_id, _ = self.buzz.send_event(
+                    self.store,
+                    event,
+                    channel_id=channel_id,
+                )
+                result["buzz_link"] = self.buzz.deep_link(
+                    self.config["buzz"]["community"],
+                    channel_id,
+                    buzz_event_id,
+                )
+            except Exception as exc:
+                result["degraded"].append(f"buzz: {exc}")
+        issue = after.get("github_issue")
+        if issue is not None and self.github:
+            try:
+                result["github_link"], _ = self.github.ensure_comment(
+                    self.store,
+                    issue=int(issue),
+                    marker=f"{task_id}:{event.event_id}",
+                    body=(
+                        f"Atlas collaboration task `{task_id}` changed from "
+                        f"`{before['state']}` to `{after['state']}`.\n\n"
+                        f"Buzz event: {result['buzz_link'] or 'degraded/unavailable'}\n\n"
+                        "This milestone grants no merge or deployment authority."
+                    ),
+                )
+            except Exception as exc:
+                result["degraded"].append(f"github: {exc}")
+        return result
+
     def cleanup_plan(self, task_id: str) -> list[dict[str, Any]]:
         task = self.store.task(task_id)
         if task is None:
@@ -419,12 +537,91 @@ class Orchestrator:
         ]
 
     def write_inventory(self) -> Path:
+        tasks = [self.store.task(item["task_id"]) for item in self.store.tasks()]
+        task_records = [item for item in tasks if item is not None]
         inventory = {
             "schema_version": "atlas.collab.inventory.v1",
             "relay_url": self.config["buzz"]["relay_url"],
             "community": self.config["buzz"]["community"],
+            "channels": {
+                "control": {
+                    "name": self.config["buzz"]["control_channel"],
+                    "id": self.config["buzz"].get("control_channel_id", ""),
+                },
+                "decisions": {
+                    "name": self.config["buzz"]["decisions_channel"],
+                    "id": self.config["buzz"].get("decisions_channel_id", ""),
+                },
+                "reviews": {
+                    "name": self.config["buzz"]["reviews_channel"],
+                    "id": self.config["buzz"].get("reviews_channel_id", ""),
+                },
+            },
             "agents": self.store.agents(),
-            "tasks": self.store.tasks(),
+            "profiles": {
+                role: settings["profile"]
+                for role, settings in self.config["roles"].items()
+            },
+            "services": self.store.services(),
+            "worktree_roots": {
+                role: settings.get("worktree", "")
+                for role, settings in self.config["roles"].items()
+            },
+            "tasks": [
+                {
+                    key: task.get(key)
+                    for key in (
+                        "task_id",
+                        "workstream_id",
+                        "state",
+                        "base_sha",
+                        "branch",
+                        "worktree",
+                        "buzz_channel_id",
+                        "buzz_canvas_id",
+                        "github_issue",
+                        "github_pr",
+                        "updated_at",
+                    )
+                }
+                for task in task_records
+            ],
+            "task_agent_bindings": {
+                task["task_id"]: self.store.task_agents(task["task_id"])
+                for task in task_records
+            },
+            "last_verified_health": {
+                "buzz_channels": (
+                    "verified"
+                    if all(
+                        self.config["buzz"].get(key)
+                        for key in (
+                            "control_channel_id",
+                            "decisions_channel_id",
+                            "reviews_channel_id",
+                        )
+                    )
+                    else "not-verified"
+                ),
+                "role_profiles": (
+                    "configured"
+                    if all(
+                        settings.get("profile")
+                        for settings in self.config["roles"].values()
+                    )
+                    else "incomplete"
+                ),
+                "role_bindings": (
+                    "configured"
+                    if all(
+                        settings.get("task_id")
+                        and settings.get("branch")
+                        and settings.get("worktree")
+                        for settings in self.config["roles"].values()
+                    )
+                    else "incomplete"
+                ),
+            },
             "state_path": str(self.store.path),
             "config_path": str(config_path()),
         }

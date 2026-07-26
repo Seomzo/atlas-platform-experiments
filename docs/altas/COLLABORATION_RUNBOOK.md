@@ -90,17 +90,21 @@ scripts/atlas-collab services install
 scripts/atlas-collab services install --apply
 scripts/atlas-collab services status
 scripts/atlas-collab services start
-scripts/atlas-collab services stop
+scripts/atlas-collab services logs
 ```
 
 macOS definitions live in `~/Library/LaunchAgents/io.atlas.collab.*.plist`.
 They invoke `service_runner`, which reads the role key from Keychain at runtime
-and puts it only in the child environment. Definitions contain no credential.
-Logs are under `~/.atlas/collab/logs/`.
+and puts it only in the Buzz harness environment. A no-shell runtime shim strips
+Buzz credential variables before Hermes starts. Definitions and model-runtime
+processes contain no Buzz private credential. Logs are under
+`~/.atlas/collab/logs/`.
 
-Do not start a role whose `doctor` runtime/auth check is false or whose Buzz
-identity is relay-pending. The default heartbeat is disabled. A recovery
-heartbeat must remain opt-in and low frequency.
+`services start` is a preview. Do not apply it until task intake and role
+binding below are complete. The start/restart apply paths refuse to run unless
+`doctor` verifies identities, owner gates, profiles, task channels, and exact
+worktrees. The default heartbeat is disabled. A recovery heartbeat must remain
+opt-in and low frequency.
 
 ## 4. Submit a task
 
@@ -122,6 +126,43 @@ Exactly one task record, task channel, canvas, context manifest, task-created
 event, and issue milestone marker are created/reused. A vague task enters
 `needs-clarification`; correct the contract instead of telling agents to infer.
 
+Create clean role worktrees, then preview and persist each role's exact task,
+branch, worktree, and persistent session binding:
+
+```bash
+scripts/atlas-collab agents bind \
+  --role coordinator --task GH-123 \
+  --branch codex/ws-23-task-slug \
+  --worktree /path/to/ws-23-integration
+scripts/atlas-collab agents bind \
+  --role coordinator --task GH-123 \
+  --branch codex/ws-23-task-slug \
+  --worktree /path/to/ws-23-integration --apply
+scripts/atlas-collab agents bind \
+  --role implementer --task GH-123 \
+  --branch codex/ws-23-implementer \
+  --worktree /path/to/ws-23-implementer --apply
+scripts/atlas-collab agents bind \
+  --role reviewer --task GH-123 \
+  --branch codex/ws-23-reviewer \
+  --worktree /path/to/ws-23-reviewer --apply
+```
+
+Binding rejects dirty worktrees, wrong bases, wrong branches, duplicate branch
+assignment, and un-enrolled roles. Apply also writes the role's configured
+`user.name` and `user.email` to that worktree's Git config only; do not reuse a
+human Git identity for autonomous role commits. After `doctor` reports
+`ready: true`:
+
+```bash
+scripts/atlas-collab services start
+scripts/atlas-collab services start --apply
+scripts/atlas-collab services restart
+scripts/atlas-collab services restart --apply
+scripts/atlas-collab services stop
+scripts/atlas-collab services stop --apply
+```
+
 ## 5. Monitor and intervene
 
 ```bash
@@ -131,6 +172,8 @@ scripts/atlas-collab task pause GH-123
 scripts/atlas-collab task pause GH-123 --apply
 scripts/atlas-collab task resume GH-123 --apply
 scripts/atlas-collab task cancel GH-123 --apply
+scripts/atlas-collab task transition GH-123 --to review_requested
+scripts/atlas-collab task transition GH-123 --to review_requested --apply
 ```
 
 Watch the Buzz task channel for explicit contract/context acknowledgements,
@@ -142,6 +185,11 @@ Pause on base drift, claim/actual path overlap, unreviewed contract change,
 runtime/relay failure outside documented bounds, budget/circuit exhaustion, or
 missing human decision. A reaction, model answer, or channel membership is
 never approval.
+
+`task transition` enforces the coordinator-owned state graph, persists a
+structured event, and mirrors the milestone to Buzz/GitHub when available.
+Use `--to completed` only after the task is already in
+`human_approval_required` and the human gate has actually been satisfied.
 
 ## 6. Review and integrate
 
@@ -157,7 +205,23 @@ python -m tools.atlas_collab.validation --root . --json
 git diff --check
 ```
 
-Keep the PR draft. A human decides whether to mark ready, merge, deploy, publish,
+Prepare a credential-free Markdown PR body, preview the durable handoff, then
+create or update the branch's single draft PR:
+
+```bash
+scripts/atlas-collab task handoff GH-123 \
+  --branch codex/ws-23-task-slug \
+  --title "WS-23: task title" \
+  --body-file /path/to/reviewed-pr-body.md
+scripts/atlas-collab task handoff GH-123 \
+  --branch codex/ws-23-task-slug \
+  --title "WS-23: task title" \
+  --body-file /path/to/reviewed-pr-body.md \
+  --apply
+```
+
+The apply path refuses multiple open PRs and refuses to alter a PR after a human
+marks it ready. A human decides whether to mark ready, merge, deploy, publish,
 force-push, or delete a branch.
 
 ## 7. Recover
@@ -216,10 +280,10 @@ channels, commits, and review evidence.
 
 To uninstall:
 
-1. `scripts/atlas-collab services stop`
-2. Remove only the three exact
-   `~/Library/LaunchAgents/io.atlas.collab.{coordinator,implementer,reviewer}.plist`
-   files.
+1. `scripts/atlas-collab services stop --apply`
+2. Preview `scripts/atlas-collab services uninstall`, then run
+   `scripts/atlas-collab services uninstall --apply`. The exact three plists
+   move to `~/.atlas/collab/service-archive/` so the removal is recoverable.
 3. Delete only the three exact Keychain accounts for service
    `io.atlas.collab.buzz`.
 4. Archive task channels through Buzz as a separate human-reviewed action.

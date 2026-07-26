@@ -38,47 +38,50 @@ def acquire_claim(
     kind: str,
     resource: str,
     ttl_seconds: int = 3600,
+    now: datetime | None = None,
 ) -> str:
     if kind not in {"path", "interface"}:
         raise ValueError("claim kind must be path or interface")
     if not 60 <= ttl_seconds <= 86400:
         raise ValueError("claim lease must be between 60 seconds and 24 hours")
-    now = _now()
-    rows = store.connection.execute(
-        """
-        SELECT agent_id, resource FROM claims
-        WHERE task_id = ? AND kind = ? AND released_at IS NULL AND expires_at > ?
-        """,
-        (task_id, kind, now.isoformat()),
-    ).fetchall()
-    for row in rows:
-        overlaps = (
-            _path_overlap(resource, row["resource"])
-            if kind == "path"
-            else resource == row["resource"]
-        )
-        if overlaps and row["agent_id"] != agent_id:
-            raise ClaimConflict(
-                f"{kind} {resource!r} overlaps active claim by {row['agent_id']}"
-            )
+    current = now or _now()
     claim_id = f"claim-{uuid4()}"
-    store.connection.execute(
-        """
-        INSERT INTO claims(
-            claim_id, task_id, agent_id, kind, resource, acquired_at, expires_at
-        ) VALUES(?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            claim_id,
-            task_id,
-            agent_id,
-            kind,
-            resource,
-            now.isoformat(),
-            (now + timedelta(seconds=ttl_seconds)).isoformat(),
-        ),
-    )
-    store.connection.commit()
+    with store.transaction() as connection:
+        rows = connection.execute(
+            """
+            SELECT agent_id, resource FROM claims
+            WHERE task_id = ? AND kind = ? AND released_at IS NULL
+                  AND expires_at > ?
+            """,
+            (task_id, kind, current.isoformat()),
+        ).fetchall()
+        for row in rows:
+            overlaps = (
+                _path_overlap(resource, row["resource"])
+                if kind == "path"
+                else resource == row["resource"]
+            )
+            if overlaps and row["agent_id"] != agent_id:
+                raise ClaimConflict(
+                    f"{kind} {resource!r} overlaps active claim by {row['agent_id']}"
+                )
+        connection.execute(
+            """
+            INSERT INTO claims(
+                claim_id, task_id, agent_id, kind, resource, acquired_at,
+                expires_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                claim_id,
+                task_id,
+                agent_id,
+                kind,
+                resource,
+                current.isoformat(),
+                (current + timedelta(seconds=ttl_seconds)).isoformat(),
+            ),
+        )
     return claim_id
 
 

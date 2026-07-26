@@ -10,6 +10,8 @@ import re
 from typing import Any
 from uuid import uuid4
 
+from .redaction import assert_safe_untrusted
+
 TASK_SCHEMA_VERSION = "atlas.collab.task.v1"
 EVENT_SCHEMA_VERSION = "atlas.collab.event.v1"
 AC_ID = re.compile(r"^AC-\d{2,}$")
@@ -119,6 +121,7 @@ class TaskContract:
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> TaskContract:
+        assert_safe_untrusted(raw)
         if raw.get("schema_version") != TASK_SCHEMA_VERSION:
             raise ContractError(f"schema_version must be {TASK_SCHEMA_VERSION}")
         task_id = str(raw.get("task_id") or "").strip()
@@ -213,6 +216,7 @@ class CollaborationEvent:
     schema_version: str = EVENT_SCHEMA_VERSION
 
     def validate(self) -> None:
+        assert_safe_untrusted(self.to_dict_unvalidated())
         if self.schema_version != EVENT_SCHEMA_VERSION:
             raise ContractError(f"schema_version must be {EVENT_SCHEMA_VERSION}")
         if self.event_type not in EVENT_TYPES:
@@ -258,6 +262,9 @@ class CollaborationEvent:
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
+        return asdict(self)
+
+    def to_dict_unvalidated(self) -> dict[str, Any]:
         return asdict(self)
 
     def render_buzz(self) -> str:

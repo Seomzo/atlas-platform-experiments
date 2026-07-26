@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+import time
+from typing import Any, Callable
 
 from .models import CollaborationEvent
 from .state import StateStore
@@ -173,3 +174,38 @@ class Router:
         if cost:
             self.store.add_cost(event.task_id, cost)
         return result
+
+    def run_with_retry(
+        self,
+        runtime: Any,
+        event: CollaborationEvent,
+        *,
+        target_agent_id: str,
+        target_role: str,
+        session_id: str,
+        worktree: Path,
+        prompt: str,
+        max_retries: int,
+        base_delay_seconds: float = 1.0,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> dict[str, str]:
+        if not 0 <= max_retries <= 5:
+            raise ValueError("max_retries must be between zero and five")
+        if not 0 <= base_delay_seconds <= 60:
+            raise ValueError("base retry delay must be between zero and 60 seconds")
+        for attempt in range(max_retries + 1):
+            try:
+                return self.run(
+                    runtime,
+                    event,
+                    target_agent_id=target_agent_id,
+                    target_role=target_role,
+                    session_id=f"{session_id}:attempt-{attempt + 1}",
+                    worktree=worktree,
+                    prompt=prompt,
+                )
+            except Exception:
+                if attempt >= max_retries:
+                    raise
+                sleep(base_delay_seconds * (2**attempt))
+        raise RuntimeError("unreachable retry state")

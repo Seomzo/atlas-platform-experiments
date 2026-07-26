@@ -47,16 +47,21 @@ product surface.
    `atlas-collab bootstrap --apply` only after reviewing the plan.
 3. Preview task intake with `atlas-collab task create --file <contract>`.
    Apply it only when the base SHA and scope are current.
-4. Require all roles to acknowledge the exact contract/context hashes.
-5. The coordinator publishes dependencies, ownership/claims, tests, risks, and
+4. Bind each enrolled role to the exact task, branch, clean unique worktree,
+   and persistent session with `atlas-collab agents bind`; service start remains
+   preview-only until `doctor` is fully ready.
+5. Require all roles to acknowledge the exact contract/context hashes.
+6. The coordinator publishes dependencies, ownership/claims, tests, risks, and
    human gates. The reviewer challenges the plan; implementers explicitly
    accept their work packages.
-6. Work only in separate role worktrees. Route worker questions through the
+7. Work only in separate role worktrees. Route worker questions through the
    coordinator and communicate contract changes before dependent work.
-7. The reviewer cites findings against acceptance IDs and may request changes.
-8. The integrator verifies base/overlap/order and runs union validation.
-9. Leave a draft PR and handoff for human approval. Never merge, deploy, mark
-   ready, force-push, delete branches, or approve your own work.
+8. The reviewer cites findings against acceptance IDs and may request changes.
+9. The integrator verifies base/overlap/order and runs union validation.
+10. Preview and apply `atlas-collab task handoff <task-id> --branch <branch>
+   --title <title> --body-file <reviewed.md>` to create or update one draft PR.
+   Leave it and the handoff for human approval. Never merge, deploy, mark ready,
+   force-push, delete branches, or approve your own work.
 
 ## Event Rules
 

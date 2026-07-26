@@ -150,7 +150,9 @@ heartbeat is disabled (`0`) by default.
 The adapter shells only to the installed official `buzz` JSON CLI. It
 feature-detects commands, searches exact channel names, reuses existing
 channels, sends message bodies through stdin, and keeps credentials in
-environment only. It supports channels, membership, canvases, profiles,
+the Buzz CLI/harness environment only. A no-shell runtime shim removes Buzz
+identity variables before the ACP model runtime starts. It supports channels,
+membership, canvases, profiles,
 structured messages/threads, deep links, and honest network/auth errors.
 
 Buzz 0.4.26 exposes owner-reviewed agent drafts but not direct agent creation.
@@ -161,8 +163,11 @@ copying desktop-managed private keys out of Buzz state.
 ### GitHub
 
 The adapter uses `git` and `gh`, needs no repository-admin permission for its
-basic path, and detects base drift, branch overlap, and existing worktrees.
-Milestone comments have stable markers. It has no merge, ready, deploy,
+basic path, and rejects dirty worktrees, wrong bases, non-unique branch
+assignment, path overlap, and actual merge conflicts. Milestone comments and
+draft pull requests have stable markers; a retry creates or updates exactly one
+open draft PR for the branch. If a human has already marked that PR ready, the
+adapter refuses to change its review state. It has no merge, ready, deploy,
 publish, force-push, branch-delete, or settings mutation method.
 
 The current private repository does not expose branch protection/rulesets on
@@ -184,6 +189,17 @@ Feature detection reports:
 work. Service wrappers configure mention subscriptions, an owner allowlist,
 one process, queue deduplication, role-specific permission mode, bounded turn
 duration, and no periodic heartbeat.
+
+Each service is fail-closed until `agents bind` records one durable task,
+expected branch, clean unique worktree, and persistent session for that role.
+Binding also applies a distinct worktree-local Git name/email and `doctor`
+refuses a mismatch.
+The service rechecks the branch, limits subscriptions to the task plus the
+role's stable operational channels, and selects the role's isolated Hermes
+profile. Worker author gates are asymmetric: workers may wake the coordinator,
+while only the coordinator or an authorized human may wake an implementer or
+reviewer. A direct worker-to-worker mention therefore cannot bypass
+coordination.
 
 ## Git and GitHub protocol
 

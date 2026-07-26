@@ -175,6 +175,20 @@ class BuzzAdapter:
         existing = store.external_write(key)
         if existing and existing["status"] == "complete":
             return str(existing["external_id"]), False
+        recovered = self.find_event_by_marker(
+            event.idempotency_key,
+            channel_id=channel_id,
+        )
+        if recovered:
+            if not existing:
+                store.reserve_external_write(
+                    key,
+                    system="buzz",
+                    target=channel_id,
+                    payload_hash=content_hash(payload),
+                )
+            store.finish_external_write(key, recovered)
+            return recovered, False
         if not existing:
             store.reserve_external_write(
                 key,
@@ -194,6 +208,38 @@ class BuzzAdapter:
             raise RuntimeError("Buzz did not return an event ID")
         store.finish_external_write(key, external_id)
         return external_id, True
+
+    def find_event_by_marker(
+        self,
+        marker: str,
+        *,
+        channel_id: str,
+    ) -> str:
+        payload = self._run([
+            "messages",
+            "search",
+            "--query",
+            f"atlas-collab:{marker}",
+            "--limit",
+            "10",
+        ])
+        items = payload if isinstance(payload, list) else payload.get("messages", [])
+        matches = []
+        for item in items:
+            item_channel = str(item.get("channel_id") or item.get("channelId") or "")
+            content = str(item.get("content") or item.get("text") or "")
+            event_id = str(
+                item.get("event_id") or item.get("eventId") or item.get("id") or ""
+            )
+            if (
+                item_channel == channel_id
+                and f"atlas-collab:{marker}" in content
+                and event_id
+            ):
+                matches.append(event_id)
+        if len(matches) > 1:
+            raise RuntimeError(f"multiple Buzz events use idempotency marker {marker}")
+        return matches[0] if matches else ""
 
     @staticmethod
     def deep_link(community: str, channel_id: str, event_id: str = "") -> str:
@@ -244,6 +290,25 @@ class FakeBuzzAdapter:
         existing = store.external_write(key)
         if existing and existing["status"] == "complete":
             return str(existing["external_id"]), False
+        recovered = next(
+            (
+                str(item["id"])
+                for item in self.messages
+                if item["channel_id"] == channel_id
+                and item.get("idempotency_key") == event.idempotency_key
+            ),
+            "",
+        )
+        if recovered:
+            if not existing:
+                store.reserve_external_write(
+                    key,
+                    system="buzz",
+                    target=channel_id,
+                    payload_hash=content_hash(event.render_buzz()),
+                )
+            store.finish_external_write(key, recovered)
+            return recovered, False
         if not existing:
             store.reserve_external_write(
                 key,
@@ -255,6 +320,7 @@ class FakeBuzzAdapter:
         self.messages.append({
             "id": event_id,
             "channel_id": channel_id,
+            "idempotency_key": event.idempotency_key,
             "payload": json.loads(json.dumps(event.to_dict())),
         })
         store.finish_external_write(key, event_id)

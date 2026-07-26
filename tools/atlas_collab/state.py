@@ -13,7 +13,7 @@ from .models import CollaborationEvent, TaskContract
 from .redaction import assert_non_secret
 from .state_machine import assert_transition
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 4
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -59,6 +59,11 @@ CREATE TABLE IF NOT EXISTS task_agents (
     contract_hash TEXT,
     context_hash TEXT,
     acknowledged_at TEXT,
+    branch TEXT,
+    worktree TEXT,
+    session_id TEXT,
+    git_name TEXT,
+    git_email TEXT,
     PRIMARY KEY (task_id, agent_id)
 );
 CREATE TABLE IF NOT EXISTS events (
@@ -92,8 +97,7 @@ CREATE TABLE IF NOT EXISTS claims (
     resource TEXT NOT NULL,
     acquired_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
-    released_at TEXT,
-    UNIQUE(task_id, kind, resource, released_at)
+    released_at TEXT
 );
 CREATE TABLE IF NOT EXISTS turns (
     task_id TEXT NOT NULL REFERENCES tasks(task_id),
@@ -155,11 +159,19 @@ class StateStore:
             "tasks", "clarification_count", "INTEGER NOT NULL DEFAULT 0"
         )
         self._ensure_column("tasks", "cost_microusd", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("task_agents", "branch", "TEXT")
+        self._ensure_column("task_agents", "worktree", "TEXT")
+        self._ensure_column("task_agents", "session_id", "TEXT")
+        self._ensure_column("task_agents", "git_name", "TEXT")
+        self._ensure_column("task_agents", "git_email", "TEXT")
+        self.connection.commit()
+        self._migrate_claim_history_constraint()
         self.connection.execute(
             "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
         self.connection.commit()
+        self._secure_permissions()
 
     def _ensure_column(self, table: str, column: str, declaration: str) -> None:
         columns = {
@@ -171,8 +183,54 @@ class StateStore:
                 f"ALTER TABLE {table} ADD COLUMN {column} {declaration}"
             )
 
+    def _migrate_claim_history_constraint(self) -> None:
+        row = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'claims'"
+        ).fetchone()
+        sql = str(row["sql"] if row else "")
+        normalized = "".join(sql.lower().split())
+        if "unique(task_id,kind,resource,released_at)" not in normalized:
+            return
+        with self.transaction() as connection:
+            connection.execute("ALTER TABLE claims RENAME TO claims_legacy_v2")
+            connection.execute(
+                """
+                CREATE TABLE claims (
+                    claim_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                    agent_id TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind IN ('path', 'interface')),
+                    resource TEXT NOT NULL,
+                    acquired_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    released_at TEXT
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO claims(
+                    claim_id, task_id, agent_id, kind, resource,
+                    acquired_at, expires_at, released_at
+                )
+                SELECT claim_id, task_id, agent_id, kind, resource,
+                       acquired_at, expires_at, released_at
+                FROM claims_legacy_v2
+                """
+            )
+            connection.execute("DROP TABLE claims_legacy_v2")
+
     def close(self) -> None:
         self.connection.close()
+        self._secure_permissions()
+
+    def _secure_permissions(self) -> None:
+        if str(self.path) == ":memory:":
+            return
+        for suffix in ("", "-wal", "-shm"):
+            selected = Path(f"{self.path}{suffix}")
+            if selected.exists():
+                selected.chmod(0o600)
 
     def __enter__(self) -> StateStore:
         return self
@@ -462,19 +520,152 @@ class StateStore:
         task = self.task(task_id)
         if task is None or not task["context_hash"]:
             return False
+        requested_roles = set(task["contract"].get("requested_roles", []))
         rows = self.connection.execute(
             """
-            SELECT contract_hash, context_hash, acknowledged_at
-            FROM task_agents WHERE task_id = ?
+            SELECT task_agents.contract_hash, task_agents.context_hash,
+                   task_agents.acknowledged_at, agents.role
+            FROM task_agents
+            JOIN agents ON agents.agent_id = task_agents.agent_id
+            WHERE task_agents.task_id = ?
             """,
             (task_id,),
         ).fetchall()
-        return bool(rows) and all(
-            row["acknowledged_at"]
-            and row["contract_hash"] == task["contract_hash"]
-            and row["context_hash"] == task["context_hash"]
-            for row in rows
+        acknowledged_roles = {row["role"] for row in rows}
+        return (
+            bool(rows)
+            and acknowledged_roles == requested_roles
+            and all(
+                row["acknowledged_at"]
+                and row["contract_hash"] == task["contract_hash"]
+                and row["context_hash"] == task["context_hash"]
+                for row in rows
+            )
         )
+
+    def bind_agent(
+        self,
+        *,
+        task_id: str,
+        agent_id: str,
+        branch: str,
+        worktree: str,
+        session_id: str,
+        git_name: str,
+        git_email: str,
+    ) -> None:
+        payload = {
+            "task_id": task_id,
+            "agent_id": agent_id,
+            "branch": branch,
+            "worktree": worktree,
+            "session_id": session_id,
+            "git_name": git_name,
+            "git_email": git_email,
+        }
+        assert_non_secret(payload)
+        self.connection.execute(
+            """
+            INSERT INTO task_agents(
+                task_id, agent_id, branch, worktree, session_id,
+                git_name, git_email
+            ) VALUES(?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(task_id, agent_id) DO UPDATE SET
+                branch = excluded.branch,
+                worktree = excluded.worktree,
+                session_id = excluded.session_id,
+                git_name = excluded.git_name,
+                git_email = excluded.git_email
+            """,
+            (
+                task_id,
+                agent_id,
+                branch,
+                worktree,
+                session_id,
+                git_name,
+                git_email,
+            ),
+        )
+        self.connection.commit()
+
+    def task_agents(self, task_id: str) -> list[dict[str, Any]]:
+        return [
+            dict(row)
+            for row in self.connection.execute(
+                """
+                SELECT task_id, agent_id, contract_hash, context_hash,
+                       acknowledged_at, branch, worktree, session_id
+                       , git_name, git_email
+                FROM task_agents
+                WHERE task_id = ?
+                ORDER BY agent_id
+                """,
+                (task_id,),
+            )
+        ]
+
+    def record_service(
+        self,
+        *,
+        name: str,
+        manager: str,
+        definition_path: str,
+        fingerprint: str,
+        status: str,
+    ) -> None:
+        payload = {
+            "name": name,
+            "manager": manager,
+            "definition_path": definition_path,
+            "fingerprint": fingerprint,
+            "status": status,
+        }
+        assert_non_secret(payload)
+        self.connection.execute(
+            """
+            INSERT INTO services(
+                name, manager, definition_path, fingerprint, status, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                manager = excluded.manager,
+                definition_path = excluded.definition_path,
+                fingerprint = excluded.fingerprint,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            (
+                name,
+                manager,
+                definition_path,
+                fingerprint,
+                status,
+                _now(),
+            ),
+        )
+        self.connection.commit()
+
+    def update_service_status(self, name: str, status: str) -> None:
+        cursor = self.connection.execute(
+            "UPDATE services SET status = ?, updated_at = ? WHERE name = ?",
+            (status, _now(), name),
+        )
+        self.connection.commit()
+        if cursor.rowcount != 1:
+            raise KeyError(name)
+
+    def services(self) -> list[dict[str, Any]]:
+        return [
+            dict(row)
+            for row in self.connection.execute(
+                """
+                SELECT name, manager, definition_path, fingerprint, status,
+                       updated_at
+                FROM services
+                ORDER BY name
+                """
+            )
+        ]
 
     def add_cost(self, task_id: str, amount_usd: float) -> int:
         if amount_usd < 0:

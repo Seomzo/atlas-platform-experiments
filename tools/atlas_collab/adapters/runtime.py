@@ -48,23 +48,100 @@ class RuntimeInventory:
             ),
         ]
 
+    def ensure_profile(
+        self,
+        *,
+        runtime: str,
+        profile: str,
+        description: str,
+        apply: bool,
+    ) -> dict[str, object]:
+        if runtime != "hermes-acp":
+            return {
+                "runtime": runtime,
+                "profile": profile,
+                "apply": apply,
+                "status": "manual-pending",
+                "detail": "this runtime has no supported isolated-profile provisioner",
+            }
+        executable = shutil.which("hermes")
+        if not executable:
+            raise RuntimeError("Hermes is required to provision this role profile")
+        existing = self.runner.run(
+            [executable, "profile", "show", profile],
+            check=False,
+            timeout=20,
+        )
+        if existing.code == 0:
+            return {
+                "runtime": runtime,
+                "profile": profile,
+                "apply": apply,
+                "created": False,
+                "status": "ready",
+            }
+        if not apply:
+            return {
+                "runtime": runtime,
+                "profile": profile,
+                "apply": False,
+                "created": False,
+                "status": "would-create",
+            }
+        self.runner.run(
+            [
+                executable,
+                "profile",
+                "create",
+                profile,
+                "--clone-from",
+                "default",
+                "--no-alias",
+                "--description",
+                description,
+            ],
+            timeout=60,
+        )
+        verified = self.runner.run(
+            [executable, "profile", "show", profile],
+            check=False,
+            timeout=20,
+        )
+        if verified.code:
+            raise RuntimeError(f"Hermes profile creation was not verifiable: {profile}")
+        return {
+            "runtime": runtime,
+            "profile": profile,
+            "apply": True,
+            "created": True,
+            "status": "ready",
+        }
+
     def _hermes(self) -> RuntimeCapability:
         executable = shutil.which("hermes")
         if not executable:
             return RuntimeCapability(
                 "hermes-acp", ("hermes", "acp"), False, False, "missing"
             )
-        help_result = self.runner.run(
-            [executable, "acp", "--help"], check=False, timeout=15
+        check_result = self.runner.run(
+            [executable, "acp", "--check"], check=False, timeout=20
         )
         status = self.runner.run([executable, "status"], check=False, timeout=20)
-        authenticated = status.code == 0 and "configured" in status.stdout.lower()
+        authenticated = (
+            check_result.code == 0
+            and status.code == 0
+            and "configured" in status.stdout.lower()
+        )
         return RuntimeCapability(
             "hermes-acp",
             (executable, "acp"),
-            help_result.code == 0,
+            check_result.code == 0,
             authenticated,
-            "installed; authentication inferred from sanitized hermes status",
+            (
+                "ACP check passed; authentication inferred from sanitized Hermes status"
+                if check_result.code == 0
+                else "Hermes exists but ACP dependencies/check failed"
+            ),
         )
 
     def _codex(self) -> RuntimeCapability:

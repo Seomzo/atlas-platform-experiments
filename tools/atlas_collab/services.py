@@ -42,6 +42,7 @@ def launch_agent_definition(role: str) -> dict[str, Any]:
         "ProgramArguments": _service_program(role),
         "RunAtLoad": False,
         "KeepAlive": {"SuccessfulExit": False},
+        "ThrottleInterval": 60,
         "ProcessType": "Background",
         "StandardOutPath": str(logs_dir() / f"{role}.log"),
         "StandardErrorPath": str(logs_dir() / f"{role}.error.log"),
@@ -83,6 +84,54 @@ def install_services(*, apply: bool) -> list[dict[str, Any]]:
     return actions
 
 
+def uninstall_services(*, apply: bool) -> list[dict[str, Any]]:
+    if platform.system() != "Darwin":
+        raise RuntimeError("service uninstall currently supports macOS LaunchAgents")
+    config = load_config()
+    archive_dir = collab_home() / "service-archive"
+    gui_domain = f"gui/{os.getuid()}"
+    actions = []
+    for role in config["roles"]:
+        label = f"{SERVICE_PREFIX}.{role}"
+        path = _launch_agents_dir() / f"{label}.plist"
+        archive = archive_dir / f"{label}.plist"
+        action = {
+            "service": label,
+            "path": str(path),
+            "archive": str(archive),
+            "installed": path.exists(),
+            "apply": apply,
+        }
+        if apply and path.exists():
+            subprocess.run(
+                ["launchctl", "bootout", f"{gui_domain}/{label}"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            if archive.exists():
+                raise RuntimeError(
+                    f"recoverable service archive already exists: {archive}"
+                )
+            path.replace(archive)
+            action["archived"] = True
+        actions.append(action)
+    return actions
+
+
+def service_logs() -> list[dict[str, str]]:
+    config = load_config()
+    return [
+        {
+            "service": f"{SERVICE_PREFIX}.{role}",
+            "stdout": str(logs_dir() / f"{role}.log"),
+            "stderr": str(logs_dir() / f"{role}.error.log"),
+        }
+        for role in config["roles"]
+    ]
+
+
 def service_action(action: str) -> list[dict[str, Any]]:
     if platform.system() != "Darwin":
         raise RuntimeError("service control currently supports macOS LaunchAgents")
@@ -103,6 +152,8 @@ def service_action(action: str) -> list[dict[str, Any]]:
                 "service": label,
                 "installed": path.exists(),
                 "loaded": process.returncode == 0,
+                "stdout": str(logs_dir() / f"{role}.log"),
+                "stderr": str(logs_dir() / f"{role}.error.log"),
             })
         elif action == "start":
             if not path.exists():

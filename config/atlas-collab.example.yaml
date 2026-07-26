@@ -7,8 +7,11 @@ buzz:
   community: replace-with-private-community
   owner_public_keys: []
   control_channel: atlas-dev-control
+  control_channel_id: ""
   decisions_channel: atlas-dev-decisions
+  decisions_channel_id: ""
   reviews_channel: atlas-dev-reviews
+  reviews_channel_id: ""
   visibility: private
 github:
   remote: origin
@@ -27,13 +30,28 @@ roles:
     runtime: hermes-acp
     profile: atlas-collab-coordinator
     permission_mode: plan
+    git_name: Atlas Coordinator
+    git_email: atlas-coordinator@users.noreply.github.com
+    task_id: ""
+    branch: ""
+    worktree: ""
   implementer:
     display_name: atlas-implementer
-    runtime: codex-acp
+    runtime: hermes-acp
     profile: atlas-collab-implementer
     permission_mode: accept-edits
+    git_name: Atlas Implementer
+    git_email: atlas-implementer@users.noreply.github.com
+    task_id: ""
+    branch: ""
+    worktree: ""
   reviewer:
     display_name: atlas-reviewer
     runtime: hermes-acp
     profile: atlas-collab-reviewer
     permission_mode: dont-ask
+    git_name: Atlas Reviewer
+    git_email: atlas-reviewer@users.noreply.github.com
+    task_id: ""
+    branch: ""
+    worktree: ""

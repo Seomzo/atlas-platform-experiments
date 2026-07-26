@@ -7,6 +7,7 @@ from dataclasses import asdict, is_dataclass
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -24,13 +25,22 @@ from .config import (
     inventory_path,
     load_config,
     state_path,
+    write_config,
     write_default_config,
 )
 from .keychain import KeyringVault, vault_status
 from .models import ContractError
 from .orchestrator import Orchestrator, issue_contract, load_task_contract
-from .services import install_services, service_action, service_dependencies
+from .redaction import assert_non_secret
+from .services import (
+    install_services,
+    service_action,
+    service_dependencies,
+    service_logs,
+    uninstall_services,
+)
 from .state import StateStore
+from .state_machine import STATES
 
 
 def _json(value: Any) -> None:
@@ -91,7 +101,11 @@ def _orchestrator(
     )
 
 
-def doctor(root: Path, config: dict[str, Any]) -> dict[str, Any]:
+def doctor(
+    root: Path,
+    config: dict[str, Any],
+    store: StateStore | None = None,
+) -> dict[str, Any]:
     vault = _vault_or_none()
     vault_detail = "available"
     role_credentials = {}
@@ -113,7 +127,87 @@ def doctor(root: Path, config: dict[str, Any]) -> dict[str, Any]:
         }
     )
     github = GitHubAdapter(config["repository"], root)
-    runtime = [asdict(item) for item in RuntimeInventory().detect()]
+    runtime_inventory = RuntimeInventory()
+    runtime_capabilities = runtime_inventory.detect()
+    runtime = [asdict(item) for item in runtime_capabilities]
+    runtime_by_name = {item.name: item for item in runtime_capabilities}
+    agents = store.agents() if store else []
+    agents_by_role = {item["role"]: item for item in agents}
+    owner_keys = config["buzz"].get("owner_public_keys", [])
+    owner_allowlist_valid = bool(owner_keys) and all(
+        re.fullmatch(r"[0-9a-f]{64}", str(value)) for value in owner_keys
+    )
+    role_readiness = {}
+    for role_name, settings in config["roles"].items():
+        agent = agents_by_role.get(role_name)
+        capability = runtime_by_name.get(settings["runtime"])
+        profile = runtime_inventory.ensure_profile(
+            runtime=settings["runtime"],
+            profile=settings["profile"],
+            description=f"Atlas development-only {role_name} profile.",
+            apply=False,
+        )
+        binding = {
+            "task_id": settings.get("task_id", ""),
+            "branch": settings.get("branch", ""),
+            "worktree": settings.get("worktree", ""),
+            "valid": False,
+            "detail": "role is not bound to a task branch/worktree",
+        }
+        if store and binding["task_id"] and binding["branch"] and binding["worktree"]:
+            task = store.task(str(binding["task_id"]))
+            if task is None:
+                binding["detail"] = "bound task is missing from durable state"
+            elif not task.get("buzz_channel_id"):
+                binding["detail"] = "bound task has no live Buzz channel"
+            else:
+                try:
+                    worktree_health = github.worktree_health(
+                        branch=str(binding["branch"]),
+                        worktree=Path(str(binding["worktree"])),
+                        base_ref=task["base_sha"],
+                    )
+                    identity = github.worktree_identity(Path(str(binding["worktree"])))
+                    expected_identity = {
+                        "name": settings["git_name"],
+                        "email": settings["git_email"],
+                    }
+                    identity_matches = identity == expected_identity
+                    binding["worktree_health"] = asdict(worktree_health)
+                    binding["git_identity"] = identity
+                    binding["git_identity_matches"] = identity_matches
+                    binding["valid"] = worktree_health.valid and identity_matches
+                    binding["detail"] = (
+                        "ready"
+                        if binding["valid"]
+                        else "worktree-specific Git identity does not match role"
+                        if worktree_health.valid
+                        else "; ".join(worktree_health.problems)
+                    )
+                except (RuntimeError, ValueError) as exc:
+                    binding["detail"] = str(exc)
+        public_identity_matches = bool(
+            agent
+            and settings.get("public_key")
+            and agent["public_key"] == settings["public_key"]
+        )
+        ready = bool(
+            role_credentials.get(role_name)
+            and public_identity_matches
+            and capability
+            and capability.installed
+            and capability.authenticated
+            and profile["status"] == "ready"
+            and binding["valid"]
+        )
+        role_readiness[role_name] = {
+            "ready": ready,
+            "enrolled": agent is not None,
+            "public_identity_matches": public_identity_matches,
+            "runtime": asdict(capability) if capability else None,
+            "profile": profile,
+            "binding": binding,
+        }
     dependencies = service_dependencies()
     checks = {
         "repository": {
@@ -148,6 +242,13 @@ def doctor(root: Path, config: dict[str, Any]) -> dict[str, Any]:
             "status": vault_status(),
             "role_credentials": role_credentials,
         },
+        "roles": role_readiness,
+        "author_gate": {
+            "owner_allowlist_configured": bool(owner_keys),
+            "owner_allowlist_valid": owner_allowlist_valid,
+            "worker_to_worker_direct_wake": False,
+            "worker_requests_route_via_coordinator": True,
+        },
         "services": dependencies,
         "boundaries": {
             "protocol_version": PROTOCOL_VERSION,
@@ -165,6 +266,8 @@ def doctor(root: Path, config: dict[str, Any]) -> dict[str, Any]:
         and checks["github"]["authenticated"]
         and checks["buzz"]["authenticated"]
         and all(role_credentials.values())
+        and owner_allowlist_valid
+        and all(item["ready"] for item in role_readiness.values())
     )
     return checks
 
@@ -186,13 +289,25 @@ def _parser() -> argparse.ArgumentParser:
     enroll = agents_sub.add_parser("enroll")
     enroll.add_argument("--role", required=True)
     enroll.add_argument("--apply", action="store_true")
+    bind = agents_sub.add_parser("bind")
+    bind.add_argument("--role", required=True)
+    bind.add_argument("--task", required=True)
+    bind.add_argument("--branch", required=True)
+    bind.add_argument("--worktree", type=Path, required=True)
+    bind.add_argument("--session-id")
+    bind.add_argument("--apply", action="store_true")
 
     services = sub.add_parser("services")
     services_sub = services.add_subparsers(dest="services_command", required=True)
     install = services_sub.add_parser("install")
     install.add_argument("--apply", action="store_true")
-    for name in ("start", "stop", "status"):
-        services_sub.add_parser(name)
+    for name in ("start", "stop", "restart"):
+        action = services_sub.add_parser(name)
+        action.add_argument("--apply", action="store_true")
+    services_sub.add_parser("status")
+    services_sub.add_parser("logs")
+    uninstall = services_sub.add_parser("uninstall")
+    uninstall.add_argument("--apply", action="store_true")
 
     task = sub.add_parser("task")
     task_sub = task.add_subparsers(dest="task_command", required=True)
@@ -208,8 +323,19 @@ def _parser() -> argparse.ArgumentParser:
         command = task_sub.add_parser(name)
         command.add_argument("task_id")
         command.add_argument("--apply", action="store_true")
+    transition = task_sub.add_parser("transition")
+    transition.add_argument("task_id")
+    transition.add_argument("--to", choices=sorted(STATES), required=True)
+    transition.add_argument("--apply", action="store_true")
     replay = task_sub.add_parser("replay")
     replay.add_argument("task_id")
+    handoff = task_sub.add_parser("handoff")
+    handoff.add_argument("task_id")
+    handoff.add_argument("--branch", required=True)
+    handoff.add_argument("--base")
+    handoff.add_argument("--title", required=True)
+    handoff.add_argument("--body-file", type=Path, required=True)
+    handoff.add_argument("--apply", action="store_true")
 
     cleanup = sub.add_parser("cleanup")
     cleanup.add_argument("--task", required=True)
@@ -249,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
     selected_state = Path(":memory:") if read_only_without_state else state_path()
     with StateStore(selected_state) as store:
         if args.command == "doctor":
-            _json(doctor(root, config))
+            _json(doctor(root, config, store))
             return 0
         if args.command == "bootstrap":
             orchestrator = _orchestrator(
@@ -267,10 +393,98 @@ def main(argv: list[str] | None = None) -> int:
             if args.agents_command == "list":
                 _json(store.agents())
                 return 0
+            if args.agents_command == "bind":
+                task = store.task(args.task)
+                if task is None:
+                    raise KeyError(args.task)
+                if args.role not in config["roles"]:
+                    raise ValueError(f"unknown configured role: {args.role}")
+                role_settings = config["roles"][args.role]
+                agent = next(
+                    (item for item in store.agents() if item["role"] == args.role),
+                    None,
+                )
+                if agent is None:
+                    raise RuntimeError(
+                        f"role {args.role} must be enrolled before binding"
+                    )
+                worktree = args.worktree.expanduser().resolve()
+                github = GitHubAdapter(config["repository"], root)
+                health = github.validate_worktree(
+                    branch=args.branch,
+                    worktree=worktree,
+                    base_ref=task["base_sha"],
+                )
+                session_id = args.session_id or f"{args.task}:{args.role}"
+                identity = {
+                    "name": role_settings["git_name"],
+                    "email": role_settings["git_email"],
+                }
+                if not args.apply:
+                    _json({
+                        "apply": False,
+                        "role": args.role,
+                        "task_id": args.task,
+                        "branch": args.branch,
+                        "worktree": str(worktree),
+                        "session_id": session_id,
+                        "git_identity": identity,
+                        "worktree_health": asdict(health),
+                    })
+                    return 0
+                identity = github.configure_worktree_identity(
+                    worktree=worktree,
+                    name=identity["name"],
+                    email=identity["email"],
+                )
+                store.bind_agent(
+                    task_id=args.task,
+                    agent_id=agent["agent_id"],
+                    branch=args.branch,
+                    worktree=str(worktree),
+                    session_id=session_id,
+                    git_name=identity["name"],
+                    git_email=identity["email"],
+                )
+                settings = config["roles"][args.role]
+                settings["task_id"] = args.task
+                settings["branch"] = args.branch
+                settings["worktree"] = str(worktree)
+                write_config(config_path(), config)
+                _orchestrator(
+                    root,
+                    store,
+                    config,
+                    with_external=False,
+                ).write_inventory()
+                _json({
+                    "apply": True,
+                    "role": args.role,
+                    "task_id": args.task,
+                    "branch": args.branch,
+                    "worktree": str(worktree),
+                    "session_id": session_id,
+                    "git_identity": identity,
+                    "worktree_health": asdict(health),
+                })
+                return 0
+            if args.role not in config["roles"]:
+                raise ValueError(f"unknown configured role: {args.role}")
+            role_settings = config["roles"][args.role]
             if not args.apply:
+                profile_plan = RuntimeInventory().ensure_profile(
+                    runtime=role_settings["runtime"],
+                    profile=role_settings["profile"],
+                    description=(
+                        f"Atlas development-only {args.role} profile; "
+                        "no merge, deploy, or product authority."
+                    ),
+                    apply=False,
+                )
                 _json({
                     "apply": False,
                     "role": args.role,
+                    "profile": profile_plan,
                     "actions": [
                         "generate distinct secp256k1 keypair",
                         "store private key in OS credential vault",
@@ -279,6 +493,15 @@ def main(argv: list[str] | None = None) -> int:
                     ],
                 })
                 return 0
+            profile_result = RuntimeInventory().ensure_profile(
+                runtime=role_settings["runtime"],
+                profile=role_settings["profile"],
+                description=(
+                    f"Atlas development-only {args.role} profile; "
+                    "no merge, deploy, or product authority."
+                ),
+                apply=True,
+            )
             vault = KeyringVault()
             orchestrator = _orchestrator(
                 root,
@@ -286,13 +509,92 @@ def main(argv: list[str] | None = None) -> int:
                 config,
                 buzz_role=args.role,
             )
-            _json(orchestrator.enroll_agent(role=args.role, vault=vault))
+            result = orchestrator.enroll_agent(role=args.role, vault=vault)
+            result["profile"] = profile_result
+            _json(result)
             return 0
         if args.command == "services":
             if args.services_command == "install":
-                _json(install_services(apply=args.apply))
+                results = install_services(apply=args.apply)
+                if args.apply:
+                    for item in results:
+                        if "service" not in item:
+                            continue
+                        store.record_service(
+                            name=item["service"],
+                            manager="launchd",
+                            definition_path=item["path"],
+                            fingerprint=item["fingerprint"],
+                            status="installed",
+                        )
+                _json(results)
+            elif args.services_command == "logs":
+                _json(service_logs())
+            elif args.services_command == "status":
+                _json(service_action("status"))
+            elif args.services_command == "uninstall":
+                results = uninstall_services(apply=args.apply)
+                if args.apply:
+                    for item in results:
+                        try:
+                            store.update_service_status(
+                                item["service"],
+                                "archived",
+                            )
+                        except KeyError:
+                            pass
+                _json(results)
+            elif not args.apply:
+                _json({
+                    "apply": False,
+                    "action": args.services_command,
+                    "services": [f"io.atlas.collab.{role}" for role in config["roles"]],
+                })
             else:
-                _json(service_action(args.services_command))
+                if args.services_command in {"start", "restart"}:
+                    readiness = doctor(root, config, store)
+                    if not readiness["ready"]:
+                        raise RuntimeError(
+                            "doctor is not ready; services will not start until "
+                            "identities, author gates, profiles, task channels, "
+                            "and worktree bindings are verified"
+                        )
+                if args.services_command == "restart":
+                    stopped = {item["service"]: item for item in service_action("stop")}
+                    started = service_action("start")
+                    results = [
+                        {
+                            **item,
+                            "stopped": stopped[item["service"]].get("stopped", False),
+                        }
+                        for item in started
+                    ]
+                else:
+                    results = service_action(args.services_command)
+                if args.services_command in {"start", "stop", "restart"}:
+                    for item in results:
+                        status = (
+                            "running"
+                            if item.get("started")
+                            else "stopped"
+                            if item.get("stopped")
+                            else "error"
+                        )
+                        try:
+                            store.update_service_status(
+                                item["service"],
+                                status,
+                            )
+                        except KeyError:
+                            pass
+                _json(results)
+            if getattr(args, "apply", False):
+                _orchestrator(
+                    root,
+                    store,
+                    config,
+                    with_external=False,
+                ).write_inventory()
             return 0
         orchestrator = _orchestrator(
             root,
@@ -310,6 +612,59 @@ def main(argv: list[str] | None = None) -> int:
             if args.task_command == "replay":
                 _json(orchestrator.replay(args.task_id))
                 return 0
+            if args.task_command == "handoff":
+                task = store.task(args.task_id)
+                if task is None:
+                    raise KeyError(args.task_id)
+                body = args.body_file.read_text(encoding="utf-8")
+                assert_non_secret({"title": args.title, "body": body})
+                base = args.base or config["base_ref"]
+                if not args.apply:
+                    _json({
+                        "apply": False,
+                        "task_id": args.task_id,
+                        "branch": args.branch,
+                        "base": base,
+                        "actions": [
+                            "create or update exactly one draft pull request",
+                            "retain the human-controlled review and merge gate",
+                            "persist the pull request reference for recovery",
+                        ],
+                    })
+                    return 0
+                github = GitHubAdapter(config["repository"], root)
+                pull, created = github.ensure_draft_pr(
+                    store,
+                    branch=args.branch,
+                    base=base,
+                    title=args.title,
+                    body=body,
+                )
+                store.update_task_refs(args.task_id, github_pr=int(pull["number"]))
+                _json({
+                    "apply": True,
+                    "created": created,
+                    "task_id": args.task_id,
+                    "pull_request": pull,
+                })
+                return 0
+            if args.task_command == "transition":
+                if not args.apply:
+                    _json({
+                        "apply": False,
+                        "task_id": args.task_id,
+                        "target": args.to,
+                    })
+                    return 0
+                transition = orchestrator.transition_task(
+                    args.task_id,
+                    args.to,
+                )
+                _json({
+                    "apply": True,
+                    "transition": transition,
+                })
+                return 0
             if args.task_command in {"pause", "resume", "cancel"}:
                 target = {
                     "pause": "paused",
@@ -323,9 +678,7 @@ def main(argv: list[str] | None = None) -> int:
                         "target": target,
                     })
                     return 0
-                changed = store.transition(
-                    args.task_id, target, actor_role="coordinator"
-                )
+                transition = orchestrator.transition_task(args.task_id, target)
                 stopped_processes = []
                 released_claims = 0
                 if args.task_command == "cancel":
@@ -338,10 +691,10 @@ def main(argv: list[str] | None = None) -> int:
                     released_claims = release_claims(store, args.task_id)
                 _json({
                     "apply": True,
-                    "changed": changed,
+                    "changed": transition["changed"],
                     "stopped_processes": stopped_processes,
                     "released_claims": released_claims,
-                    "task": store.task(args.task_id),
+                    "transition": transition,
                 })
                 return 0
             if args.issue is not None:
