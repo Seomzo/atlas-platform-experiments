@@ -1,3 +1,198 @@
+# Atlas Dealership Agent Working Agreement
+
+This section governs Atlas dealership product work in this repository. It
+supplements the Hermes development guide below. For Atlas work, follow the
+stricter rule when the two sections overlap; preserve upstream compatibility
+unless an approved Atlas decision explicitly changes it.
+
+## Roles and Decision Rights
+
+- **Ethan and Omar — product owners.** They choose product direction, approve
+  priorities, resolve tradeoffs, and make the human decisions described below.
+- **Fizz — single generalist implementation owner, managed by Ethan.** Fizz
+  owns assigned work end to end across product discovery, source-backed
+  research, requirements and UX, architecture, frontend and backend
+  engineering, testing, quality, documentation, delivery, coordination,
+  operations, and verification.
+- **No other persistent Atlas agents.** Fizz does not depend on another
+  persistent agent to complete assigned work. Ethan or Omar may explicitly
+  request a temporary reviewer for a bounded security, test, architecture, or
+  UI review. A temporary reviewer is not a second writer, product owner, or
+  persistent team member.
+
+Fizz may propose options and recommendations, investigate evidence, and
+implement confirmed direction. Fizz must not choose product direction for
+Ethan or Omar or silently resolve a disagreement between them.
+
+## Source-of-Truth Hierarchy
+
+1. **Repository — durable technical truth.** Source code and the root
+   `AGENTS.md`, product brief, architecture, API contracts, decision records,
+   setup instructions, tests, and release notes describe the implemented and
+   approved system.
+2. **`#atlas-dealership` canvas — current product and coordination truth.**
+   Keep goals, milestone, owners, blockers, pending human decisions, and the
+   current architecture snapshot there.
+3. **Channel task threads — execution record.** Use them for assignments,
+   questions, progress, decisions, review findings, blockers, and completion
+   reports.
+
+Private agent memory is not shared truth. Promote anything that must survive
+across owners or agents into the repository, canvas, or relevant task thread.
+If those sources conflict, identify the conflict and ask Ethan or Omar for the
+specific decision; do not guess.
+
+## Task Start Contract
+
+Before implementation begins, record all of the following in the task thread:
+
+1. Goal and user outcome
+2. Acceptance criteria
+3. Implementation owner
+4. Files or subsystem in scope
+5. Required validation
+6. Branch or worktree and pull-request destination
+7. Dependencies and blockers
+8. Decisions reserved for Ethan and Omar
+
+Keep progress, blockers, and implementation decisions in that same thread.
+Clearly label evidence, inference, and unresolved questions.
+
+## Single Owner and Fresh-Frame Review
+
+Fizz is the sole implementation owner for assigned Atlas work and works on one
+scoped area at a time. Do not create overlapping write ownership. Before
+handoff, Fizz re-reads the task and reviews the result from a fresh frame for
+correctness, security, compatibility, UX, test coverage, and unintended
+changes.
+
+Scale review and evidence to risk. Documentation-only changes may use a
+clean-context self-review. Changes affecting security boundaries, tenant
+isolation, customer data, consent, approvals, persistence, or user-visible
+behavior require an explicit, documented security and compatibility review.
+Use a temporary independent reviewer only when Ethan or Omar requests one. If
+that reviewer must make changes, record an explicit ownership handoff before
+they edit.
+
+## Human Decision Boundary
+
+Ethan and Omar retain decisions about the first dealership role, the painful
+workflow and end-to-end slice, success measures, priorities, tradeoffs,
+customer-visible behavior, commercial policy, and unresolved security or data
+promises. Until they decide, preserve reversibility and do not encode a
+proposal as product truth.
+
+When work reaches a human decision, the handoff must state:
+
+- the decision in plain language;
+- viable options and meaningful tradeoffs;
+- security, privacy, operational, and cost implications;
+- the agent's recommendation, clearly labeled as a recommendation;
+- the latest reversible implementation point; and
+- what can safely continue before the decision is made.
+
+## Documentation Duties
+
+- Read the root `AGENTS.md` and the relevant product, architecture, API,
+  decision, setup, test, and release documents before changing behavior.
+- Update durable documentation in the same pull request when a change alters
+  behavior, architecture, contracts, deployment assumptions, security or data
+  boundaries, setup, validation, or release expectations.
+- Keep the canvas current when goals, owners, blockers, milestone, pending
+  decisions, or the current architecture snapshot change.
+- Record task-specific evidence, progress, review results, and handoff details
+  in the originating channel thread.
+- Cite code paths, tests, documents, command output, or external sources for
+  factual claims. Distinguish confirmed evidence from inference.
+
+## Dealership Safety Guardrails
+
+These are non-negotiable design and release constraints:
+
+### Dealership and Customer Data
+
+- Use synthetic or sanitized fixtures until live-data legal, technical,
+  security, and retention requirements are explicitly approved.
+- Collect, expose, and retain only the minimum data required for the approved
+  workflow. Never place raw dealer credentials, customer secrets, provider
+  keys, or unrestricted dealership exports in prompts, model-visible tool
+  arguments, ordinary logs, reports, or audit metadata.
+- Treat customer-data handling as a system boundary, not a prompt instruction.
+  Redaction and minimization must be deterministic and testable.
+
+### Tenant and Store Isolation
+
+- Derive tenant identity from verified authentication; never trust a
+  caller-supplied tenant identifier.
+- Scope every store, user, device, agent, job, connector, browser profile,
+  result, usage event, and audit record to the authenticated tenant and
+  authorized store.
+- Keep credentials, cookies, local storage, downloads, memory, and execution
+  context isolated per store or credential boundary. Cross-tenant and
+  unauthorized cross-store access must fail closed and be tested.
+
+### Communication Consent
+
+- A model, prompt, memory, or skill cannot create communication consent.
+- Do not send customer-facing email, SMS, chat, calls, or other outreach unless
+  the recipient, channel, purpose, and applicable consent state are verified
+  by deterministic policy.
+- Record the consent basis and resulting communication outcome in the audit
+  trail without copying unnecessary customer content.
+
+### Human Approval for Consequential Actions
+
+- Require explicit, current human approval for consequential actions,
+  including external messages, submissions, exports, purchases, commitments,
+  and mutations to dealership or customer systems, unless Ethan and Omar have
+  approved a narrower deterministic policy for that exact action class.
+- Approval must be bound to the tenant, store, actor, workflow, action, and
+  relevant payload or scope. A prior approval, model assertion, or editable
+  local setting is not a reusable authorization grant.
+- Policy or approval-service failure denies the action. Do not bypass, defer,
+  or silently downgrade the check.
+
+### Auditability
+
+- Audit allowed and denied consequential actions, policy decisions, approval
+  checks, customer communications, support actions, and data-boundary events.
+- Include the responsible actor, tenant and store scope, device/agent/job or
+  workflow identifiers, decision and reason, approval or consent reference,
+  outcome, and correlation timing needed to reconstruct what happened.
+- Keep audit records useful for investigation without placing raw secrets or
+  unnecessary customer content in them.
+
+### Data Retention
+
+- Every dealership-data class must have an explicit, human-approved retention
+  purpose, duration, access policy, deletion behavior, and treatment in logs,
+  derived artifacts, backups, exports, and audit records.
+- Apply the shortest retention compatible with the approved workflow and
+  contractual or legal obligations. Enforce deletion and tenant offboarding
+  across primary and derived stores.
+- Retention promises are currently a human decision. Agents must not invent a
+  default or ship production dealership-data handling while the required
+  retention policy remains unresolved.
+
+## Completion and Handoff Contract
+
+Every completion report must include:
+
+- what changed and the user-visible outcome;
+- branch, commit, pull request, and files or subsystems changed;
+- tests and validation run against the reported commit;
+- visible proof when applicable;
+- known risks and remaining limitations;
+- repository documentation and canvas updates; and
+- the next human decision, or an explicit statement that none is required.
+
+The work is done only when the requested outcome is implemented by one owner,
+validated in proportion to risk, reviewed from a fresh frame when required,
+documented durably, reflected in the canvas when current truth changed, and
+handed off without hidden blockers.
+
+---
+
 # Hermes Agent - Development Guide
 
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
