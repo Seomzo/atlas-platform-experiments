@@ -29,6 +29,21 @@ Preview output is non-mutating. Review the exact paths/channels/identities, then
 scripts/atlas-collab bootstrap --apply
 ```
 
+For the current `atlas-platform` workspace, use the verified existing channel
+for all three logical streams until a Buzz owner approves a split:
+
+```yaml
+buzz:
+  community: atlas-platform
+  control_channel: atlas-dealership
+  decisions_channel: atlas-dealership
+  reviews_channel: atlas-dealership
+```
+
+This intentionally makes repeated bootstrap applies reuse
+`atlas-dealership` (`154f9a6e-1d2f-459e-833e-9112e72bf06d`). Do not create the
+three default channel names merely to satisfy a preflight.
+
 ## 2. Enroll role identities
 
 Preview and apply each distinct identity:

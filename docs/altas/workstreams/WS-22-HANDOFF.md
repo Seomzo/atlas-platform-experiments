@@ -49,6 +49,38 @@ runtime dependencies.
 - GitHub Actions accepted the draft-PR events but did not start any job because
   the account has a payment/spending-limit gate.
 
+## Authoritative collaborator routing
+
+The following non-secret values were re-verified in Buzz Desktop and GitHub on
+2026-07-25. They replace the ambiguous candidates in the collaborator preflight:
+
+- Framework: <https://github.com/Seomzo/atlas-platform-experiments/pull/3>
+- Protocol: `atlas.collab.protocol.v1`
+- Buzz community: `atlas-platform`
+- Existing coordination channel: `atlas-dealership`
+- Existing coordination channel UUID:
+  `154f9a6e-1d2f-459e-833e-9112e72bf06d`
+- Designated primary host node: `nLaZ3gqWVb11CNTRL`
+- Authoritative Fizz public identity:
+  `780657f350a3fd0dbada848cda9ac9deb7c64280ae37ee074276539445a1782c`
+- Authoritative Fizz npub:
+  `npub10qr90u6s507smwk6sjxd4xkfm6muvs5q4cm7up6zwefeg3dp0qkqyd89h7`
+
+The alternative Fizz candidate beginning `0b5d34` is not authoritative for
+this enrollment. Until a Buzz owner explicitly approves separate development
+channels, local config must map `control_channel`, `decisions_channel`, and
+`reviews_channel` to the existing `atlas-dealership` name. Bootstrap will then
+reuse that single channel instead of creating a duplicate collaboration plane.
+
+The collaborator workstation must not start an alternate coordinator. It may
+host the implementer or reviewer only after their distinct identities complete
+owner review. The approved enrollment procedure is section 2 of
+`docs/altas/COLLABORATION_RUNBOOK.md`, using
+`scripts/atlas-collab agents enroll --role <role> --apply` on the designated
+host. The primary coordinator fingerprint remains a one-time generated value:
+it must come from that command and the OS credential vault, never be invented
+or copied from Fizz.
+
 ## Files changed
 
 - `tools/atlas_collab/`: CLI, contracts, state machine, SQLite ledger, routing,
