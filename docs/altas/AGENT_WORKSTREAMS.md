@@ -412,6 +412,36 @@ Run Desktop typecheck, lint, platform tests, production build, pack where safe, 
 
 ---
 
+## WS-22 — Development collaboration plane
+
+WS-22 is an isolated development-infrastructure workstream based on
+`7a4d7529dc9b5ef0361800d8d94f05e79d716269`. It does not change Atlas product
+runtime or authorization.
+
+```text
+Goal: Build and dogfood the development-only atlas-collab CLI, contracts,
+state/recovery ledger, thin Buzz/GitHub/runtime adapters, bounded role routing,
+secure credential-vault wrappers, collaboration skill, GitHub checks, and
+operator documentation.
+
+Repository: https://github.com/Seomzo/atlas-platform-experiments.git
+Workstream: WS-22
+Branch: codex/ws-22-development-collaboration-plane
+
+Read AGENTS.md plus current Atlas product, architecture, security, testing,
+roadmap, Teams, Cortex, mobile, workstream, and WS-13 through WS-21 handoffs
+before editing. Preserve GitHub as durable authority, Buzz as development-only
+live discussion, distinct role identities/worktrees/profiles, and a human merge
+gate. Do not modify agent core, Atlas Teams product state, Control Plane policy,
+mobile sequencing, product dispatch, or dealership authorization.
+
+Use scripts/run_tests.sh, execute a harmless seeded-defect dogfood, document
+every real/manual/degraded result in WS-22-HANDOFF.md, push one scoped draft PR,
+and never merge, mark ready, deploy, force-push, or delete branches.
+```
+
+---
+
 ## Prompt for a later integration session
 
 Use this only after several workstream draft PRs exist:

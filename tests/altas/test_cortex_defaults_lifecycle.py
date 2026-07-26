@@ -526,9 +526,7 @@ def test_migration_relabels_and_rekeys_all_unadmitted_legacy_semantic_rows(
         "SELECT id, job_type, input_hash, state FROM cognitive_jobs ORDER BY id",
     )
 
-    assert {row["job_type"] for row in rows} == {
-        "legacy_session_distill_unadmitted"
-    }
+    assert {row["job_type"] for row in rows} == {"legacy_session_distill_unadmitted"}
     expected_states = {
         "job_legacy_queued": "failed",
         "job_legacy_succeeded": "succeeded",
@@ -777,10 +775,13 @@ def test_atomic_boundary_capture_failure_cancels_recovery_marker(
     assert reopened.session_lineage("atomic-capture-old")["state"] == "active"
     assert reopened.pending_boundary_count() == 0
     assert _query(reopened, "SELECT id FROM session_distill_admissions") == []
-    assert _query(
-        reopened,
-        "SELECT id FROM cognitive_jobs WHERE job_type='session_distill'",
-    ) == []
+    assert (
+        _query(
+            reopened,
+            "SELECT id FROM cognitive_jobs WHERE job_type='session_distill'",
+        )
+        == []
+    )
 
 
 def test_atomic_boundary_transaction_failure_cancels_recovery_marker(
@@ -1041,13 +1042,16 @@ def test_semantic_boundary_primitives_allow_compression_exhausted(
     if primitive.endswith("commit"):
         assert store.session_lineage(target_id)["state"] == "active"
     assert len(_query(store, "SELECT id FROM session_distill_admissions")) == 1
-    assert len(
-        _query(
-            store,
-            "SELECT id FROM cognitive_jobs WHERE job_type='session_distill' "
-            "AND parent_job_id IS NULL",
+    assert (
+        len(
+            _query(
+                store,
+                "SELECT id FROM cognitive_jobs WHERE job_type='session_distill' "
+                "AND parent_job_id IS NULL",
+            )
         )
-    ) == 1
+        == 1
+    )
 
 
 def test_atomic_boundary_enqueues_only_session_end_semantics_and_rebinds(
@@ -1618,10 +1622,13 @@ def test_detached_branch_prepares_lineage_without_ending_or_distilling_source(
         "state": "active",
     }
     assert _query(store, "SELECT id FROM session_distill_admissions") == []
-    assert _query(
-        store,
-        "SELECT id FROM cognitive_jobs WHERE job_type='session_distill'",
-    ) == []
+    assert (
+        _query(
+            store,
+            "SELECT id FROM cognitive_jobs WHERE job_type='session_distill'",
+        )
+        == []
+    )
 
     # Idempotent retries verify rather than mutate the topology.
     assert prepare_detached_session_branch(
@@ -1912,28 +1919,49 @@ def test_session_privacy_delete_scrubs_all_cortex_content_and_live_bytes(
         assert secret not in json.dumps(dict(memory))
         assert entities and all(row["deleted_at"] for row in entities)
         assert secret not in json.dumps([dict(row) for row in entities])
-        assert connection.execute(
-            "SELECT id FROM relations WHERE id=?", (relation_id,)
-        ).fetchone() is None
-        assert connection.execute(
-            "SELECT id FROM observations WHERE id=?", (observation_id,)
-        ).fetchone() is None
-        assert connection.execute(
-            "SELECT id FROM work_events WHERE id=?", (work_id,)
-        ).fetchone() is None
-        assert connection.execute(
-            "SELECT id FROM retrieval_runs WHERE session_id=?", ("privacy-scrub",)
-        ).fetchone() is None
-        assert connection.execute(
-            "SELECT id FROM compiled_views WHERE knowledge_space_id=?",
-            (personal_space,),
-        ).fetchone() is None
-        assert connection.execute(
-            "SELECT id FROM communities WHERE id='privacy-secret-community'"
-        ).fetchone() is None
-        assert connection.execute(
-            "SELECT id FROM communities WHERE id='privacy-tekion-survivor'"
-        ).fetchone() is not None
+        assert (
+            connection.execute(
+                "SELECT id FROM relations WHERE id=?", (relation_id,)
+            ).fetchone()
+            is None
+        )
+        assert (
+            connection.execute(
+                "SELECT id FROM observations WHERE id=?", (observation_id,)
+            ).fetchone()
+            is None
+        )
+        assert (
+            connection.execute(
+                "SELECT id FROM work_events WHERE id=?", (work_id,)
+            ).fetchone()
+            is None
+        )
+        assert (
+            connection.execute(
+                "SELECT id FROM retrieval_runs WHERE session_id=?", ("privacy-scrub",)
+            ).fetchone()
+            is None
+        )
+        assert (
+            connection.execute(
+                "SELECT id FROM compiled_views WHERE knowledge_space_id=?",
+                (personal_space,),
+            ).fetchone()
+            is None
+        )
+        assert (
+            connection.execute(
+                "SELECT id FROM communities WHERE id='privacy-secret-community'"
+            ).fetchone()
+            is None
+        )
+        assert (
+            connection.execute(
+                "SELECT id FROM communities WHERE id='privacy-tekion-survivor'"
+            ).fetchone()
+            is not None
+        )
         assert admission["revoked_at"] and admission["snapshot_json"] == "{}"
         assert dict(job) == {
             "state": "dead_letter",
@@ -1942,17 +1970,26 @@ def test_session_privacy_delete_scrubs_all_cortex_content_and_live_bytes(
             "checkpoint_json": "{}",
             "error": None,
         }
-        assert connection.execute(
-            "SELECT id FROM health_reports WHERE id='privacy-secret-health'"
-        ).fetchone() is None
-        assert connection.execute(
-            "SELECT operation_key FROM cognitive_job_operations "
-            "WHERE operation_key='privacy-secret-op'"
-        ).fetchone() is None
-        assert connection.execute(
-            "SELECT canonical_statement FROM memory_records WHERE id=?",
-            (survivor_memory,),
-        ).fetchone()["canonical_statement"] == "Independent survivor memory"
+        assert (
+            connection.execute(
+                "SELECT id FROM health_reports WHERE id='privacy-secret-health'"
+            ).fetchone()
+            is None
+        )
+        assert (
+            connection.execute(
+                "SELECT operation_key FROM cognitive_job_operations "
+                "WHERE operation_key='privacy-secret-op'"
+            ).fetchone()
+            is None
+        )
+        assert (
+            connection.execute(
+                "SELECT canonical_statement FROM memory_records WHERE id=?",
+                (survivor_memory,),
+            ).fetchone()["canonical_statement"]
+            == "Independent survivor memory"
+        )
 
     assert all(
         secret.encode("utf-8") not in candidate.read_bytes()
@@ -1985,14 +2022,20 @@ def test_session_privacy_delete_fails_closed_while_semantic_job_is_running(
 
     assert store.session_lineage("privacy-running")["state"] == "finalized"
     with store.connect() as connection:
-        assert connection.execute(
-            "SELECT revoked_at FROM session_distill_admissions WHERE brain_id=?",
-            (store.brain_id,),
-        ).fetchone()["revoked_at"] is None
-        assert connection.execute(
-            "SELECT tombstoned_at FROM evidence_items WHERE brain_id=?",
-            (store.brain_id,),
-        ).fetchone()["tombstoned_at"] is None
+        assert (
+            connection.execute(
+                "SELECT revoked_at FROM session_distill_admissions WHERE brain_id=?",
+                (store.brain_id,),
+            ).fetchone()["revoked_at"]
+            is None
+        )
+        assert (
+            connection.execute(
+                "SELECT tombstoned_at FROM evidence_items WHERE brain_id=?",
+                (store.brain_id,),
+            ).fetchone()["tombstoned_at"]
+            is None
+        )
 
 
 def test_session_privacy_delete_is_atomic_against_concurrent_capture(
@@ -2052,11 +2095,14 @@ def test_session_privacy_delete_is_atomic_against_concurrent_capture(
     assert len(append_errors) == 1
     assert isinstance(append_errors[0], PermissionError)
     with store.connect() as connection:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM evidence_items WHERE brain_id=? "
-            "AND tombstoned_at IS NULL",
-            (store.brain_id,),
-        ).fetchone()[0] == 0
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM evidence_items WHERE brain_id=? "
+                "AND tombstoned_at IS NULL",
+                (store.brain_id,),
+            ).fetchone()[0]
+            == 0
+        )
 
 
 def test_detached_boundary_requirement_distinguishes_active_cortex(

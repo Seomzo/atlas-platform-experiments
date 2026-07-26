@@ -373,9 +373,7 @@ def _collect_nodes(
         rows = connection.execute(
             "SELECT d.*, i.version, i.published_at FROM graphrag_documents d "
             "JOIN graphrag_indexes i ON i.id=d.index_id "
-            "WHERE d.brain_id=? AND i.state='active' "
-            + membership_sql
-            + " "
+            "WHERE d.brain_id=? AND i.state='active' " + membership_sql + " "
             "ORDER BY COALESCE(i.published_at, i.created_at) DESC, d.id LIMIT ?",
             (store.brain_id, *membership_params, fetch_limit),
         ).fetchall()
@@ -886,9 +884,7 @@ def build_graph_overview(
     communities = []
     for item in community_rows:
         visible_members = sorted(set(item["member_ids"]) & included)
-        if visible_members or (
-            projection == "communities" and item["id"] in included
-        ):
+        if visible_members or (projection == "communities" and item["id"] in included):
             communities.append({
                 "id": item["id"],
                 "label": item["label"],

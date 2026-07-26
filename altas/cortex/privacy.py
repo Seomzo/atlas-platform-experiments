@@ -65,9 +65,10 @@ def _compression_edges(
         }:
             continue
         metadata = _session_kind_metadata(child)
-        if metadata.get("_branched_from") is not None or metadata.get(
-            "_delegate_from"
-        ) is not None:
+        if (
+            metadata.get("_branched_from") is not None
+            or metadata.get("_delegate_from") is not None
+        ):
             continue
         yield parent_id, child_id
 
@@ -80,9 +81,7 @@ def _cortex_logical_groups(store: CortexStore) -> dict[str, set[str]]:
             (store.brain_id,),
         ).fetchall()
     for row in rows:
-        groups[str(row["logical_conversation_id"] or row["id"])].add(
-            str(row["id"])
-        )
+        groups[str(row["logical_conversation_id"] or row["id"])].add(str(row["id"]))
     return dict(groups)
 
 
@@ -130,8 +129,7 @@ def _retention_components(
     for session_id in physical_ids:
         grouped[find(session_id)].add(session_id)
     return {
-        session_id: frozenset(grouped[find(session_id)])
-        for session_id in physical_ids
+        session_id: frozenset(grouped[find(session_id)]) for session_id in physical_ids
     }
 
 
@@ -205,8 +203,7 @@ def _build_retention_plan(
         row
         for row in candidates
         if isinstance(row.get("id"), str)
-        and components.get(str(row["id"]), frozenset({str(row["id"])}))
-        <= candidate_ids
+        and components.get(str(row["id"]), frozenset({str(row["id"])})) <= candidate_ids
     )
     return _RetentionPlan(approved, store, True)
 

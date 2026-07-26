@@ -21,24 +21,20 @@ from typing import Any, Mapping
 CORTEX_DISPATCH_SCHEMA = "atlas.cortex.dispatch-admission.v1"
 _HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _LOCAL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
-_EXPECTED_FIELDS = frozenset(
-    {
-        "schema_version",
-        "local_job_id",
-        "admission_id",
-        "root_job_id",
-        "canonical_input_hash",
-        "attempt",
-        "due_at",
-        "dispatch_key_commitment",
-    }
-)
+_EXPECTED_FIELDS = frozenset({
+    "schema_version",
+    "local_job_id",
+    "admission_id",
+    "root_job_id",
+    "canonical_input_hash",
+    "attempt",
+    "due_at",
+    "dispatch_key_commitment",
+})
 
 
 def _digest(*parts: object) -> str:
-    encoded = "\x1f".join(str(part) for part in parts).encode(
-        "utf-8", errors="strict"
-    )
+    encoded = "\x1f".join(str(part) for part in parts).encode("utf-8", errors="strict")
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -171,9 +167,12 @@ class CortexDispatchAdmission:
         )
 
     def to_header(self) -> str:
-        return base64.urlsafe_b64encode(self.canonical_json().encode("ascii")).decode(
-            "ascii"
-        ).rstrip("=")
+        return (
+            base64
+            .urlsafe_b64encode(self.canonical_json().encode("ascii"))
+            .decode("ascii")
+            .rstrip("=")
+        )
 
     def matches_dispatch_key(self, dispatch_key: str) -> bool:
         try:

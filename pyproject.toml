@@ -307,6 +307,7 @@ all = [
 [project.scripts]
 atlas = "hermes_cli.main:main"
 atlas-control = "altas.cli:main"
+atlas-collab = "tools.atlas_collab.cli:entrypoint"
 # Compatibility alias for prototype automation; public docs use atlas-control.
 altas = "altas.cli:main"
 hermes = "hermes_cli.main:main"
@@ -357,6 +358,7 @@ plugins = [
   "**/plugin.yml",
   "**/README.md",
 ]
+tools = ["atlas_collab/schemas/*.json", "atlas_collab/roles/*.md"]
 
 [tool.setuptools.packages.find]
 include = ["altas", "altas.*", "agent", "agent.*", "tools", "tools.*", "hermes_cli", "hermes_cli.*", "gateway", "gateway.*", "tui_gateway", "tui_gateway.*", "cron", "cron.*", "acp_adapter", "plugins", "plugins.*", "providers", "providers.*"]

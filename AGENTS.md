@@ -1354,3 +1354,43 @@ not the specific names.
 
 Reviewers should reject new change-detector tests; authors should convert
 them into invariants before re-requesting review.
+
+---
+
+## Atlas Development Collaboration
+
+The optional `atlas-collab` surface under `tools/atlas_collab/` is
+development-only orchestration. GitHub is authoritative for scope, code, CI,
+review, and human merge decisions; Buzz is the private live discussion record;
+SQLite under `~/.atlas/collab/` is non-secret recovery state.
+
+- Do not wire Buzz into agent core, Atlas Teams, the Control Plane, mobile
+  sequencing, product dispatch, or customer runtime dependencies.
+- Keep external integrations behind the official Buzz CLI plus `git`/`gh`.
+- Role identities, runtime profiles, sessions, worktrees, Git identities, and
+  credentials stay separate. Buzz membership never widens permissions.
+- Bind every live role to one durable task, expected branch, unique worktree,
+  and persistent session before service startup. Direct worker-to-worker wake
+  is forbidden: workers address the coordinator; only the coordinator or an
+  authorized human may wake another worker.
+- Private keys live only in the OS credential vault and the Buzz harness
+  environment, never model-runtime environments, arguments, YAML, SQLite,
+  logs, screenshots, Buzz, GitHub, tests, or handoffs.
+- Only the coordinator changes task-level state. Route worker questions through
+  the coordinator and enforce claims, causation, hop, turn, retry, and budget
+  bounds deterministically.
+- Never add automatic merge, ready-for-review, deployment, publication,
+  force-push, branch deletion, repository-setting, or product-authorization
+  actions.
+- Reuse the GitHub adapter's worktree validator and draft-PR handoff path.
+  Worktrees must be clean, uniquely assigned to the expected branch, and
+  descended from the recorded base; overlap and actual merge conflicts are
+  separate checks. A human-ready PR is never changed automatically.
+- Use `scripts/run_tests.sh tests/atlas_collab` and the credential-free
+  repository validator. Sentinel validation examines introduced text so a
+  formatting-only change to legacy secret-handling code is not a false
+  positive; new secret-like material still fails closed. Live tests must keep
+  failures and manual gates honest.
+
+See `docs/altas/DEVELOPMENT_COLLABORATION.md` and
+`docs/altas/COLLABORATION_RUNBOOK.md`.

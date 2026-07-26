@@ -103,7 +103,9 @@ class ManagedRequestAuthorization:
             ) or not self.cortex_dispatch_admission.matches_dispatch_key(
                 self.cortex_dispatch_key or ""
             ):
-                raise ValueError("Cortex authorization requires exact dispatch provenance")
+                raise ValueError(
+                    "Cortex authorization requires exact dispatch provenance"
+                )
         elif (
             self.cortex_dispatch_admission is not None
             or self.cortex_dispatch_key is not None
@@ -123,12 +125,10 @@ class ManagedRequestAuthorization:
             "ATLAS_CONTROL_PLANE_URL": self.control_plane_url,
         }
         if self.cortex_dispatch_admission is not None:
-            overlay.update(
-                {
-                    "ATLAS_CORTEX_DISPATCH_ADMISSION": (
-                        self.cortex_dispatch_admission.to_header()
-                    ),
-                    "ATLAS_CORTEX_DISPATCH_KEY": self.cortex_dispatch_key or "",
-                }
-            )
+            overlay.update({
+                "ATLAS_CORTEX_DISPATCH_ADMISSION": (
+                    self.cortex_dispatch_admission.to_header()
+                ),
+                "ATLAS_CORTEX_DISPATCH_KEY": self.cortex_dispatch_key or "",
+            })
         return overlay
