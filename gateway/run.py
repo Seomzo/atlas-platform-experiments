@@ -8545,7 +8545,11 @@ class GatewayRunner(
             return False
         try:
             if session_db is not None:
-                await session_db.end_session(session_id, reason)
+                end_session = session_db.end_session
+                if inspect.iscoroutinefunction(end_session):
+                    await end_session(session_id, reason)
+                else:
+                    await asyncio.to_thread(end_session, session_id, reason)
             else:
                 await asyncio.to_thread(sync_session_db.end_session, session_id, reason)
         except Exception:
