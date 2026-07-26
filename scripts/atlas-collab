@@ -15,9 +15,16 @@ VENV_PYTHON = (
 # locked environment when it exists instead of accidentally importing through
 # a dependency-incomplete system Python.
 if VENV_PYTHON.is_file() and Path(sys.executable).resolve() != VENV_PYTHON.resolve():
-    os.execv(
+    env = os.environ.copy()
+    env["VIRTUAL_ENV"] = str(ROOT / ".venv")
+    env["PATH"] = os.pathsep.join([
+        str(VENV_PYTHON.parent),
+        env.get("PATH", ""),
+    ]).rstrip(os.pathsep)
+    os.execve(
         str(VENV_PYTHON),
         [str(VENV_PYTHON), str(SCRIPT_PATH), *sys.argv[1:]],
+        env,
     )
 
 sys.path.insert(0, str(ROOT))

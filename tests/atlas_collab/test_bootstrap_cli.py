@@ -117,7 +117,10 @@ def test_repository_wrapper_uses_locked_venv_from_clean_shell(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["boundaries"]["development_only"] is True
+    doctor = json.loads(result.stdout)
+    assert doctor["boundaries"]["development_only"] is True
+    hermes = next(item for item in doctor["runtime"] if item["name"] == "hermes-acp")
+    assert Path(hermes["command"][0]).resolve() == (root / ".venv/bin/hermes").resolve()
 
 
 def test_enroll_preview_reports_reuse_for_existing_identity(
