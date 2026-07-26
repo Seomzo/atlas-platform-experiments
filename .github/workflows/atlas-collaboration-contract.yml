@@ -1,0 +1,57 @@
+name: Atlas collaboration contract
+
+on:
+  pull_request:
+    paths:
+      - "tools/atlas_collab/**"
+      - "tests/atlas_collab/**"
+      - "skills/software-development/atlas-collaboration/**"
+      - "tests/skills/test_atlas_collaboration_skill.py"
+      - "config/atlas-collab.example.yaml"
+      - "config/tasks/**"
+      - "scripts/atlas-collab"
+      - "docs/altas/DEVELOPMENT_COLLABORATION.md"
+      - "docs/altas/COLLABORATION_RUNBOOK.md"
+      - "docs/altas/COLLABORATION_ACCEPTANCE.md"
+      - "docs/altas/workstreams/WS-*-HANDOFF.md"
+      - ".github/ISSUE_TEMPLATE/atlas-agent-task.yml"
+      - ".github/PULL_REQUEST_TEMPLATE/atlas-agent-workstream.md"
+      - ".github/workflows/atlas-collaboration-contract.yml"
+      - "pyproject.toml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: atlas-collaboration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-atlas-dev.txt
+      - name: Install focused dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements-atlas-dev.txt
+      - name: Compile collaboration tooling
+        run: .venv/bin/python -m compileall -q tools/atlas_collab
+      - name: Validate contracts and repository invariants
+        run: .venv/bin/python -m tools.atlas_collab.validation --root . --json
+      - name: Run focused collaboration tests
+        run: scripts/run_tests.sh tests/atlas_collab tests/skills/test_atlas_collaboration_skill.py -q
+      - name: Check formatting and conflict markers
+        run: |
+          .venv/bin/python -m ruff check tools/atlas_collab tests/atlas_collab tests/skills/test_atlas_collaboration_skill.py
+          .venv/bin/python -m ruff format --check tools/atlas_collab tests/atlas_collab tests/skills/test_atlas_collaboration_skill.py
+          git diff --check

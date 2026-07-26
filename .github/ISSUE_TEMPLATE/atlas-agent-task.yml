@@ -1,0 +1,66 @@
+name: Atlas agent workstream task
+description: Submit measurable, development-only work to atlas-collab
+title: "[Atlas task]: "
+labels: ["atlas-agent-task"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        GitHub is authoritative for scope, code, CI, review, and merge.
+        Buzz is the live collaboration record. Submitting this form does not
+        authorize product actions, merge, deployment, or permission changes.
+  - type: input
+    id: goal
+    attributes:
+      label: Measurable goal
+      description: State the observable outcome.
+    validations:
+      required: true
+  - type: textarea
+    id: in_scope
+    attributes:
+      label: In scope
+      description: Paths, interfaces, and behaviors permitted to change.
+    validations:
+      required: true
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of scope
+      description: Explicit product, deployment, and authorization boundaries.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: One observable checkbox per criterion; atlas-collab assigns stable AC IDs.
+      placeholder: |
+        - [ ] Focused test proves the requested behavior.
+        - [ ] Independent review checks the security boundary.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Required evidence
+      description: Tests, diffs, screenshots, logs, or review evidence expected.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Canonical context
+      description: Repository-relative files the team must hash and acknowledge.
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies and human gates
+      description: Blocking work, product decisions, and required human approvals.
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Safety boundary
+      options:
+        - label: I understand that agents cannot merge, deploy, widen permissions, or authorize Atlas product actions.
+          required: true
