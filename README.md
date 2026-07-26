@@ -71,8 +71,9 @@ Prerequisites:
 
 - Python 3.11–3.13
 - macOS or Linux for the tested quick start
-- Windows users should use WSL2 for this prototype; native Windows packaging
-  and credential storage are not yet validated
+- Windows users should use WSL2 for the tested prototype path. The native
+  engine installer is available at `scripts/install.ps1`, but native Atlas
+  packaging and credential storage are not yet validated.
 - No model-provider, Tekion, Slack, or Stripe account is required for the demo
 
 ```bash

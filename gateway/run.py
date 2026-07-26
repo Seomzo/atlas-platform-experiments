@@ -5763,7 +5763,7 @@ class GatewayRunner(
         except Exception:
             return False
 
-    def _session_has_compression_in_flight(self, session_key: str) -> bool:
+    async def _session_has_compression_in_flight(self, session_key: str) -> bool:
         """Return True when a compression lock is held for this session's id.
 
         Context compression is interrupt-protected (#23975) but gateway
@@ -5789,9 +5789,10 @@ class GatewayRunner(
         session_db = getattr(self, "_session_db", None)
         if session_db is None:
             return False
-        db = getattr(session_db, "_db", session_db)
         try:
-            return bool(db.get_compression_lock_holder(str(session_id)))
+            return bool(
+                await session_db.get_compression_lock_holder(str(session_id))
+            )
         except Exception:
             return False
 
@@ -6041,7 +6042,7 @@ class GatewayRunner(
             effective_mode = "queue"
         demoted_for_compression = (
             effective_mode == "interrupt"
-            and self._session_has_compression_in_flight(session_key)
+            and await self._session_has_compression_in_flight(session_key)
         )
         if demoted_for_compression:
             logger.info(
@@ -8532,8 +8533,9 @@ class GatewayRunner(
             )
             return False
 
-        session_db = getattr(self, "_session_db", None) or getattr(store, "_db", None)
-        if session_db is None:
+        session_db = getattr(self, "_session_db", None)
+        sync_session_db = getattr(store, "_db", None)
+        if session_db is None and sync_session_db is None:
             logger.warning(
                 "Cannot end one-shot session %s after %s admission: SessionDB "
                 "is unavailable; the retry intent was kept",
@@ -8542,9 +8544,10 @@ class GatewayRunner(
             )
             return False
         try:
-            result = session_db.end_session(session_id, reason)
-            if inspect.isawaitable(result):
-                await result
+            if session_db is not None:
+                await session_db.end_session(session_id, reason)
+            else:
+                await asyncio.to_thread(sync_session_db.end_session, session_id, reason)
         except Exception:
             logger.warning(
                 "SessionDB end failed during %s for session %s; the durable "
@@ -11020,7 +11023,7 @@ class GatewayRunner(
             # the id out from under it, forking orphaned compression
             # siblings. Demote to queue semantics so the follow-up waits
             # for the in-flight compression + rotation to land.
-            if self._session_has_compression_in_flight(_quick_key):
+            if await self._session_has_compression_in_flight(_quick_key):
                 logger.info(
                     "PRIORITY interrupt demoted to queue for session %s "
                     "because context compression is in flight (#56391)",
@@ -23325,16 +23328,17 @@ async def start_gateway(
     if threading.current_thread() is threading.main_thread():
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
-                loop.add_signal_handler(
+                loop.add_signal_handler(  # windows-footgun: ok — wrapped for Windows
                     sig, shutdown_signal_handler, sig
-                )  # windows-footgun: ok — wrapped in try/except NotImplementedError for Windows
+                )
             except NotImplementedError:
                 pass
-        if hasattr(signal, "SIGUSR1"):
+        restart_signal = getattr(signal, "SIGUSR1", None)
+        if restart_signal is not None:
             try:
-                loop.add_signal_handler(
-                    signal.SIGUSR1, restart_signal_handler
-                )  # windows-footgun: ok — POSIX signal, guarded by hasattr above + try/except NotImplementedError
+                loop.add_signal_handler(  # windows-footgun: ok — wrapped for Windows
+                    restart_signal, restart_signal_handler
+                )
             except NotImplementedError:
                 pass
     else:

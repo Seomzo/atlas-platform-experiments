@@ -6,7 +6,7 @@ import pytest
 from tools.atlas_collab.config import DEFAULTS
 from tools.atlas_collab.keychain import MemoryVault
 from tools.atlas_collab.orchestrator import Orchestrator
-from tools.atlas_collab import runtime_shim, service_runner
+from tools.atlas_collab import runtime_shim, service_runner, services
 from tools.atlas_collab.services import launch_agent_definition
 
 
@@ -39,6 +39,21 @@ def test_launch_agent_contains_no_private_key_or_heartbeat(tmp_path, monkeypatch
     assert "BUZZ_PRIVATE_KEY" not in payload
     assert "service_runner" in payload
     assert "/Users/" not in inspect.getsource(service_runner)
+
+
+def test_launchctl_gui_domain_uses_guarded_macos_user_id(monkeypatch):
+    monkeypatch.setattr(services.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(services.os, "getuid", lambda: 501, raising=False)
+
+    assert services._gui_domain() == "gui/501"
+
+
+def test_launchctl_gui_domain_fails_cleanly_without_user_id(monkeypatch):
+    monkeypatch.setattr(services.platform, "system", lambda: "Darwin")
+    monkeypatch.delattr(services.os, "getuid", raising=False)
+
+    with pytest.raises(RuntimeError, match="user ID support"):
+        services._gui_domain()
 
 
 def test_development_config_has_no_product_or_merge_authority():
