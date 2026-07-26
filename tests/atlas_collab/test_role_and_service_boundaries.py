@@ -10,6 +10,14 @@ from tools.atlas_collab import runtime_shim, service_runner, services
 from tools.atlas_collab.services import launch_agent_definition
 
 
+class _ProfileBuzz:
+    def __init__(self):
+        self.profiles = []
+
+    def set_profile(self, *, name, about):
+        self.profiles.append({"name": name, "about": about})
+
+
 def test_three_roles_get_distinct_public_identities_and_profiles(
     tmp_path, store, config, monkeypatch
 ):
@@ -29,6 +37,36 @@ def test_three_roles_get_distinct_public_identities_and_profiles(
     assert len(vault.values) == 3
     inventory = (tmp_path / "home" / "inventory.json").read_text(encoding="utf-8")
     assert all(secret not in inventory for secret in vault.values.values())
+
+
+def test_existing_identity_retries_relay_profile_publication(
+    tmp_path, store, config, monkeypatch
+):
+    monkeypatch.setenv("ATLAS_COLLAB_HOME", str(tmp_path / "home"))
+    vault = MemoryVault({})
+    first = Orchestrator(root=tmp_path, store=store, config=config)
+    enrolled = first.enroll_agent(role="coordinator", vault=vault)
+    buzz = _ProfileBuzz()
+
+    retried = Orchestrator(
+        root=tmp_path,
+        store=store,
+        config=config,
+        buzz=buzz,
+    ).enroll_agent(role="coordinator", vault=vault)
+
+    assert not retried["created"]
+    assert retried["agent"]["public_key"] == enrolled["agent"]["public_key"]
+    assert retried["relay_status"] == "profile-published"
+    assert buzz.profiles == [
+        {
+            "name": "atlas-coordinator",
+            "about": (
+                "Atlas development-only coordinator; cannot merge, deploy, "
+                "or widen permissions."
+            ),
+        }
+    ]
 
 
 def test_launch_agent_contains_no_private_key_or_heartbeat(tmp_path, monkeypatch):
