@@ -175,6 +175,12 @@ exit-124 result when the caller requested `check=False`, and into the existing
 does not change credentials, permissions, product behavior, or applying
 bootstrap semantics.
 
+The collaborator validation also found that fake-orchestrator tests which
+write an inventory did not isolate `ATLAS_COLLAB_HOME`. They could replace a
+developer's real non-secret inventory with fake task paths. The collaboration
+test fixture now redirects that home to a per-test temporary directory and the
+intake test verifies the inventory is created there.
+
 Validation for the follow-up:
 
 ```text

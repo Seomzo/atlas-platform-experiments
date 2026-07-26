@@ -61,7 +61,7 @@ def test_external_message_and_comment_writes_are_idempotent(store, contract):
 
 
 def test_fake_task_intake_creates_exactly_one_record_channel_canvas_and_event(
-    tmp_path, store, contract, config
+    tmp_path, store, contract, config, collab_home
 ):
     (tmp_path / "AGENTS.md").write_text("canonical", encoding="utf-8")
     buzz = FakeBuzzAdapter()
@@ -84,6 +84,7 @@ def test_fake_task_intake_creates_exactly_one_record_channel_canvas_and_event(
     assert len(buzz.channels_by_name) == 1
     assert len(buzz.messages) == 1
     assert len(github.comments) == 1
+    assert (collab_home / "inventory.json").is_file()
 
 
 def test_degraded_systems_fail_closed_without_duplicate_replay(
