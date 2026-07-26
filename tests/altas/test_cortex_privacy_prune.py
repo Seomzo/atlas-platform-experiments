@@ -89,9 +89,7 @@ def test_retention_keeps_old_root_when_active_tip_survives(
     home, session_db, store, _ = retention_harness
     _compression_lineage(session_db, store, tip_ended=False)
 
-    assert list_prune_candidates_with_cortex(
-        home, session_db, older_than_days=90
-    ) == []
+    assert list_prune_candidates_with_cortex(home, session_db, older_than_days=90) == []
     assert prune_sessions_with_cortex(home, session_db, older_than_days=90) == 0
 
     assert session_db.get_session("root") is not None

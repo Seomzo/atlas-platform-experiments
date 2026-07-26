@@ -231,7 +231,9 @@ def test_graph_overview_is_stable_typed_bounded_and_body_free(populated_store):
         node_types=["entity"],
         community_id=populated_store["community_id"],
     )
-    assert {node["id"] for node in community_page["nodes"] + community_next["nodes"]} == {
+    assert {
+        node["id"] for node in community_page["nodes"] + community_next["nodes"]
+    } == {
         populated_store["customer_id"],
         populated_store["vehicle_id"],
     }
@@ -243,9 +245,14 @@ def test_graph_overview_is_stable_typed_bounded_and_body_free(populated_store):
         populated_store["tool_entity_id"]
     ]
 
-    deep_cursor = base64.urlsafe_b64encode(
-        json.dumps({"offset": 10_001}, separators=(",", ":")).encode()
-    ).decode().rstrip("=")
+    deep_cursor = (
+        base64
+        .urlsafe_b64encode(
+            json.dumps({"offset": 10_001}, separators=(",", ":")).encode()
+        )
+        .decode()
+        .rstrip("=")
+    )
     assert build_graph_overview(store, limit=1, cursor=deep_cursor)["nodes"] == []
 
 
@@ -444,9 +451,7 @@ def test_rewind_removes_stale_content_from_graph_overview_and_detail(tmp_path):
     assert rewound_evidence_id not in {
         item["id"] for item in session_detail["evidence"]
     }
-    assert retained_evidence_id in {
-        item["id"] for item in session_detail["evidence"]
-    }
+    assert retained_evidence_id in {item["id"] for item in session_detail["evidence"]}
     with store.connect() as connection:
         session = connection.execute(
             "SELECT state, summary, evidence_hash, finalized_at FROM sessions "
@@ -766,9 +771,7 @@ def test_cognitive_routes_use_requested_profile_and_never_client_brain_id(
         "session",
     }
 
-    empty_graph = client.get(
-        "/api/cognitive/graph", params={"profile": "worker_empty"}
-    )
+    empty_graph = client.get("/api/cognitive/graph", params={"profile": "worker_empty"})
     assert empty_graph.status_code == 200
     assert empty_graph.json()["nodes"] == []
 

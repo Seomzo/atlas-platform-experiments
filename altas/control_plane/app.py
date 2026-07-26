@@ -89,9 +89,7 @@ def _require_cortex_dispatch_admission(
     payload = job.get("payload")
     if not isinstance(payload, dict) or set(payload) != {"dispatch_admission"}:
         raise ValueError("invalid Cortex dispatch payload")
-    admission = CoreCortexDispatchAdmission.from_mapping(
-        payload["dispatch_admission"]
-    )
+    admission = CoreCortexDispatchAdmission.from_mapping(payload["dispatch_admission"])
     if not admission.is_canonical():
         raise ValueError("non-canonical Cortex dispatch admission")
     if not repository.has_cortex_dispatch_admission(str(job.get("id") or "")):
@@ -636,9 +634,7 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
             try:
                 _require_cortex_dispatch_admission(repository, job)
             except (KeyError, TypeError, ValueError):
-                repository.quarantine_cortex_dispatch(
-                    job["id"], device_id=device["id"]
-                )
+                repository.quarantine_cortex_dispatch(job["id"], device_id=device["id"])
                 audit_worker_denial(
                     action="jobs.dispatch",
                     device=device,

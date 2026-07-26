@@ -259,9 +259,10 @@ def test_route_resolution_is_explicit_and_managed_mode_fails_closed(
     assert (route.provider, route.model) == ("openrouter", "cheap-memory-model")
 
     inherited_chat = _raw_config(tmp_path)
-    inherited_chat["auxiliary"]["cortex_triage"].update(
-        {"provider": "auto", "model": ""}
-    )
+    inherited_chat["auxiliary"]["cortex_triage"].update({
+        "provider": "auto",
+        "model": "",
+    })
     with pytest.raises(CortexRouteError, match="dedicated explicit provider"):
         resolve_model_route("cortex_triage", config=inherited_chat, environ={})
 
@@ -275,12 +276,10 @@ def test_route_resolution_is_explicit_and_managed_mode_fails_closed(
         provider="anthropic",
         model="anthropic/claude-haiku-4-5-20251001",
     )
-    aliased_chat["auxiliary"]["cortex_triage"].update(
-        {
-            "provider": "claude",
-            "model": "claude/claude-haiku-4-5-20251001",
-        }
-    )
+    aliased_chat["auxiliary"]["cortex_triage"].update({
+        "provider": "claude",
+        "model": "claude/claude-haiku-4-5-20251001",
+    })
     with pytest.raises(CortexRouteError, match="separate from the conversational"):
         resolve_model_route("cortex_triage", config=aliased_chat, environ={})
 
@@ -1733,9 +1732,7 @@ def test_dream_cycle_builds_stable_connected_component_communities(
     first_ids = {str(row["id"]) for row in first_rows}
     overview = build_graph_overview(store, limit=100)
     assert first_ids.issubset({
-        str(node["id"])
-        for node in overview["nodes"]
-        if node["type"] == "community"
+        str(node["id"]) for node in overview["nodes"] if node["type"] == "community"
     })
 
     store.enqueue_job(
