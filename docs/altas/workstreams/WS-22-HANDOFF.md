@@ -160,3 +160,28 @@ cherry-picked the implementation chain in order and ran union validation.
 7. Resolve the GitHub Actions payment/spending-limit gate and rerun draft-PR CI.
 8. Human reviews the draft PR/CI; do not mark ready or merge until the live
    requirements and identity incident are resolved.
+
+## Collaborator enrollment follow-up — runtime probe timeout
+
+On a fresh collaborator workstation at framework commit
+`955f708a4926084778f69cf3943ff25eca59649e`, the real
+`claude auth status` probe exceeded its 15-second deadline. The uncaught
+`subprocess.TimeoutExpired` aborted `atlas-collab doctor`, preventing the
+remaining non-mutating readiness checks from being reported.
+
+The follow-up fix converts any bounded command timeout into a sanitized
+exit-124 result when the caller requested `check=False`, and into the existing
+`CommandError` boundary otherwise. This is general to all external probes and
+does not change credentials, permissions, product behavior, or applying
+bootstrap semantics.
+
+Validation for the follow-up:
+
+```text
+scripts/run_tests.sh tests/atlas_collab/test_adapters_orchestrator.py -q
+scripts/atlas-collab doctor
+scripts/atlas-collab bootstrap --dry-run
+```
+
+The collaborator branch and draft PR remain separate from the WS-22 branch and
+must not be merged automatically.

@@ -16,6 +16,8 @@ three role credentials and relay authorization exist. Interpret common results:
 
 - `coordinator vault credential ... missing`: enroll roles; do not use an env
   file.
+- A runtime authentication probe timeout is reported as unavailable/degraded;
+  it must not abort the rest of `doctor`.
 - Buzz `auth error`: an owner must authorize that public identity.
 - Codex `API-key auth is unproven`: do not select Codex Buzz ACP based only on
   the ChatGPT login.

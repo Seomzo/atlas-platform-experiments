@@ -1,11 +1,28 @@
 from pathlib import Path
+import subprocess
 
 import pytest
 
 from tools.atlas_collab.adapters.buzz import FakeBuzzAdapter
 from tools.atlas_collab.adapters.github import FakeGitHubAdapter
+from tools.atlas_collab.adapters.process import CommandError, CommandRunner
 from tools.atlas_collab.models import CollaborationEvent
 from tools.atlas_collab.orchestrator import Orchestrator
+
+
+def test_command_timeout_is_a_bounded_sanitized_result(monkeypatch):
+    def time_out(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", time_out)
+
+    result = CommandRunner().run(["claude", "auth", "status"], check=False, timeout=15)
+    assert result.code == 124
+    assert result.stdout == ""
+    assert result.stderr == "command timed out after 15 seconds"
+
+    with pytest.raises(CommandError, match="timed out after 15 seconds"):
+        CommandRunner().run(["claude", "auth", "status"], timeout=15)
 
 
 def test_external_message_and_comment_writes_are_idempotent(store, contract):

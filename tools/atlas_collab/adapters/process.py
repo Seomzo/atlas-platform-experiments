@@ -45,16 +45,29 @@ class CommandRunner:
         process_env = os.environ.copy()
         if env:
             process_env.update(env)
-        result = subprocess.run(
-            command,
-            cwd=cwd,
-            env=process_env,
-            input=stdin,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=timeout,
-        )
+        try:
+            result = subprocess.run(
+                command,
+                cwd=cwd,
+                env=process_env,
+                input=stdin,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            wrapped = CommandResult(
+                tuple(command),
+                124,
+                "",
+                f"command timed out after {timeout} seconds",
+            )
+            if check:
+                raise CommandError(
+                    wrapped.command, wrapped.code, wrapped.stderr
+                ) from None
+            return wrapped
         wrapped = CommandResult(
             tuple(command),
             result.returncode,
