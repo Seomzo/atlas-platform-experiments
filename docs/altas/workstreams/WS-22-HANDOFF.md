@@ -41,9 +41,11 @@ runtime dependencies.
   a local conversion error, then personally unlock the login Keychain.
 - A Buzz owner must approve three role identities and confirm whether
   owner-reviewed agent drafts can bind the locally generated public keys.
-- Choose a live implementer runtime only after Buzz Codex ACP API-key readiness
-  or Claude authentication is proven. Hermes ACP is the only currently proven
-  provider-configured runtime.
+- Three isolated Hermes profiles now exist for coordinator, implementer, and
+  reviewer. Hermes ACP 0.18.2 completed a real Buzz ACP protocol-v2 handshake
+  through the credential-stripping runtime shim. Codex and Claude remain
+  optional and must not be selected until their own Buzz ACP authentication is
+  proven.
 - GitHub branch protection/rulesets are manual-pending because the private
   repository/account plan does not expose them.
 - GitHub Actions accepted the draft-PR events but did not start any job because
@@ -105,8 +107,11 @@ or copied from Fizz.
 - Config: `atlas.collab.config.v1`
 - Context manifest: `atlas.collab.context.v1`
 - Inventory: `atlas.collab.inventory.v1`
-- SQLite schema version 1 creates missing tables idempotently and adds
-  clarification/cost columns to an existing WS-22 database.
+- SQLite schema version 4 creates missing tables idempotently. Version 2 added
+  role/task/branch/worktree/session bindings, version 3 repaired legacy live
+  claim uniqueness while preserving rows transactionally, and version 4 added
+  role-specific Git name/email bindings. Fresh and upgraded databases are
+  permissioned `0600`.
 - No Atlas product or upstream Hermes data migration.
 
 ## Validation
@@ -134,6 +139,14 @@ correction, and deliberately unmet live requirements are in
 - Process secrets are environment-only and launch definitions contain none.
 - Task cancellation matches PID plus process create time before terminating an
   explicitly registered process tree.
+- Each bound worktree is checked for cleanliness, exact branch/base ancestry,
+  uniqueness, conflict/overlap risk, and a role-specific local Git identity
+  before a role process can start.
+- External Buzz and GitHub writes persist an idempotency marker before the call
+  and reconcile the remote record before any recovery resend.
+- The runtime shim removes Buzz private-key/auth-tag and vault variables before
+  launching Hermes; real Buzz ACP protocol-v2 initialization passed through
+  that shim.
 - No code path merges, deploys, publishes, marks ready, force-pushes, deletes a
   branch, changes repository settings, or widens product permissions.
 - Security incident: one existing Buzz Desktop credential appeared in a local
@@ -151,9 +164,16 @@ creating it. No screenshot with credential material was captured.
 
 ## Known risks and limitations
 
-- Live AC-02, AC-03, AC-05 through AC-08, AC-13, and AC-16 are not satisfied.
+- Live AC-02, AC-03, AC-05, AC-06, AC-08, AC-10, AC-13, and AC-16 are not
+  satisfied.
 - Keychain is currently locked; secure role credential creation is blocked.
 - Buzz agent creation is owner-reviewed and may not bind a pre-generated key.
+- The three isolated Hermes profiles exist and authenticate to their configured
+  provider, but no role may start until Buzz identity enrollment, task
+  binding, and owner allowlisting all pass.
+- The three macOS LaunchAgent definitions are installed with `RunAtLoad=false`
+  and confirmed unloaded. Their fingerprints/status are durable inventory
+  records; the CLI refuses start/restart while `doctor.ready` is false.
 - No collaborator fresh-operator run was observed.
 - Branch protection is not configured.
 - Draft-PR CI jobs did not start because of the repository account's
@@ -173,6 +193,10 @@ Workstream commit order:
 3. `bda52df6e` — seeded dogfood fixture
 4. `9def05135` — independent-review correction
 5. `adf52ff99` — final evidence/safety hardening
+6. `955f708a4` — draft-PR infrastructure gate evidence
+7. `d9d35e020` — completion-audit hardening for worktree/Git
+   identity validation, real runtime profiles/shim, schema/recovery, retries,
+   prompt-injection rejection, service lifecycle, and exact handoff behavior
 
 The dogfood implementer branch is descended from `cdc849c19` and changes only
 the fixture/test pair. The reviewer branch has no edits. The integration branch
@@ -182,11 +206,13 @@ cherry-picked the implementation chain in order and ran union validation.
 
 1. Human rotates the current Buzz Desktop identity and unlocks login Keychain.
 2. Re-run `scripts/atlas-collab doctor`.
-3. Enroll coordinator, implementer, and reviewer; verify three public keys and
-   profiles, then complete Buzz owner review.
+3. Enroll coordinator, implementer, and reviewer; verify their three public
+   keys against the already provisioned isolated Hermes profiles, then complete
+   Buzz owner review.
 4. Add only the rotated human owner public key to local config.
-5. Run bootstrap apply twice, verify channel reuse, install but do not start
-   services until every runtime check is true.
+5. Run bootstrap apply twice and verify channel reuse. The three LaunchAgent
+   definitions may remain installed but stopped; do not start them until every
+   identity, owner, channel, profile, worktree, and Git identity check is true.
 6. Execute the same WS-22 task live in Buzz with at least two real processes,
    append real deep links/evidence, and update the AC matrix.
 7. Resolve the GitHub Actions payment/spending-limit gate and rerun draft-PR CI.

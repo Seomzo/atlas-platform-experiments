@@ -83,7 +83,7 @@ Executed on the integration branch:
 
 ```text
 scripts/run_tests.sh tests/atlas_collab tests/skills/test_atlas_collaboration_skill.py -q
-26 tests passed
+59 tests passed
 
 scripts/run_tests.sh tests/test_project_metadata.py tests/test_packaging_metadata.py -q
 22 tests passed
@@ -91,11 +91,11 @@ scripts/run_tests.sh tests/test_project_metadata.py tests/test_packaging_metadat
 python -m tools.atlas_collab.validation --root . --json
 ok: true
 
-python -m ruff check tools/atlas_collab tests/atlas_collab tests/skills/test_atlas_collaboration_skill.py
+uv run ruff check tools/atlas_collab tests/atlas_collab tests/skills/test_atlas_collaboration_skill.py
 All checks passed
 
-python -m ruff format --check tools/atlas_collab tests/atlas_collab tests/skills/test_atlas_collaboration_skill.py
-34 files already formatted
+uv run ruff format --check tools/atlas_collab tests/atlas_collab tests/skills/test_atlas_collaboration_skill.py
+39 files already formatted
 
 git diff --check
 passed
@@ -105,12 +105,33 @@ wheel and source distribution built; wheel contains atlas-collab entry point,
 schemas, and role prompts
 ```
 
-Additional safety coverage includes task/event validation, vague intake,
-coordinator-only transitions, replay/idempotency, deduplicated Buzz/GitHub
-writes, worker mediation, self/hop/terminal wake rejection, one active turn,
-turn/cost/failure/clarification budgets, path/interface claims, pause/resume,
-credential sentinel rejection, no credentials in launch definitions, adapter
-loss/recovery, and task-scoped process-tree cancellation.
+After rebasing onto the independently pushed self-contained Atlas CI fixes, the
+combined branch also passed 443 focused Atlas/upstream-dispatch regression
+tests. The two emitted warnings are pre-existing deprecation/resource warnings,
+not failures.
+
+Additional safety coverage includes clean-home bootstrap/idempotency and
+permissions; task/event validation; deterministic prompt-injection rejection;
+vague intake; coordinator-only transitions; exact role acknowledgements;
+replay/idempotency; pre-call external markers and remote reconciliation;
+deduplicated Buzz/GitHub writes; worker mediation; self/hop/terminal wake
+rejection; one active turn; bounded exponential retry; turn/cost/failure/
+clarification budgets; atomic concurrent leases and fake-clock expiry;
+path/interface claims; pause/resume/cancel; credential sentinel rejection;
+credential-stripping runtime launch; role/profile/task/worktree/Git identity
+binding; real temporary-repository ancestry/overlap/conflict tests; draft-PR
+reuse/refusal; service preview/apply/archive; adapter loss/recovery; and exact
+task-scoped process-tree cancellation that leaves an unrelated process alive.
+
+The three real non-secret Hermes profiles
+`atlas-collab-coordinator`, `atlas-collab-implementer`, and
+`atlas-collab-reviewer` were provisioned and left stopped. Hermes 0.18.2 then
+completed a real Buzz ACP protocol-v2 initialization/model handshake through
+the credential-stripping runtime shim. This proves the model-runtime seam, not
+Buzz role identity authorization.
+
+All three user LaunchAgent definitions were installed with `RunAtLoad=false`
+and confirmed `installed: true`, `loaded: false`. No service was started.
 
 ## Deliberately unmet live requirements
 
@@ -122,6 +143,9 @@ loss/recovery, and task-scoped process-tree cancellation.
 - The existing Buzz Desktop identity must be rotated after a local conversion
   failure emitted its credential once. That value was not reused or committed.
 - Claude is unauthenticated. Codex Buzz ACP API-key readiness is unproven.
+- The three Hermes profiles are runtime-ready but deliberately cannot become
+  live roles without separate Buzz keys, owner approval, author allowlisting,
+  and task/worktree bindings.
 - The real AC-16 live dogfood remains blocked on personal Keychain unlock,
   desktop identity rotation, and Buzz owner approval.
 
