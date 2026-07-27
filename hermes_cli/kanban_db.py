@@ -99,8 +99,24 @@ _log = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
+VALID_STATUSES = {
+    "triage",
+    "todo",
+    "scheduled",
+    "ready",
+    "starting",
+    "running",
+    "waiting_user",
+    "waiting_approval",
+    "blocked",
+    "review",
+    "done",
+    "failed",
+    "cancelled",
+    "archived",
+}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
+VALID_EXECUTION_MODES = {"dispatch", "interactive"}
 
 # Typed block reasons. Distinguishes the two fundamentally different things a
 # worker (or human) means by "blocked", so each can be routed differently
@@ -907,6 +923,10 @@ class Task:
     # set the env var. Lets clients render a per-session board without
     # relying on tenant + time-window heuristics.
     session_id: Optional[str] = None
+    # ``dispatch`` tasks are claimed by the Kanban worker dispatcher.
+    # ``interactive`` tasks are owned by a live Atlas gateway session and must
+    # never be subprocess-spawned by the dispatcher.
+    execution_mode: str = "dispatch"
     # Typed block reason (one of VALID_BLOCK_KINDS) or None for legacy/un-typed
     # blocks. Set by ``block_task``; preserved across unblock so a re-block for
     # the same kind is recognisable as an unblock↔re-block loop.
@@ -989,6 +1009,11 @@ class Task:
             ),
             session_id=(
                 row["session_id"] if "session_id" in keys else None
+            ),
+            execution_mode=(
+                row["execution_mode"]
+                if "execution_mode" in keys and row["execution_mode"]
+                else "dispatch"
             ),
             block_kind=(
                 row["block_kind"] if "block_kind" in keys and row["block_kind"] else None
@@ -1163,6 +1188,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- set the env var. Indexed so per-session list queries stay cheap on
     -- larger boards.
     session_id           TEXT,
+    -- Execution owner. `dispatch` uses the Kanban subprocess dispatcher;
+    -- `interactive` is driven by an Atlas gateway session and is excluded
+    -- from dispatcher claim/spawn/recovery accounting.
+    execution_mode       TEXT NOT NULL DEFAULT 'dispatch',
     -- Typed block reason set by ``block_task`` (one of VALID_BLOCK_KINDS, or
     -- NULL for legacy/un-typed blocks). Drives routing: ``dependency`` never
     -- sits in ``blocked`` (goes to ``todo`` for parent-gating); the others go
@@ -1970,6 +1999,14 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             conn, "tasks", "session_id", "session_id TEXT"
         )
 
+    if "execution_mode" not in cols:
+        _add_column_if_missing(
+            conn,
+            "tasks",
+            "execution_mode",
+            "execution_mode TEXT NOT NULL DEFAULT 'dispatch'",
+        )
+
     if "block_kind" not in cols:
         # Typed block reason (VALID_BLOCK_KINDS) or NULL for legacy/un-typed
         # blocks. Existing blocked rows get NULL, which is treated as a
@@ -2043,7 +2080,8 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                 "SELECT id, assignee, claim_lock, claim_expires, worker_pid, "
                 "       max_runtime_seconds, last_heartbeat_at, started_at "
                 "FROM tasks "
-                "WHERE status = 'running' AND current_run_id IS NULL"
+                "WHERE status = 'running' AND current_run_id IS NULL "
+                "  AND execution_mode = 'dispatch'"
             ).fetchall()
             for row in inflight:
                 started = row["started_at"] or int(time.time())
@@ -2407,6 +2445,7 @@ def create_task(
     session_id: Optional[str] = None,
     board: Optional[str] = None,
     project_id: Optional[str] = None,
+    execution_mode: str = "dispatch",
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -2437,6 +2476,10 @@ def create_task(
     if initial_status not in VALID_INITIAL_STATUSES:
         raise ValueError(
             f"initial_status must be one of {sorted(VALID_INITIAL_STATUSES)}"
+        )
+    if execution_mode not in VALID_EXECUTION_MODES:
+        raise ValueError(
+            f"execution_mode must be one of {sorted(VALID_EXECUTION_MODES)}"
         )
     if workspace_kind not in VALID_WORKSPACE_KINDS:
         raise ValueError(
@@ -2635,8 +2678,9 @@ def create_task(
                         created_by, created_at, workspace_kind, workspace_path,
                         branch_name, project_id, tenant, idempotency_key,
                         max_runtime_seconds,
-                        skills, max_retries, goal_mode, goal_max_turns, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        skills, max_retries, goal_mode, goal_max_turns, session_id,
+                        execution_mode
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -2659,6 +2703,7 @@ def create_task(
                         1 if goal_mode else 0,
                         int(goal_max_turns) if goal_max_turns is not None else None,
                         session_id,
+                        execution_mode,
                     ),
                 )
                 for pid in parents:
@@ -2678,6 +2723,7 @@ def create_task(
                         "branch_name": branch_name,
                         "skills": list(skills_list) if skills_list else None,
                         "goal_mode": bool(goal_mode) or None,
+                        "execution_mode": execution_mode,
                     },
                 )
             return task_id
@@ -3315,7 +3361,8 @@ def recompute_ready(
     with write_txn(conn):
         todo_rows = conn.execute(
             "SELECT id, status, consecutive_failures, max_retries "
-            "FROM tasks WHERE status IN ('todo', 'blocked')"
+            "FROM tasks WHERE status IN ('todo', 'blocked') "
+            "AND execution_mode = 'dispatch'"
         ).fetchall()
         for row in todo_rows:
             task_id = row["id"]
@@ -3634,6 +3681,7 @@ def release_stale_claims(
         "SELECT id, claim_lock, worker_pid, claim_expires, last_heartbeat_at "
         "FROM tasks "
         "WHERE status = 'running' AND claim_expires IS NOT NULL "
+        "  AND execution_mode = 'dispatch' "
         "  AND claim_expires < ?",
         (now,),
     ).fetchall()
@@ -3660,6 +3708,7 @@ def release_stale_claims(
                 cur = conn.execute(
                     "UPDATE tasks SET claim_expires = ? "
                     "WHERE id = ? AND status = 'running' "
+                    "  AND execution_mode = 'dispatch' "
                     "  AND claim_lock IS ? "
                     "  AND claim_expires IS NOT NULL "
                     "  AND claim_expires < ?",
@@ -6111,6 +6160,7 @@ def enforce_max_runtime(
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
         "WHERE t.status = 'running' AND t.max_runtime_seconds IS NOT NULL "
+        "  AND t.execution_mode = 'dispatch' "
         "  AND COALESCE(r.started_at, t.started_at) IS NOT NULL "
         "  AND t.worker_pid IS NOT NULL"
     ).fetchall()
@@ -6159,6 +6209,7 @@ def enforce_max_runtime(
                 "claim_expires = NULL, worker_pid = NULL, "
                 "last_heartbeat_at = NULL "
                 "WHERE id = ? AND status = 'running' "
+                "  AND execution_mode = 'dispatch' "
                 "  AND worker_pid = ? AND claim_lock IS ?",
                 (tid, pid, row["claim_lock"]),
             )
@@ -6244,7 +6295,8 @@ def detect_stale_running(
         "       COALESCE(r.started_at, t.started_at) AS active_started_at "
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
-        "WHERE t.status = 'running'"
+        "WHERE t.status = 'running' "
+        "  AND t.execution_mode = 'dispatch'"
     ).fetchall()
 
     for row in rows:
@@ -6285,6 +6337,7 @@ def detect_stale_running(
                 "claim_expires = NULL, worker_pid = NULL, "
                 "last_heartbeat_at = NULL "
                 "WHERE id = ? AND status = 'running' "
+                "  AND execution_mode = 'dispatch' "
                 "  AND claim_lock IS ?",
                 (tid, row["claim_lock"]),
             )
@@ -6383,7 +6436,8 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     with write_txn(conn):
         rows = conn.execute(
             "SELECT id, worker_pid, claim_lock, started_at FROM tasks "
-            "WHERE status = 'running' AND worker_pid IS NOT NULL"
+            "WHERE status = 'running' AND worker_pid IS NOT NULL "
+            "  AND execution_mode = 'dispatch'"
         ).fetchall()
         host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
         for row in rows:
@@ -6459,6 +6513,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
                 "claim_expires = NULL, worker_pid = NULL "
                 "WHERE id = ? AND status = 'running' "
+                "  AND execution_mode = 'dispatch' "
                 "  AND worker_pid = ? AND claim_lock IS ?",
                 (row["id"], pid, row["claim_lock"]),
             )
@@ -6907,7 +6962,7 @@ def has_spawnable_ready(conn: sqlite3.Connection) -> bool:
     rows = conn.execute(
         "SELECT DISTINCT assignee FROM tasks "
         "WHERE status = 'ready' AND assignee IS NOT NULL "
-        "    AND claim_lock IS NULL"
+        "    AND claim_lock IS NULL AND execution_mode = 'dispatch'"
     ).fetchall()
     if not rows:
         return False
@@ -6933,7 +6988,7 @@ def has_spawnable_review(conn: sqlite3.Connection) -> bool:
     rows = conn.execute(
         "SELECT DISTINCT assignee FROM tasks "
         "WHERE status = 'review' AND assignee IS NOT NULL "
-        "    AND claim_lock IS NULL"
+        "    AND claim_lock IS NULL AND execution_mode = 'dispatch'"
     ).fetchall()
     if not rows:
         return False
@@ -7095,13 +7150,15 @@ def _dispatch_once_locked(
     if max_spawn is not None:
         running_count = int(
             conn.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
+                "SELECT COUNT(*) FROM tasks "
+                "WHERE status = 'running' AND execution_mode = 'dispatch'"
             ).fetchone()[0]
         )
 
     ready_rows = conn.execute(
         "SELECT id, assignee FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
+        "  AND execution_mode = 'dispatch' "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
     # Honour kanban.max_in_progress: if the board already has enough running
@@ -7110,7 +7167,8 @@ def _dispatch_once_locked(
     # pile up and time out.
     if max_in_progress is not None and ready_rows:
         in_progress = conn.execute(
-            "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
+            "SELECT COUNT(*) FROM tasks "
+            "WHERE status = 'running' AND execution_mode = 'dispatch'"
         ).fetchone()[0]
         if in_progress >= max_in_progress:
             return result
@@ -7136,6 +7194,7 @@ def _dispatch_once_locked(
         for prow in conn.execute(
             "SELECT assignee, COUNT(*) AS n FROM tasks "
             "WHERE status = 'running' AND assignee IS NOT NULL "
+            "  AND execution_mode = 'dispatch' "
             "GROUP BY assignee"
         ):
             _per_profile_running[prow["assignee"]] = int(prow["n"])
@@ -7344,6 +7403,7 @@ def _dispatch_once_locked(
     review_rows = conn.execute(
         "SELECT id, assignee FROM tasks "
         "WHERE status = 'review' AND claim_lock IS NULL "
+        "  AND execution_mode = 'dispatch' "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
     for row in review_rows:

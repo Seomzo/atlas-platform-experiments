@@ -132,6 +132,7 @@ _pending_prompt_payloads: dict[str, tuple[str, dict]] = {}
 _answers: dict[str, str] = {}
 _db = None
 _db_error: str | None = None
+_task_thread_store = None
 _stdout_lock = threading.Lock()
 _cfg_lock = threading.Lock()
 _sessions_lock = threading.RLock()  # reentrant: _close_session_by_id may run under callers that already hold it
@@ -222,6 +223,9 @@ _LONG_HANDLERS = frozenset(
         # the WS read loop and causing false "needs setup" (#50005 family).
         "setup.runtime_check",
         "setup.status",
+        "threads.create",
+        "threads.send",
+        "threads.steer",
         "session.branch",
         "session.compress",
         "session.list",
@@ -1338,6 +1342,16 @@ def _get_db():
     return _db
 
 
+def _get_task_thread_store():
+    """Return the process-local adapter over the shared Kanban database."""
+    global _task_thread_store
+    if _task_thread_store is None:
+        from altas.task_threads import TaskThreadStore
+
+        _task_thread_store = TaskThreadStore()
+    return _task_thread_store
+
+
 def _db_unavailable_error(rid, *, code: int):
     detail = _db_error or "state.db unavailable"
     return _err(rid, code, f"state.db unavailable: {detail}")
@@ -1493,6 +1507,30 @@ def _emit(event: str, sid: str, payload: dict | None = None):
     if payload is not None:
         params["payload"] = payload
     write_json({"jsonrpc": "2.0", "method": "event", "params": params})
+    if event == "threads.event":
+        return
+    try:
+        projected = _get_task_thread_store().record_gateway_event(
+            sid, event, payload
+        )
+    except Exception as exc:
+        logger.debug("Task Thread event projection failed: %s", exc)
+        return
+    for thread_event in projected:
+        _emit_task_thread_event(sid, thread_event)
+
+
+def _emit_task_thread_event(
+    sid: str, event: dict[str, Any]
+) -> None:
+    """Publish one already-durable Task Thread envelope without recursion."""
+    params: dict[str, Any] = {
+        "type": "threads.event",
+        "payload": event,
+    }
+    if sid:
+        params["session_id"] = sid
+    write_json({"jsonrpc": "2.0", "method": "event", "params": params})
 
 
 def _emit_approval_request(sid: str, data: dict | None) -> None:
@@ -1508,6 +1546,23 @@ def _emit_approval_request(sid: str, data: dict | None) -> None:
 
         payload["command"] = _redact_approval_command(payload.get("command"))
     _emit("approval.request", sid, payload)
+    approval_id = str(payload.get("approval_id") or "").strip()
+    if not approval_id:
+        return
+    try:
+        recorded = _get_task_thread_store().record_approval(
+            sid,
+            approval_id=approval_id,
+            command=str(payload.get("command") or ""),
+            description=str(payload.get("description") or ""),
+            allow_permanent=bool(payload.get("allow_permanent", False)),
+        )
+    except Exception as exc:
+        logger.debug("Task Thread approval projection failed: %s", exc)
+        return
+    if recorded is not None:
+        _, event = recorded
+        _emit_task_thread_event(sid, event)
 
 
 def _status_update(sid: str, kind: str, text: str | None = None):
@@ -9125,6 +9180,535 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"status": "interrupted"})
 
 
+# ── Atlas Task Threads: durable supervisory RPCs ─────────────────────
+
+
+def _task_thread_error(rid, exc: Exception) -> dict:
+    from altas.task_threads.store import (
+        ApprovalNotFoundError,
+        TaskThreadNotFoundError,
+    )
+
+    if isinstance(exc, (ApprovalNotFoundError, TaskThreadNotFoundError)):
+        return _err(rid, 4040, str(exc))
+    if isinstance(exc, ValueError):
+        return _err(rid, 4000, str(exc))
+    logger.exception("Task Thread RPC failed")
+    return _err(rid, 5000, f"Task Thread operation failed: {exc}")
+
+
+def _nested_rpc_result(
+    rid: Any, response: dict | None
+) -> tuple[dict | None, dict | None]:
+    if not isinstance(response, dict):
+        return None, _err(rid, 5000, "nested gateway request returned no response")
+    if response.get("error"):
+        error = response["error"]
+        return None, {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "error": {
+                "code": int(error.get("code", 5000)),
+                "message": str(error.get("message") or "gateway request failed"),
+            },
+        }
+    result = response.get("result")
+    if not isinstance(result, dict):
+        return None, _err(rid, 5000, "nested gateway response was malformed")
+    return result, None
+
+
+def _push_task_thread_events(
+    store,
+    *,
+    after_sequence: int,
+    thread_id: str,
+    runtime_session_id: str = "",
+) -> None:
+    events, _ = store.list_events(
+        after_sequence=after_sequence,
+        thread_id=thread_id,
+        limit=500,
+    )
+    for event in events:
+        _emit_task_thread_event(runtime_session_id, event)
+
+
+def _ensure_task_thread_runtime(
+    rid: Any,
+    store,
+    thread: dict,
+) -> tuple[str | None, dict | None]:
+    try:
+        thread = store.materialize_workspace(thread["id"])
+    except Exception as exc:
+        return None, _task_thread_error(rid, exc)
+    runtime_session_id = str(
+        thread.get("runtime_session_id") or ""
+    ).strip()
+    if runtime_session_id:
+        with _sessions_lock:
+            live = _sessions.get(runtime_session_id)
+        if live is not None and not live.get("_finalized"):
+            return runtime_session_id, None
+
+    worker_profile_id = str(thread["worker_profile_id"])
+    stored_session_id = str(
+        thread.get("stored_session_id") or ""
+    ).strip()
+    if stored_session_id:
+        resumed, error = _nested_rpc_result(
+            rid,
+            _methods["session.resume"](
+                f"{rid}:thread-resume",
+                {
+                    "profile": worker_profile_id,
+                    "session_id": stored_session_id,
+                    "source": "desktop",
+                },
+            ),
+        )
+        if error:
+            return None, error
+        assert resumed is not None
+        runtime_session_id = str(
+            resumed.get("session_id") or ""
+        ).strip()
+        if not runtime_session_id:
+            return None, _err(
+                rid, 5000, "resumed worker session returned no runtime id"
+            )
+        store.bind_runtime(
+            thread["id"],
+            stored_session_id=stored_session_id,
+            runtime_session_id=runtime_session_id,
+        )
+        return runtime_session_id, None
+
+    create_params: dict[str, Any] = {
+        "cols": 96,
+        "profile": worker_profile_id,
+        "source": "desktop",
+        "title": f"{thread['title']} · Atlas Task Thread",
+    }
+    workspace_path = str(thread.get("workspace_path") or "").strip()
+    if workspace_path and os.path.isdir(workspace_path):
+        create_params["cwd"] = workspace_path
+    created, error = _nested_rpc_result(
+        rid,
+        _methods["session.create"](
+            f"{rid}:thread-create",
+            create_params,
+        ),
+    )
+    if error:
+        return None, error
+    assert created is not None
+    runtime_session_id = str(created.get("session_id") or "").strip()
+    stored_session_id = str(
+        created.get("stored_session_id") or ""
+    ).strip()
+    if not runtime_session_id or not stored_session_id:
+        return None, _err(
+            rid,
+            5000,
+            "worker session did not return durable and runtime ids",
+        )
+    store.bind_runtime(
+        thread["id"],
+        stored_session_id=stored_session_id,
+        runtime_session_id=runtime_session_id,
+    )
+    return runtime_session_id, None
+
+
+@method("threads.create")
+def _(rid, params: dict) -> dict:
+    store = _get_task_thread_store()
+    try:
+        _, before_sequence = store.list_threads(include_archived=True)
+        thread = store.create_thread(
+            idempotency_key=params.get("idempotency_key"),
+            title=params.get("title"),
+            goal=params.get("goal"),
+            worker_profile_id=params.get("worker_profile_id"),
+            voice_workspace_id=params.get("voice_workspace_id"),
+            project_id=params.get("project_id"),
+            workspace_mode=params.get("workspace_mode", "none"),
+        )
+        if thread["status"] in {"completed", "failed", "interrupted", "archived"}:
+            _push_task_thread_events(
+                store,
+                after_sequence=before_sequence,
+                thread_id=thread["id"],
+            )
+            return _ok(rid, {"thread": thread})
+
+        turn, created_turn = store.create_turn(
+            thread["id"],
+            kind="initial",
+            instruction=thread["goal"],
+            idempotency_key=f"{params.get('idempotency_key')}:initial",
+        )
+        runtime_session_id, error = _ensure_task_thread_runtime(
+            rid, store, thread
+        )
+        if error:
+            store.set_turn_status(
+                thread["id"], "failed", turn_id=turn["id"]
+            )
+            store.set_status(
+                thread["id"],
+                "failed",
+                blocker=error["error"]["message"],
+                turn_id=turn["id"],
+            )
+            _push_task_thread_events(
+                store,
+                after_sequence=before_sequence,
+                thread_id=thread["id"],
+            )
+            return error
+        assert runtime_session_id is not None
+
+        if created_turn:
+            store.set_status(
+                thread["id"], "starting", turn_id=turn["id"]
+            )
+            _, submit_error = _nested_rpc_result(
+                rid,
+                _methods["prompt.submit"](
+                    f"{rid}:thread-submit",
+                    {
+                        "session_id": runtime_session_id,
+                        "text": thread["goal"],
+                    },
+                ),
+            )
+            if submit_error:
+                store.set_turn_status(
+                    thread["id"], "failed", turn_id=turn["id"]
+                )
+                store.set_status(
+                    thread["id"],
+                    "failed",
+                    blocker=submit_error["error"]["message"],
+                    turn_id=turn["id"],
+                )
+                _push_task_thread_events(
+                    store,
+                    after_sequence=before_sequence,
+                    thread_id=thread["id"],
+                    runtime_session_id=runtime_session_id,
+                )
+                return submit_error
+
+        thread = store.get_thread(thread["id"])
+        _push_task_thread_events(
+            store,
+            after_sequence=before_sequence,
+            thread_id=thread["id"],
+            runtime_session_id=runtime_session_id,
+        )
+        return _ok(rid, {"thread": thread})
+    except Exception as exc:
+        return _task_thread_error(rid, exc)
+
+
+@method("threads.list")
+def _(rid, params: dict) -> dict:
+    try:
+        threads, cursor = _get_task_thread_store().list_threads(
+            include_archived=bool(params.get("include_archived", False))
+        )
+        return _ok(rid, {"threads": threads, "cursor": cursor})
+    except Exception as exc:
+        return _task_thread_error(rid, exc)
+
+
+@method("threads.get")
+def _(rid, params: dict) -> dict:
+    try:
+        thread = _get_task_thread_store().get_thread(
+            params.get("thread_id")
+        )
+        return _ok(rid, {"thread": thread})
+    except Exception as exc:
+        return _task_thread_error(rid, exc)
+
+
+def _submit_task_thread_instruction(
+    rid: Any,
+    params: dict,
+    *,
+    steer: bool,
+) -> dict:
+    store = _get_task_thread_store()
+    try:
+        thread_id = str(params.get("thread_id") or "").strip()
+        _, before_sequence = store.list_threads(include_archived=True)
+        turn, created_turn = store.create_turn(
+            thread_id,
+            kind="steer" if steer else "followup",
+            instruction=params.get("instruction"),
+            idempotency_key=params.get("idempotency_key"),
+        )
+        thread = store.get_thread(thread_id)
+        runtime_session_id, error = _ensure_task_thread_runtime(
+            rid, store, thread
+        )
+        if error:
+            if created_turn:
+                store.set_turn_status(
+                    thread_id, "failed", turn_id=turn["id"]
+                )
+            _push_task_thread_events(
+                store,
+                after_sequence=before_sequence,
+                thread_id=thread_id,
+            )
+            return error
+        assert runtime_session_id is not None
+
+        accepted = "queued"
+        if created_turn:
+            nested_result = None
+            nested_error = None
+            if steer:
+                nested_result, nested_error = _nested_rpc_result(
+                    rid,
+                    _methods["session.steer"](
+                        f"{rid}:thread-steer",
+                        {
+                            "session_id": runtime_session_id,
+                            "text": turn["instruction"],
+                        },
+                    ),
+                )
+                if (
+                    nested_error is None
+                    and nested_result is not None
+                    and nested_result.get("status") == "queued"
+                ):
+                    accepted = "steered"
+                    store.set_turn_status(
+                        thread_id, "running", turn_id=turn["id"]
+                    )
+                else:
+                    nested_result = None
+
+            if not steer or nested_result is None:
+                nested_result, nested_error = _nested_rpc_result(
+                    rid,
+                    _methods["prompt.submit"](
+                        f"{rid}:thread-send",
+                        {
+                            "session_id": runtime_session_id,
+                            "text": turn["instruction"],
+                        },
+                    ),
+                )
+                if nested_error:
+                    store.set_turn_status(
+                        thread_id, "failed", turn_id=turn["id"]
+                    )
+                    _push_task_thread_events(
+                        store,
+                        after_sequence=before_sequence,
+                        thread_id=thread_id,
+                        runtime_session_id=runtime_session_id,
+                    )
+                    return nested_error
+                accepted = (
+                    "queued"
+                    if nested_result
+                    and nested_result.get("status") == "queued"
+                    else "started"
+                )
+            store.set_status(
+                thread_id,
+                "running",
+                turn_id=turn["id"],
+                allow_reopen=True,
+            )
+        else:
+            accepted = (
+                "started"
+                if turn["status"] == "running"
+                else "queued"
+            )
+
+        thread = store.get_thread(thread_id)
+        _push_task_thread_events(
+            store,
+            after_sequence=before_sequence,
+            thread_id=thread_id,
+            runtime_session_id=runtime_session_id,
+        )
+        return _ok(
+            rid,
+            {
+                "accepted": accepted,
+                "thread": thread,
+                "turn_id": turn["id"],
+            },
+        )
+    except Exception as exc:
+        return _task_thread_error(rid, exc)
+
+
+@method("threads.send")
+def _(rid, params: dict) -> dict:
+    return _submit_task_thread_instruction(rid, params, steer=False)
+
+
+@method("threads.steer")
+def _(rid, params: dict) -> dict:
+    return _submit_task_thread_instruction(rid, params, steer=True)
+
+
+@method("threads.interrupt")
+def _(rid, params: dict) -> dict:
+    store = _get_task_thread_store()
+    try:
+        thread_id = str(params.get("thread_id") or "").strip()
+        idempotency_key = str(
+            params.get("idempotency_key") or ""
+        ).strip()
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required")
+        _, before_sequence = store.list_threads(include_archived=True)
+        thread = store.get_thread(thread_id)
+        binding = store.runtime_binding(thread_id)
+        runtime_session_id = str(
+            binding.get("runtime_session_id") or ""
+        ).strip()
+        if runtime_session_id:
+            _, interrupt_error = _nested_rpc_result(
+                rid,
+                _methods["session.interrupt"](
+                    f"{rid}:thread-interrupt",
+                    {"session_id": runtime_session_id},
+                ),
+            )
+            if interrupt_error:
+                return interrupt_error
+        store.set_turn_status(
+            thread_id,
+            "interrupted",
+            correlation_id=idempotency_key,
+        )
+        for approval in store.list_approvals(thread_id=thread_id):
+            if approval["status"] == "pending":
+                store.resolve_approval(
+                    approval["approval_id"], "deny"
+                )
+        thread, _ = store.set_status(
+            thread_id,
+            "interrupted",
+            correlation_id=idempotency_key,
+        )
+        _push_task_thread_events(
+            store,
+            after_sequence=before_sequence,
+            thread_id=thread_id,
+            runtime_session_id=runtime_session_id,
+        )
+        return _ok(rid, {"thread": thread})
+    except Exception as exc:
+        return _task_thread_error(rid, exc)
+
+
+@method("threads.focus")
+def _(rid, params: dict) -> dict:
+    store = _get_task_thread_store()
+    try:
+        _, before_sequence = store.list_threads(include_archived=True)
+        thread_id, event = store.focus_thread(
+            params.get("voice_workspace_id"),
+            params.get("thread_id"),
+        )
+        _emit_task_thread_event("", event)
+        # The event was pushed directly above; keep the cursor read here as a
+        # contract assertion that focus emitted one durable mutation.
+        events, _ = store.list_events(
+            after_sequence=before_sequence,
+            thread_id=thread_id,
+        )
+        if not events:
+            raise RuntimeError("focus mutation emitted no durable event")
+        return _ok(rid, {"focused_thread_id": thread_id})
+    except Exception as exc:
+        return _task_thread_error(rid, exc)
+
+
+@method("threads.events")
+def _(rid, params: dict) -> dict:
+    try:
+        events, cursor = _get_task_thread_store().list_events(
+            after_sequence=params.get("after_sequence", 0),
+            thread_id=(
+                str(params.get("thread_id") or "").strip() or None
+            ),
+            limit=params.get("limit", 200),
+        )
+        return _ok(rid, {"events": events, "cursor": cursor})
+    except Exception as exc:
+        return _task_thread_error(rid, exc)
+
+
+@method("approvals.list")
+def _(rid, params: dict) -> dict:
+    try:
+        approvals = _get_task_thread_store().list_approvals(
+            thread_id=(
+                str(params.get("thread_id") or "").strip() or None
+            )
+        )
+        return _ok(rid, {"approvals": approvals})
+    except Exception as exc:
+        return _task_thread_error(rid, exc)
+
+
+@method("approvals.respond")
+def _(rid, params: dict) -> dict:
+    store = _get_task_thread_store()
+    try:
+        approval_id = str(
+            params.get("approval_id") or ""
+        ).strip()
+        choice = str(params.get("choice") or "").strip()
+        approval, binding = store.pending_approval(approval_id)
+        runtime_session_id = str(
+            binding.get("runtime_session_id") or ""
+        ).strip()
+        if not runtime_session_id:
+            raise ValueError("approval has no live runtime session")
+        response, error = _nested_rpc_result(
+            rid,
+            _methods["approval.respond"](
+                f"{rid}:approval-respond",
+                {
+                    "approval_id": approval_id,
+                    "choice": choice,
+                    "session_id": runtime_session_id,
+                },
+            ),
+        )
+        if error:
+            return error
+        assert response is not None
+        resolved = response.get("approval")
+        if not isinstance(resolved, dict):
+            resolved, event = store.resolve_approval(
+                approval["approval_id"], choice
+            )
+            _emit_task_thread_event(runtime_session_id, event)
+        return _ok(rid, {"approval": resolved})
+    except Exception as exc:
+        return _task_thread_error(rid, exc)
+
+
 # ── Delegation: subagent tree observability + controls ───────────────
 # Powers the TUI's /agents overlay (see ui-tui/src/components/agentsOverlay).
 # The registry lives in tools/delegate_tool — these handlers are thin
@@ -11242,18 +11826,46 @@ def _(rid, params: dict) -> dict:
     if err:
         return err
     try:
+        approval_id = str(params.get("approval_id") or "").strip() or None
+        choice = str(params.get("choice", "deny"))
+        if approval_id:
+            from altas.task_threads.contracts import APPROVAL_CHOICES
+            from altas.task_threads.store import ApprovalNotFoundError
+
+            if choice not in APPROVAL_CHOICES:
+                return _err(
+                    rid,
+                    4000,
+                    f"choice must be one of {sorted(APPROVAL_CHOICES)}",
+                )
+
         from tools.approval import resolve_gateway_approval
 
-        return _ok(
-            rid,
-            {
-                "resolved": resolve_gateway_approval(
-                    session["session_key"],
-                    params.get("choice", "deny"),
-                    resolve_all=params.get("all", False),
-                )
-            },
+        resolved = resolve_gateway_approval(
+            session["session_key"],
+            choice,
+            resolve_all=params.get("all", False),
+            approval_id=approval_id,
         )
+        result: dict[str, Any] = {"resolved": resolved}
+        if approval_id and resolved:
+            try:
+                approval, event = _get_task_thread_store().resolve_approval(
+                    approval_id,
+                    choice,
+                )
+                result["approval"] = approval
+                thread = _get_task_thread_store().get_thread(
+                    approval["thread_id"]
+                )
+                if thread.get("runtime_session_id"):
+                    _emit_task_thread_event(
+                        thread["runtime_session_id"],
+                        event,
+                    )
+            except ApprovalNotFoundError:
+                pass
+        return _ok(rid, result)
     except Exception as e:
         return _err(rid, 5004, str(e))
 
