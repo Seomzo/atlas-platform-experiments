@@ -175,6 +175,112 @@ def test_events_focus_turns_and_approvals_replay_by_sequence(
     } <= {event["name"] for event in replay}
 
 
+def test_gateway_restart_reconciliation_is_fail_closed_and_idempotent(
+    task_thread_store,
+):
+    interrupted = _create_thread(task_thread_store, 0)
+    interrupted_turn, _ = task_thread_store.create_turn(
+        interrupted["id"],
+        kind="initial",
+        instruction=interrupted["goal"],
+        idempotency_key="restart-turn",
+    )
+    task_thread_store.bind_runtime(
+        interrupted["id"],
+        stored_session_id="stored-dead",
+        runtime_session_id="runtime-dead",
+    )
+    task_thread_store.set_turn_status(
+        interrupted["id"],
+        "running",
+        turn_id=interrupted_turn["id"],
+    )
+    task_thread_store.set_status(
+        interrupted["id"],
+        "running",
+        turn_id=interrupted_turn["id"],
+    )
+    task_thread_store.record_approval(
+        "runtime-dead",
+        approval_id="approval-dead",
+        command="rm example",
+        description="approval waiter is process-local",
+        allow_permanent=False,
+    )
+
+    live = _create_thread(task_thread_store, 1)
+    task_thread_store.bind_runtime(
+        live["id"],
+        stored_session_id="stored-live",
+        runtime_session_id="runtime-live",
+    )
+    task_thread_store.set_status(live["id"], "running")
+
+    completed = _create_thread(task_thread_store, 2)
+    task_thread_store.bind_runtime(
+        completed["id"],
+        stored_session_id="stored-complete",
+        runtime_session_id="runtime-complete",
+    )
+    task_thread_store.set_status(
+        completed["id"],
+        "completed",
+        summary="already done",
+    )
+    _, before_reconcile = task_thread_store.list_events()
+
+    reconciled = task_thread_store.reconcile_orphaned_runtimes(
+        {"runtime-live"}
+    )
+
+    assert [thread["id"] for thread in reconciled] == [interrupted["id"]]
+    interrupted_after = task_thread_store.get_thread(interrupted["id"])
+    assert interrupted_after["status"] == "interrupted"
+    assert interrupted_after["runtime_session_id"] is None
+    assert interrupted_after["stored_session_id"] == "stored-dead"
+    assert "Gateway restarted" in interrupted_after["blocker"]
+    approval = task_thread_store.list_approvals(
+        thread_id=interrupted["id"]
+    )[0]
+    assert approval["status"] == "resolved"
+    assert approval["choice"] == "deny"
+
+    live_after = task_thread_store.get_thread(live["id"])
+    assert live_after["status"] == "running"
+    assert live_after["runtime_session_id"] == "runtime-live"
+    completed_after = task_thread_store.get_thread(completed["id"])
+    assert completed_after["status"] == "completed"
+    assert completed_after["runtime_session_id"] is None
+
+    with kb.connect_closing(task_thread_store._db_path) as conn:
+        turn = conn.execute(
+            "SELECT status FROM atlas_task_turns WHERE id = ?",
+            (interrupted_turn["id"],),
+        ).fetchone()
+    assert turn["status"] == "interrupted"
+
+    replay, after_reconcile = task_thread_store.list_events(
+        after_sequence=before_reconcile,
+        thread_id=interrupted["id"],
+    )
+    assert {
+        "approval.resolved",
+        "turn.failed",
+        "thread.status_changed",
+        "thread.interrupted",
+    } <= {event["name"] for event in replay}
+    assert any(
+        event["payload"].get("reason") == "gateway_restart"
+        for event in replay
+    )
+
+    assert task_thread_store.reconcile_orphaned_runtimes(
+        {"runtime-live"}
+    ) == []
+    _, final_cursor = task_thread_store.list_events()
+    assert final_cursor == after_reconcile
+
+
 def test_isolated_project_worktree_materializes_and_rejects_branch_collision(
     task_thread_store,
     tmp_path,

@@ -1348,7 +1348,23 @@ def _get_task_thread_store():
     if _task_thread_store is None:
         from altas.task_threads import TaskThreadStore
 
-        _task_thread_store = TaskThreadStore()
+        store = TaskThreadStore()
+        with _sessions_lock:
+            live_runtime_ids = {
+                sid
+                for sid, session in _sessions.items()
+                if not session.get("_finalized")
+            }
+        reconciled = store.reconcile_orphaned_runtimes(
+            live_runtime_ids
+        )
+        if reconciled:
+            logger.warning(
+                "Interrupted %d Task Thread runtime(s) orphaned by a "
+                "gateway restart",
+                len(reconciled),
+            )
+        _task_thread_store = store
     return _task_thread_store
 
 

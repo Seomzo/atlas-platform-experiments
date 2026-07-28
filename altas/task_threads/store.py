@@ -15,7 +15,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 from hermes_cli import kanban_db as kb
 
@@ -39,6 +39,10 @@ _EVENT_KIND_PREFIXES = (
     "turn.",
     "worker.",
     "workspace.",
+)
+
+_ORPHANED_RUNTIME_REASON = (
+    "Gateway restarted before the active Task Thread turn completed."
 )
 
 _ADAPTER_SCHEMA = """
@@ -404,6 +408,163 @@ class TaskThreadStore:
                 raise TaskThreadNotFoundError(thread_id)
             return self._thread_from_connection(conn, thread_id)
 
+    def reconcile_orphaned_runtimes(
+        self,
+        live_runtime_session_ids: Iterable[str],
+    ) -> list[dict[str, Any]]:
+        """Fail closed for Task Thread runtimes lost with a gateway process.
+
+        Runtime sessions are process-local, while Task Threads, turns, and
+        approvals are durable. After a backend restart, a missing runtime
+        cannot honestly remain ``running`` or ``waiting_approval``. Clear each
+        stale binding, deny approvals whose waiter is gone, and interrupt
+        unfinished work. A later explicit instruction can resume the stored
+        Hermes session and reopen the same Task Thread.
+        """
+        live_ids = {
+            str(runtime_id).strip()
+            for runtime_id in live_runtime_session_ids
+            if str(runtime_id).strip()
+        }
+        now = int(time.time())
+        reconciled: list[dict[str, Any]] = []
+        with self._connection() as conn, kb.write_txn(conn):
+            rows = conn.execute(
+                """
+                SELECT a.task_id, a.runtime_session_id, t.status
+                  FROM atlas_task_threads a
+                  JOIN tasks t ON t.id = a.task_id
+                 WHERE a.runtime_session_id IS NOT NULL
+                   AND a.runtime_session_id != ''
+                 ORDER BY a.task_id
+                """
+            ).fetchall()
+            for row in rows:
+                runtime_session_id = str(row["runtime_session_id"])
+                if runtime_session_id in live_ids:
+                    continue
+
+                thread_id = str(row["task_id"])
+                previous = DB_TO_THREAD_STATUS.get(
+                    str(row["status"]), "failed"
+                )
+                conn.execute(
+                    """
+                    UPDATE atlas_task_threads
+                       SET runtime_session_id = NULL, updated_at = ?
+                     WHERE task_id = ? AND runtime_session_id = ?
+                    """,
+                    (now, thread_id, runtime_session_id),
+                )
+                if previous in TERMINAL_THREAD_STATUSES:
+                    continue
+
+                correlation_id = (
+                    f"gateway-restart:{runtime_session_id}"
+                )
+                pending_approvals = conn.execute(
+                    """
+                    SELECT id FROM atlas_approval_requests
+                     WHERE task_id = ? AND status = 'pending'
+                     ORDER BY created_at ASC, id ASC
+                    """,
+                    (thread_id,),
+                ).fetchall()
+                for approval in pending_approvals:
+                    approval_id = str(approval["id"])
+                    conn.execute(
+                        """
+                        UPDATE atlas_approval_requests
+                           SET status = 'resolved', choice = 'deny',
+                               resolved_at = ?
+                         WHERE id = ? AND status = 'pending'
+                        """,
+                        (now, approval_id),
+                    )
+                    self._append_event(
+                        conn,
+                        thread_id,
+                        "approval.resolved",
+                        {
+                            "approval_id": approval_id,
+                            "choice": "deny",
+                            "reason": "gateway_restart",
+                        },
+                        correlation_id=approval_id,
+                        now=now,
+                    )
+
+                open_turns = conn.execute(
+                    """
+                    SELECT id FROM atlas_task_turns
+                     WHERE task_id = ? AND status IN ('queued', 'running')
+                     ORDER BY created_at ASC, id ASC
+                    """,
+                    (thread_id,),
+                ).fetchall()
+                for turn in open_turns:
+                    turn_id = str(turn["id"])
+                    conn.execute(
+                        """
+                        UPDATE atlas_task_turns
+                           SET status = 'interrupted', completed_at = ?
+                         WHERE id = ?
+                        """,
+                        (now, turn_id),
+                    )
+                    self._append_event(
+                        conn,
+                        thread_id,
+                        "turn.failed",
+                        {
+                            "status": "interrupted",
+                            "reason": "gateway_restart",
+                        },
+                        turn_id=turn_id,
+                        correlation_id=correlation_id,
+                        now=now,
+                    )
+
+                conn.execute(
+                    """
+                    UPDATE tasks
+                       SET status = 'cancelled', completed_at = ?,
+                           last_failure_error = ?
+                     WHERE id = ?
+                    """,
+                    (now, _ORPHANED_RUNTIME_REASON, thread_id),
+                )
+                status_event = self._append_event(
+                    conn,
+                    thread_id,
+                    "thread.status_changed",
+                    {
+                        "from": previous,
+                        "to": "interrupted",
+                        "summary": None,
+                        "blocker": _ORPHANED_RUNTIME_REASON,
+                    },
+                    correlation_id=correlation_id,
+                    now=now,
+                )
+                self._append_event(
+                    conn,
+                    thread_id,
+                    "thread.interrupted",
+                    {
+                        "summary": None,
+                        "blocker": _ORPHANED_RUNTIME_REASON,
+                        "reason": "gateway_restart",
+                    },
+                    correlation_id=correlation_id,
+                    causation_id=status_event["event_id"],
+                    now=now,
+                )
+                reconciled.append(
+                    self._thread_from_connection(conn, thread_id)
+                )
+        return reconciled
+
     def runtime_binding(self, thread_id: str) -> dict[str, str | None]:
         with self._connection() as conn:
             row = self._adapter_row(conn, thread_id)
@@ -549,7 +710,7 @@ class TaskThreadStore:
                    SET status = ?,
                        completed_at = ?,
                        result = COALESCE(?, result),
-                       last_failure_error = COALESCE(?, last_failure_error)
+                       last_failure_error = ?
                  WHERE id = ?
                 """,
                 (

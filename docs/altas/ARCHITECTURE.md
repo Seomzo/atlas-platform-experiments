@@ -179,6 +179,33 @@ remains a later deployment milestone.
 Only the minimum fail-closed hook belongs in upstream execution code. Billing,
 Tekion behavior, customer UI, and product policy remain in Atlas modules.
 
+### Native voice Task Threads
+
+The local native-voice demo adds a supervisory Task Thread adapter without
+creating a second scheduler or event authority:
+
+- Existing Kanban `tasks` and `task_events` remain authoritative for durable
+  identity, status, and ordered replay.
+- Atlas-owned adapter tables persist worker-profile bindings, durable/runtime
+  session correlation, turns, voice focus, and immutable approval IDs.
+- The versioned client and JSON-RPC contract lives in
+  `apps/shared/src/task-thread-contract.ts`; the gateway implements
+  `threads.*` plus approval list/respond methods and emits `threads.event`
+  envelopes.
+- Runtime session IDs are process-local. If the gateway restarts, it clears
+  stale runtime bindings, denies pending approvals whose waiter disappeared,
+  and records unfinished turns and threads as interrupted. It does not
+  silently replay potentially consequential work. A later explicit
+  instruction resumes the same durable Hermes session and reopens the same
+  Task Thread.
+- Interactive Task Threads use `execution_mode = 'interactive'` and are
+  excluded from Kanban dispatcher claim, spawn, timeout, and crash-recovery
+  accounting.
+
+This path is a local product demo only. It does not authorize production
+dealership data, outbound communication, deployment, or a Realtime voice
+provider migration.
+
 ### Fixed-ops workflow pack
 
 The prototype contains one named capability:

@@ -132,6 +132,131 @@ def test_task_thread_rpc_vertical_slice(monkeypatch, tmp_path):
         reset_hermes_home_override(token)
 
 
+def test_gateway_restart_interrupts_stale_work_then_resumes_explicitly(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    token = set_hermes_home_override(home)
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(home / "kanban.db"))
+    store = TaskThreadStore(db_path=home / "kanban.db")
+    frames: list[dict] = []
+    resume_calls: list[dict] = []
+    submit_calls: list[dict] = []
+
+    thread = store.create_thread(
+        idempotency_key="restart-thread",
+        title="Restart-safe thread",
+        goal="Finish the durable work",
+        worker_profile_id="worker",
+    )
+    turn, _ = store.create_turn(
+        thread["id"],
+        kind="initial",
+        instruction=thread["goal"],
+        idempotency_key="restart-initial-turn",
+    )
+    store.bind_runtime(
+        thread["id"],
+        stored_session_id="stored-before-restart",
+        runtime_session_id="runtime-before-restart",
+    )
+    store.set_turn_status(thread["id"], "running", turn_id=turn["id"])
+    store.set_status(thread["id"], "running", turn_id=turn["id"])
+    _, before_restart = store.list_events()
+
+    def fake_session_resume(rid, params):
+        resume_calls.append(dict(params))
+        server._sessions["runtime-after-restart"] = {
+            "_finalized": False,
+            "session_key": "stored-before-restart",
+        }
+        return {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "result": {"session_id": "runtime-after-restart"},
+        }
+
+    def fake_prompt_submit(rid, params):
+        submit_calls.append(dict(params))
+        return {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "result": {"status": "started"},
+        }
+
+    monkeypatch.setattr(server, "_task_thread_store", None)
+    monkeypatch.setattr(server, "write_json", frames.append)
+    monkeypatch.setitem(
+        server._methods, "session.resume", fake_session_resume
+    )
+    monkeypatch.setitem(
+        server._methods, "prompt.submit", fake_prompt_submit
+    )
+    server._sessions.pop("runtime-before-restart", None)
+
+    try:
+        restarted_store = server._get_task_thread_store()
+        interrupted = restarted_store.get_thread(thread["id"])
+        assert interrupted["status"] == "interrupted"
+        assert interrupted["runtime_session_id"] is None
+        assert "Gateway restarted" in interrupted["blocker"]
+
+        params = {
+            "thread_id": thread["id"],
+            "instruction": "Continue after the restart",
+            "idempotency_key": "restart-followup",
+        }
+        response = server._methods["threads.send"]("send", params)
+
+        assert "error" not in response
+        resumed = response["result"]["thread"]
+        assert response["result"]["accepted"] == "started"
+        assert resumed["status"] == "running"
+        assert resumed["blocker"] is None
+        assert resumed["stored_session_id"] == "stored-before-restart"
+        assert resumed["runtime_session_id"] == "runtime-after-restart"
+        assert resume_calls == [
+            {
+                "profile": "worker",
+                "session_id": "stored-before-restart",
+                "source": "desktop",
+            }
+        ]
+        assert submit_calls == [
+            {
+                "session_id": "runtime-after-restart",
+                "text": "Continue after the restart",
+            }
+        ]
+
+        duplicate = server._methods["threads.send"](
+            "send-duplicate", params
+        )
+        assert "error" not in duplicate
+        assert len(resume_calls) == 1
+        assert len(submit_calls) == 1
+
+        replay = server._methods["threads.events"](
+            "events",
+            {
+                "after_sequence": before_restart,
+                "thread_id": thread["id"],
+            },
+        )["result"]
+        sequences = [event["sequence"] for event in replay["events"]]
+        assert sequences == sorted(sequences)
+        assert {
+            "thread.interrupted",
+            "turn.queued",
+            "thread.status_changed",
+        } <= {event["name"] for event in replay["events"]}
+    finally:
+        server._sessions.pop("runtime-after-restart", None)
+        reset_hermes_home_override(token)
+
+
 def test_approval_rpc_resolves_exact_task_thread_request(
     monkeypatch,
     tmp_path,

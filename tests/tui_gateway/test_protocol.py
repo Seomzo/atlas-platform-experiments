@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import sys
 import threading
 import time
@@ -22,7 +23,14 @@ def _restore_stdout():
 @pytest.fixture()
 def server():
     with patch.dict("sys.modules", {
-        "hermes_constants": MagicMock(get_hermes_home=MagicMock(return_value="/tmp/hermes_test")),
+        # Resolve the autouse fixture's per-test HERMES_HOME dynamically.
+        # A fixed /tmp path persists active-session leases across test runs
+        # and defeats the suite's isolation contract.
+        "hermes_constants": MagicMock(
+            get_hermes_home=MagicMock(
+                side_effect=lambda: os.environ["HERMES_HOME"],
+            )
+        ),
         "hermes_cli.env_loader": MagicMock(),
         "hermes_cli.banner": MagicMock(),
         "hermes_state": MagicMock(),
@@ -42,6 +50,7 @@ def server():
         mod._pending.clear()
         mod._pending_prompt_payloads.clear()
         mod._answers.clear()
+        mod._task_thread_store = None
 
 
 @pytest.fixture()
