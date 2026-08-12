@@ -153,3 +153,7 @@ apps/desktop/demo/
 # PR body is the archive. See the hermes-agent-dev skill's
 # pr-infographic-workflow reference (storage rule + lapse #8 / #COMMIT-1).
 infographic/
+
+# M01 mobile-readiness evidence is machine-local. Screenshots and the local
+# environment report may contain host-specific metadata even when redacted.
+/artifacts/mobile-readiness/
