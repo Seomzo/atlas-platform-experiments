@@ -3,7 +3,7 @@
 ## Status
 
 - Branch: `codex/mobile-m01-discovery`
-- Draft PR: pending
+- Draft PR: [#6](https://github.com/Seomzo/atlas-platform-experiments/pull/6)
 - Baseline: `4934f94eae2d02e039a8bb430f0cfb27075cc40e`
 - Baseline relation: audit-start HEAD, local `origin/main`, and live
   `refs/heads/main` were equal
