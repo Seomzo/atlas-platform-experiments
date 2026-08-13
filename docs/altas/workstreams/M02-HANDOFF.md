@@ -3,7 +3,7 @@
 ## Status
 
 - Branch: `codex/mobile-m02-text-relay`
-- Draft PR: pending
+- Draft PR: [#8](https://github.com/Seomzo/atlas-platform-experiments/pull/8)
 - Baseline: WS-05 tip `fb3a1520b4c8d33aa2d42b32aee20bf549b7213d`
 - Last validated: 2026-08-12
 
