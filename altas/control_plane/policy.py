@@ -254,7 +254,7 @@ class PolicyEngine:
             or agent["tenant_id"] != tenant_id
             or agent["store_id"] != store_id
             or agent["status"] != "active"
-            or agent.get("device_id") not in {None, device_id}
+            or agent.get("device_id") != device_id
         ):
             return self._decision(
                 False, "agent_inactive", authenticated_device, store_id, agent_id, None

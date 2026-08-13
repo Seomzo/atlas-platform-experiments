@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import hmac
+import secrets
+import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -27,12 +30,22 @@ from altas.cortex.managed_dispatch import (
 
 from .config import ControlPlaneSettings
 from .database import Database
+from .identity import (
+    DeterministicIdentityProvider,
+    IdentityVerificationError,
+    IdentityVerifier,
+    UnconfiguredIdentityProvider,
+)
 from .model_gateway import ModelGateway, ModelGatewayError
 from .policy import PolicyDecision, PolicyDenied, PolicyEngine, not_expired
 from .repository import (
+    AccountAccessDenied,
     ControlPlaneRepository,
     CortexDispatchLimitExceeded,
+    DEMO_USER_SUBJECT,
     DemoSeed,
+    DeviceCredentialConflict,
+    EnrollmentNotRedeemable,
     IdempotencyConflict,
     InvalidJobClaim,
     ModelUsageLimitExceeded,
@@ -40,6 +53,12 @@ from .repository import (
 from .schemas import (
     ChatCompletionRequest,
     CortexMaintenanceRequest,
+    DevIdentityTokenRequest,
+    DeviceCredentialRotationRequest,
+    DeviceEnrollmentRedemptionRequest,
+    DeviceEnrollmentRequest,
+    DeviceRevocationRequest,
+    DeviceSessionRequest,
     HeartbeatRequest,
     JobCompletionRequest,
     PolicyEvaluationRequest,
@@ -47,7 +66,17 @@ from .schemas import (
     RequeueJobRequest,
     ToggleRequest,
 )
-from .security import LeaseSigner, hash_secret
+from .security import (
+    DeviceSessionSigner,
+    InvalidDeviceProof,
+    InvalidDeviceSession,
+    LeaseSigner,
+    device_key_rotation_challenge,
+    device_public_key_thumbprint,
+    device_session_challenge,
+    hash_secret,
+    verify_device_signature,
+)
 
 
 AdminResource = Literal[
@@ -104,7 +133,11 @@ def _policy_error(decision: PolicyDecision) -> HTTPException:
     )
 
 
-def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
+def create_app(
+    settings: ControlPlaneSettings | None = None,
+    *,
+    identity_verifier: IdentityVerifier | None = None,
+) -> FastAPI:
     """Create an isolated control-plane application.
 
     Supplying settings makes tests and embedded deployments deterministic. The
@@ -119,6 +152,13 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
         repository.seed_demo() if settings.seed_demo_data else None
     )
     lease_signer = LeaseSigner(settings.lease_signing_key)
+    device_session_signer = DeviceSessionSigner(settings.lease_signing_key)
+    if identity_verifier is None:
+        identity_verifier = (
+            DeterministicIdentityProvider(settings.lease_signing_key)
+            if settings.seed_demo_data
+            else UnconfiguredIdentityProvider()
+        )
     policy = PolicyEngine(
         repository,
         lease_signer,
@@ -138,6 +178,8 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
     app.state.database = database
     app.state.repository = repository
     app.state.lease_signer = lease_signer
+    app.state.device_session_signer = device_session_signer
+    app.state.identity_verifier = identity_verifier
     app.state.policy = policy
     app.state.demo_seed = demo_seed
     static_directory = Path(__file__).with_name("static")
@@ -199,6 +241,7 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
         return response
 
     device_bearer = HTTPBearer(auto_error=False, scheme_name="AtlasDeviceBearer")
+    account_bearer = HTTPBearer(auto_error=False, scheme_name="AtlasAccountBearer")
     admin_bearer = HTTPBearer(auto_error=False, scheme_name="AtlasAdminBearer")
 
     def require_device(
@@ -210,7 +253,28 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
                 detail="device_bearer_required",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        device = repository.authenticate_device(credentials.credentials)
+        token = credentials.credentials
+        device: dict[str, Any] | None
+        if token.startswith("atlas-device-session-v1."):
+            try:
+                claims = device_session_signer.verify(token)
+            except InvalidDeviceSession:
+                claims = None
+            device = (
+                repository.authenticate_device_session(
+                    device_id=claims.device_id,
+                    credential_version=claims.credential_version,
+                )
+                if claims is not None
+                else None
+            )
+            if device is not None and claims is not None:
+                device["_credential_version"] = claims.credential_version
+                device["_authentication_kind"] = "device_session"
+        else:
+            device = repository.authenticate_device(token)
+            if device is not None:
+                device["_authentication_kind"] = "legacy_bearer"
         if device is None:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -218,6 +282,45 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
                 headers={"WWW-Authenticate": "Bearer"},
             )
         return device
+
+    def require_worker_device(
+        device: dict[str, Any] = Depends(require_device),
+    ) -> dict[str, Any]:
+        if device.get("device_class") != "worker":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "worker_device_required"},
+            )
+        return device
+
+    def require_account(
+        credentials: HTTPAuthorizationCredentials | None = Depends(account_bearer),
+    ) -> dict[str, Any]:
+        if credentials is None or credentials.scheme.lower() != "bearer":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="account_bearer_required",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        try:
+            identity = identity_verifier.verify(credentials.credentials)
+        except IdentityVerificationError:
+            identity = None
+        user = (
+            repository.get_user_by_identity(
+                issuer=identity.issuer,
+                subject=identity.subject,
+            )
+            if identity is not None
+            else None
+        )
+        if user is None or user.get("status") != "active":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="account_authentication_failed",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return user
 
     def require_admin(
         credentials: HTTPAuthorizationCredentials | None = Depends(admin_bearer),
@@ -300,12 +403,419 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
             headers={"Cache-Control": "no-store"},
         )
 
+    if settings.seed_demo_data and isinstance(
+        identity_verifier, DeterministicIdentityProvider
+    ):
+
+        @app.post("/api/v1/dev/identity/token", tags=["development"])
+        def issue_development_identity(
+            request: DevIdentityTokenRequest,
+            _: None = Depends(require_admin),
+        ) -> dict[str, Any]:
+            """Mint a local assertion; never registered outside demo mode."""
+
+            user = repository.get_user_by_identity(
+                issuer=identity_verifier.issuer,
+                subject=request.subject,
+            )
+            if user is None or user.get("status") != "active":
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"code": "development_identity_not_found"},
+                )
+            token, expires_at = identity_verifier.issue(
+                subject=request.subject,
+                ttl_seconds=settings.account_session_ttl_seconds,
+            )
+            return {
+                "access_token": token,
+                "token_type": "Bearer",
+                "expires_at": expires_at,
+                "expires_in": settings.account_session_ttl_seconds,
+            }
+
+    account = APIRouter(prefix="/api/v1/account", tags=["account"])
+
+    @account.get("/context")
+    def account_context(
+        user: dict[str, Any] = Depends(require_account),
+    ) -> dict[str, Any]:
+        return {
+            "user": {
+                "id": user["id"],
+                "display_name": user.get("display_name"),
+                "email": user.get("email"),
+            },
+            "memberships": repository.list_account_memberships(user["id"]),
+        }
+
+    @account.post("/enrollments", status_code=status.HTTP_201_CREATED)
+    def create_enrollment(
+        request: DeviceEnrollmentRequest,
+        user: dict[str, Any] = Depends(require_account),
+    ) -> dict[str, Any]:
+        try:
+            enrollment, enrollment_token = repository.create_device_enrollment(
+                user_id=user["id"],
+                store_id=request.store_id,
+                device_class=request.device_class,
+                device_name=request.device_name,
+                agent_id=request.agent_id,
+                ttl_seconds=settings.enrollment_ttl_seconds,
+            )
+        except AccountAccessDenied as exc:
+            repository.record_audit(
+                actor_type="account",
+                action="device.enrollment.create",
+                outcome="denied",
+                user_id=user["id"],
+                resource_type="store",
+                details={"reason": str(exc)},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": str(exc)},
+            ) from exc
+        repository.record_audit(
+            actor_type="account",
+            action="device.enrollment.create",
+            outcome="succeeded",
+            tenant_id=enrollment["tenant_id"],
+            store_id=enrollment["store_id"],
+            agent_id=enrollment.get("agent_id"),
+            user_id=user["id"],
+            resource_type="device_enrollment",
+            resource_id=enrollment["id"],
+            correlation_id=enrollment["correlation_id"],
+            details={"device_class": enrollment["device_class"]},
+        )
+        return {
+            "enrollment": enrollment,
+            "redemption": {
+                "token": enrollment_token,
+                "algorithm": "Ed25519",
+                "expires_at": enrollment["expires_at"],
+                "one_time": True,
+            },
+        }
+
+    @account.get("/devices")
+    def list_account_devices(
+        store_id: str = Query(..., min_length=1, max_length=128),
+        user: dict[str, Any] = Depends(require_account),
+    ) -> dict[str, Any]:
+        try:
+            items = repository.list_account_devices(
+                user_id=user["id"], store_id=store_id
+            )
+        except AccountAccessDenied as exc:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "store_access_denied"},
+            ) from exc
+        return {"items": items, "count": len(items)}
+
+    @account.post("/devices/{device_id}/revoke")
+    def revoke_account_device(
+        device_id: str,
+        request: DeviceRevocationRequest,
+        user: dict[str, Any] = Depends(require_account),
+    ) -> dict[str, Any]:
+        try:
+            device = repository.revoke_account_device(
+                user_id=user["id"], device_id=device_id
+            )
+        except AccountAccessDenied as exc:
+            repository.record_audit(
+                actor_type="account",
+                action="device.revoke",
+                outcome="denied",
+                user_id=user["id"],
+                resource_type="device",
+                details={"reason": "device_not_found"},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "device_not_found"},
+            ) from exc
+        repository.record_audit(
+            actor_type="account",
+            action="device.revoke",
+            outcome="succeeded",
+            tenant_id=device["tenant_id"],
+            store_id=device["store_id"],
+            device_id=device["id"],
+            user_id=user["id"],
+            resource_type="device",
+            resource_id=device["id"],
+            details={
+                "reason": request.reason,
+                "terminated_job_count": device["terminated_job_count"],
+            },
+        )
+        return {"device": device}
+
+    app.include_router(account)
+
+    device_api = APIRouter(prefix="/api/v1/device", tags=["device-identity"])
+
+    @device_api.post(
+        "/enrollments/redeem",
+        status_code=status.HTTP_201_CREATED,
+    )
+    def redeem_device_enrollment(
+        request: DeviceEnrollmentRedemptionRequest,
+    ) -> dict[str, Any]:
+        try:
+            thumbprint = device_public_key_thumbprint(request.public_key)
+            device, enrollment = repository.redeem_device_enrollment(
+                enrollment_token=request.enrollment_token,
+                public_key_b64=request.public_key,
+                public_key_thumbprint=thumbprint,
+                platform=request.platform,
+                platform_version=request.platform_version,
+                app_version=request.app_version,
+                credential_ttl_seconds=settings.device_credential_ttl_seconds,
+            )
+        except InvalidDeviceProof as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "device_key_invalid"},
+            ) from exc
+        except EnrollmentNotRedeemable as exc:
+            repository.record_audit(
+                actor_type="device",
+                action="device.enrollment.redeem",
+                outcome="denied",
+                resource_type="device_enrollment",
+                details={"reason": "enrollment_not_redeemable"},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "enrollment_not_redeemable"},
+            ) from exc
+        except DeviceCredentialConflict as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "device_key_already_registered"},
+            ) from exc
+        repository.record_audit(
+            actor_type="device",
+            action="device.enrollment.redeem",
+            outcome="succeeded",
+            tenant_id=device["tenant_id"],
+            store_id=device["store_id"],
+            agent_id=enrollment.get("agent_id"),
+            device_id=device["id"],
+            user_id=enrollment["created_by_user_id"],
+            resource_type="device_enrollment",
+            resource_id=enrollment["id"],
+            correlation_id=enrollment["correlation_id"],
+            details={
+                "credential_kind": "ed25519",
+                "device_class": device["device_class"],
+                "public_key_thumbprint": device["public_key_thumbprint"],
+            },
+        )
+        return {"device": device, "enrollment": enrollment}
+
+    def deny_device_proof(device_id: str) -> HTTPException:
+        device = repository.get_device(device_id)
+        repository.record_audit(
+            actor_type="device",
+            action="device.session.issue",
+            outcome="denied",
+            tenant_id=(device or {}).get("tenant_id"),
+            store_id=(device or {}).get("store_id"),
+            device_id=(device or {}).get("id"),
+            resource_type="device",
+            resource_id=(device or {}).get("id"),
+            details={"reason": "device_proof_invalid"},
+        )
+        return HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "device_proof_invalid"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    @device_api.post("/sessions")
+    def create_device_session(request: DeviceSessionRequest) -> dict[str, Any]:
+        now_epoch = int(time.time())
+        if abs(now_epoch - request.timestamp) > settings.device_proof_max_skew_seconds:
+            raise deny_device_proof(request.device_id)
+        credential = repository.get_device_credential(request.device_id)
+        if (
+            credential is None
+            or credential.get("credential_kind") != "ed25519"
+            or not credential.get("public_key_b64")
+            or not credential.get("public_key_thumbprint")
+        ):
+            raise deny_device_proof(request.device_id)
+        try:
+            verify_device_signature(
+                public_key_b64=credential["public_key_b64"],
+                signature_b64=request.signature,
+                message=device_session_challenge(
+                    device_id=request.device_id,
+                    timestamp=request.timestamp,
+                    nonce=request.nonce,
+                ),
+            )
+        except InvalidDeviceProof as exc:
+            raise deny_device_proof(request.device_id) from exc
+        nonce_expires_at = (
+            (
+                datetime.now(UTC)
+                + timedelta(seconds=settings.device_proof_max_skew_seconds)
+            )
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z")
+        )
+        consumed = repository.consume_device_proof_nonce(
+            device_id=request.device_id,
+            credential_version=int(credential["credential_version"]),
+            public_key_thumbprint=str(credential["public_key_thumbprint"]),
+            nonce=request.nonce,
+            purpose="session",
+            nonce_expires_at=nonce_expires_at,
+        )
+        if not consumed:
+            raise deny_device_proof(request.device_id)
+        access_token, claims = device_session_signer.issue(
+            device_id=request.device_id,
+            credential_version=int(credential["credential_version"]),
+            ttl_seconds=settings.device_session_ttl_seconds,
+            nonce=secrets.token_hex(16),
+        )
+        repository.record_audit(
+            actor_type="device",
+            action="device.session.issue",
+            outcome="succeeded",
+            tenant_id=credential["tenant_id"],
+            store_id=credential["store_id"],
+            device_id=credential["id"],
+            resource_type="device",
+            resource_id=credential["id"],
+            details={
+                "credential_version": credential["credential_version"],
+                "expires_at": claims.expires_at,
+            },
+        )
+        return {
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_at": claims.expires_at,
+            "expires_in": claims.expires_at - claims.issued_at,
+            "device": {
+                "id": credential["id"],
+                "device_class": credential["device_class"],
+                "tenant_id": credential["tenant_id"],
+                "store_id": credential["store_id"],
+            },
+        }
+
+    @device_api.post("/credentials/rotate")
+    def rotate_device_credential(
+        request: DeviceCredentialRotationRequest,
+        device: dict[str, Any] = Depends(require_device),
+    ) -> dict[str, Any]:
+        if device.get("_authentication_kind") != "device_session":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "device_session_required"},
+            )
+        now_epoch = int(time.time())
+        if abs(now_epoch - request.timestamp) > settings.device_proof_max_skew_seconds:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"code": "device_proof_invalid"},
+            )
+        try:
+            new_thumbprint = device_public_key_thumbprint(request.new_public_key)
+            verify_device_signature(
+                public_key_b64=request.new_public_key,
+                signature_b64=request.signature,
+                message=device_key_rotation_challenge(
+                    device_id=device["id"],
+                    new_public_key_b64=request.new_public_key,
+                    timestamp=request.timestamp,
+                    nonce=request.nonce,
+                ),
+            )
+        except InvalidDeviceProof as exc:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"code": "device_proof_invalid"},
+            ) from exc
+        if hmac.compare_digest(
+            str(device.get("public_key_thumbprint") or ""), new_thumbprint
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "device_credential_unchanged"},
+            )
+        now_datetime = datetime.now(UTC)
+        nonce_expires_at = (
+            (now_datetime + timedelta(seconds=settings.device_proof_max_skew_seconds))
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z")
+        )
+        credential_expires_at = (
+            (now_datetime + timedelta(seconds=settings.device_credential_ttl_seconds))
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z")
+        )
+        try:
+            rotated = repository.rotate_device_credential(
+                device_id=device["id"],
+                expected_version=int(device["_credential_version"]),
+                new_public_key_b64=request.new_public_key,
+                new_public_key_thumbprint=new_thumbprint,
+                nonce=request.nonce,
+                nonce_expires_at=nonce_expires_at,
+                credential_expires_at=credential_expires_at,
+            )
+        except DeviceCredentialConflict as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": str(exc)},
+            ) from exc
+        access_token, claims = device_session_signer.issue(
+            device_id=rotated["id"],
+            credential_version=int(rotated["credential_version"]),
+            ttl_seconds=settings.device_session_ttl_seconds,
+            nonce=secrets.token_hex(16),
+        )
+        repository.record_audit(
+            actor_type="device",
+            action="device.credential.rotate",
+            outcome="succeeded",
+            tenant_id=rotated["tenant_id"],
+            store_id=rotated["store_id"],
+            device_id=rotated["id"],
+            resource_type="device",
+            resource_id=rotated["id"],
+            details={
+                "credential_version": rotated["credential_version"],
+                "public_key_thumbprint": rotated["public_key_thumbprint"],
+            },
+        )
+        return {
+            "device": rotated,
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_at": claims.expires_at,
+            "expires_in": claims.expires_at - claims.issued_at,
+        }
+
+    app.include_router(device_api)
+
     worker = APIRouter(prefix="/api/v1/worker", tags=["worker"])
 
     @worker.post("/heartbeat")
     def heartbeat(
         request: HeartbeatRequest,
-        device: dict[str, Any] = Depends(require_device),
+        device: dict[str, Any] = Depends(require_worker_device),
     ) -> dict[str, Any]:
         # Tenant identity always originates from bearer authentication. The
         # duplicated body field protects callers from accidentally crossing
@@ -354,7 +864,7 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
     @worker.post("/policy/evaluate")
     def evaluate_policy(
         request: PolicyEvaluationRequest,
-        device: dict[str, Any] = Depends(require_device),
+        device: dict[str, Any] = Depends(require_worker_device),
         lease_token: str = Header(..., alias="X-Atlas-Lease"),
         job_id: str = Header(..., alias="X-Atlas-Job-ID"),
         claim_token: str = Header(
@@ -463,7 +973,7 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
     @worker.post("/jobs/cortex/ensure")
     def ensure_cortex_maintenance(
         request: CortexMaintenanceRequest,
-        device: dict[str, Any] = Depends(require_device),
+        device: dict[str, Any] = Depends(require_worker_device),
         lease_token: str = Header(..., alias="X-Atlas-Lease"),
     ) -> dict[str, Any]:
         """Queue one idempotent, claim-bound Cortex maintenance dispatch.
@@ -545,7 +1055,7 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
 
     @worker.get("/jobs/next")
     def next_job(
-        device: dict[str, Any] = Depends(require_device),
+        device: dict[str, Any] = Depends(require_worker_device),
         capability: str | None = Query(default=None, min_length=1, max_length=120),
         tenant_id: str = Header(..., alias="X-Atlas-Tenant-ID"),
         store_id: str = Header(..., alias="X-Atlas-Store-ID"),
@@ -667,7 +1177,7 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
     def complete_job(
         job_id: str,
         request: JobCompletionRequest,
-        device: dict[str, Any] = Depends(require_device),
+        device: dict[str, Any] = Depends(require_worker_device),
         lease_token: str = Header(..., alias="X-Atlas-Lease"),
     ) -> dict[str, Any]:
         job = repository.get_job(job_id)
@@ -957,7 +1467,7 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
 
     @model_api.get("/v1/models")
     def list_models(
-        device: dict[str, Any] = Depends(require_device),
+        device: dict[str, Any] = Depends(require_worker_device),
         tenant_id: str = Header(..., alias="X-Atlas-Tenant-ID"),
         store_id: str = Header(..., alias="X-Atlas-Store-ID"),
         agent_id: str = Header(..., alias="X-Atlas-Agent-ID"),
@@ -1000,7 +1510,7 @@ def create_app(settings: ControlPlaneSettings | None = None) -> FastAPI:
     @model_api.post("/v1/chat/completions")
     async def chat_completions(
         request: ChatCompletionRequest,
-        device: dict[str, Any] = Depends(require_device),
+        device: dict[str, Any] = Depends(require_worker_device),
         tenant_id: str = Header(..., alias="X-Atlas-Tenant-ID"),
         store_id: str = Header(..., alias="X-Atlas-Store-ID"),
         agent_id: str = Header(..., alias="X-Atlas-Agent-ID"),

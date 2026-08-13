@@ -7,5 +7,11 @@ Run the local prototype with::
 
 from .app import create_app
 from .config import ControlPlaneSettings
+from .identity import IdentityVerifier, ProviderIdentity
 
-__all__ = ["ControlPlaneSettings", "create_app"]
+__all__ = [
+    "ControlPlaneSettings",
+    "IdentityVerifier",
+    "ProviderIdentity",
+    "create_app",
+]

@@ -18,6 +18,69 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class DevIdentityTokenRequest(StrictModel):
+    subject: str = Field(min_length=1, max_length=255)
+
+
+class DeviceEnrollmentRequest(StrictModel):
+    """Account-authorized request; tenant is deliberately not client input."""
+
+    store_id: str = Field(min_length=1, max_length=128)
+    device_class: Literal["worker", "phone"]
+    device_name: str = Field(min_length=1, max_length=120)
+    agent_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @field_validator("device_name")
+    @classmethod
+    def normalize_device_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("device_name must not be blank")
+        return normalized
+
+    @model_validator(mode="after")
+    def bind_worker_agent(self) -> "DeviceEnrollmentRequest":
+        if self.device_class == "worker" and self.agent_id is None:
+            raise ValueError("worker enrollment requires agent_id")
+        if self.device_class == "phone" and self.agent_id is not None:
+            raise ValueError("phone enrollment must not select an agent")
+        return self
+
+
+class DeviceEnrollmentRedemptionRequest(StrictModel):
+    enrollment_token: str = Field(min_length=32, max_length=256, repr=False)
+    public_key: str = Field(pattern=r"^[A-Za-z0-9_-]{43}$", repr=False)
+    platform: Literal["macos", "windows", "ios", "android", "other"]
+    platform_version: str | None = Field(default=None, max_length=64)
+    app_version: str | None = Field(default=None, max_length=64)
+
+
+class DeviceSessionRequest(StrictModel):
+    device_id: str = Field(min_length=1, max_length=128)
+    timestamp: int = Field(ge=0)
+    nonce: str = Field(pattern=r"^[A-Za-z0-9_-]{22,128}$")
+    signature: str = Field(pattern=r"^[A-Za-z0-9_-]{86}$", repr=False)
+
+
+class DeviceCredentialRotationRequest(StrictModel):
+    new_public_key: str = Field(pattern=r"^[A-Za-z0-9_-]{43}$", repr=False)
+    timestamp: int = Field(ge=0)
+    nonce: str = Field(pattern=r"^[A-Za-z0-9_-]{22,128}$")
+    signature: str = Field(pattern=r"^[A-Za-z0-9_-]{86}$", repr=False)
+
+
+class DeviceRevocationRequest(StrictModel):
+    reason: str = Field(min_length=3, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_reason(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 3:
+            raise ValueError("reason must contain at least three characters")
+        return normalized
+
+
 class HeartbeatRequest(StrictModel):
     tenant_id: str = Field(min_length=1, max_length=128)
     store_id: str = Field(min_length=1, max_length=128)

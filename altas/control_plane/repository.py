@@ -25,6 +25,10 @@ DEMO_SUBSCRIPTION_ID = "subscription_demo_professional"
 DEMO_DEVICE_ID = "device_demo_local_worker"
 DEMO_AGENT_ID = "agent_demo_atlas"
 DEMO_DEVICE_SECRET = "atlas-demo-device-secret-v1"
+DEMO_USER_ID = "user_demo_owner"
+DEMO_USER_SUBJECT = "atlas-demo-owner"
+DEMO_IDENTITY_ISSUER = "https://identity.dev.atlas.invalid"
+DEMO_MEMBERSHIP_ID = "membership_demo_owner"
 
 DEMO_CAPABILITIES = (
     "jobs.complete",
@@ -67,6 +71,31 @@ def _record(
     return item
 
 
+def _format_utc(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _parse_utc(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def _safe_device(record: dict[str, Any] | None) -> dict[str, Any] | None:
+    if record is None:
+        return None
+    safe = dict(record)
+    safe.pop("secret_hash", None)
+    safe.pop("public_key_b64", None)
+    return safe
+
+
 @dataclass(frozen=True, slots=True)
 class DemoSeed:
     tenant_id: str = DEMO_TENANT_ID
@@ -91,6 +120,18 @@ class CortexDispatchLimitExceeded(ValueError):
 
 class InvalidJobClaim(ValueError):
     """A worker presented a missing, stale, or otherwise invalid claim token."""
+
+
+class AccountAccessDenied(PermissionError):
+    """An account is not allowed to mutate the requested store resource."""
+
+
+class EnrollmentNotRedeemable(ValueError):
+    """An enrollment is absent, expired, revoked, or already consumed."""
+
+
+class DeviceCredentialConflict(ValueError):
+    """Device-bound key material conflicts with current persisted state."""
 
 
 class ControlPlaneRepository:
@@ -136,6 +177,23 @@ class ControlPlaneRepository:
             )
             connection.execute(
                 """
+                INSERT OR IGNORE INTO users
+                    (id, issuer, subject, email, display_name, status,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 'active', ?, ?)
+                """,
+                (
+                    DEMO_USER_ID,
+                    DEMO_IDENTITY_ISSUER,
+                    DEMO_USER_SUBJECT,
+                    "owner@atlas.invalid",
+                    "Atlas Demo Owner",
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            connection.execute(
+                """
                 INSERT OR IGNORE INTO stores
                     (id, tenant_id, name, external_ref, status, created_at, updated_at)
                 VALUES (?, ?, ?, ?, 'active', ?, ?)
@@ -145,6 +203,33 @@ class ControlPlaneRepository:
                     DEMO_TENANT_ID,
                     "Sunrise Volkswagen",
                     "TEKION-SUNRISE-VW",
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO memberships
+                    (id, user_id, tenant_id, role, status, created_at, updated_at)
+                VALUES (?, ?, ?, 'owner', 'active', ?, ?)
+                """,
+                (
+                    DEMO_MEMBERSHIP_ID,
+                    DEMO_USER_ID,
+                    DEMO_TENANT_ID,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO membership_store_grants
+                    (membership_id, store_id, status, created_at, updated_at)
+                VALUES (?, ?, 'active', ?, ?)
+                """,
+                (
+                    DEMO_MEMBERSHIP_ID,
+                    DEMO_STORE_ID,
                     timestamp,
                     timestamp,
                 ),
@@ -253,14 +338,535 @@ class ControlPlaneRepository:
         supplied_hash = hash_secret(secret)
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM devices WHERE secret_hash = ?", (supplied_hash,)
+                "SELECT * FROM devices WHERE secret_hash = ? "
+                "AND credential_kind = 'legacy_bearer'",
+                (supplied_hash,),
             ).fetchone()
         device = _record(row, json_columns=("metadata_json",))
         if not device or not hmac.compare_digest(device["secret_hash"], supplied_hash):
             return None
         # The hash proves authentication but is never useful to API consumers.
         del device["secret_hash"]
+        device.pop("public_key_b64", None)
         return device
+
+    def get_user_by_identity(
+        self, *, issuer: str, subject: str
+    ) -> dict[str, Any] | None:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM users WHERE issuer = ? AND subject = ?",
+                (issuer, subject),
+            ).fetchone()
+        return _record(row)
+
+    def get_user(self, user_id: str) -> dict[str, Any] | None:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+        return _record(row)
+
+    def list_account_memberships(self, user_id: str) -> list[dict[str, Any]]:
+        """Return only live memberships and explicitly granted live stores."""
+
+        with self.database.connect() as connection:
+            memberships = connection.execute(
+                """
+                SELECT m.id, m.tenant_id, m.role, t.name AS tenant_name,
+                       t.slug AS tenant_slug
+                FROM memberships m
+                JOIN users u ON u.id = m.user_id
+                JOIN tenants t ON t.id = m.tenant_id
+                WHERE m.user_id = ? AND u.status = 'active'
+                  AND m.status = 'active' AND t.status = 'active'
+                ORDER BY t.name, m.id
+                """,
+                (user_id,),
+            ).fetchall()
+            output: list[dict[str, Any]] = []
+            for membership in memberships:
+                stores = connection.execute(
+                    """
+                    SELECT s.id, s.name
+                    FROM membership_store_grants g
+                    JOIN stores s ON s.id = g.store_id
+                    WHERE g.membership_id = ? AND g.status = 'active'
+                      AND s.status = 'active' AND s.tenant_id = ?
+                    ORDER BY s.name, s.id
+                    """,
+                    (membership["id"], membership["tenant_id"]),
+                ).fetchall()
+                output.append({
+                    "id": membership["id"],
+                    "role": membership["role"],
+                    "tenant": {
+                        "id": membership["tenant_id"],
+                        "name": membership["tenant_name"],
+                        "slug": membership["tenant_slug"],
+                    },
+                    "stores": [dict(store) for store in stores],
+                })
+        return output
+
+    @staticmethod
+    def _account_store_access(
+        connection: sqlite3.Connection,
+        *,
+        user_id: str,
+        store_id: str,
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            """
+            SELECT m.id AS membership_id, m.tenant_id, m.role,
+                   s.id AS store_id
+            FROM users u
+            JOIN memberships m ON m.user_id = u.id
+            JOIN membership_store_grants g ON g.membership_id = m.id
+            JOIN tenants t ON t.id = m.tenant_id
+            JOIN stores s ON s.id = g.store_id
+            WHERE u.id = ? AND s.id = ? AND u.status = 'active'
+              AND m.status = 'active' AND g.status = 'active'
+              AND t.status = 'active' AND s.status = 'active'
+              AND s.tenant_id = m.tenant_id
+            LIMIT 1
+            """,
+            (user_id, store_id),
+        ).fetchone()
+
+    def create_device_enrollment(
+        self,
+        *,
+        user_id: str,
+        store_id: str,
+        device_class: str,
+        device_name: str,
+        agent_id: str | None,
+        ttl_seconds: int,
+    ) -> tuple[dict[str, Any], str]:
+        """Create one account-authorized, short-lived redemption transaction."""
+
+        now_datetime = datetime.now(UTC)
+        now = _format_utc(now_datetime)
+        expires_at = _format_utc(now_datetime + timedelta(seconds=ttl_seconds))
+        enrollment_id = f"enrollment_{uuid.uuid4().hex}"
+        correlation_id = f"correlation_{uuid.uuid4().hex}"
+        enrollment_token = secrets.token_urlsafe(32)
+        token_hash = hash_secret(enrollment_token)
+        with self.database.transaction(immediate=True) as connection:
+            access = self._account_store_access(
+                connection, user_id=user_id, store_id=store_id
+            )
+            if access is None:
+                raise AccountAccessDenied("store_access_denied")
+            if device_class == "worker" and access["role"] not in {
+                "owner",
+                "operator",
+            }:
+                raise AccountAccessDenied("role_not_allowed")
+            if device_class == "worker":
+                agent = connection.execute(
+                    """
+                    SELECT id FROM agents
+                    WHERE id = ? AND tenant_id = ? AND store_id = ?
+                      AND status = 'active' AND device_id IS NULL
+                    """,
+                    (agent_id, access["tenant_id"], store_id),
+                ).fetchone()
+                if agent is None:
+                    raise AccountAccessDenied("agent_not_enrollable")
+            elif agent_id is not None:
+                raise AccountAccessDenied("agent_not_allowed")
+            connection.execute(
+                """
+                INSERT INTO device_enrollments
+                    (id, token_hash, correlation_id, created_by_user_id,
+                     membership_id, tenant_id, store_id, agent_id, device_class,
+                     device_name, status, expires_at, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                """,
+                (
+                    enrollment_id,
+                    token_hash,
+                    correlation_id,
+                    user_id,
+                    access["membership_id"],
+                    access["tenant_id"],
+                    store_id,
+                    agent_id,
+                    device_class,
+                    device_name.strip(),
+                    expires_at,
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM device_enrollments WHERE id = ?",
+                (enrollment_id,),
+            ).fetchone()
+        enrollment = _record(row)
+        if enrollment is None:
+            raise RuntimeError("created enrollment disappeared")
+        enrollment.pop("token_hash", None)
+        return enrollment, enrollment_token
+
+    def redeem_device_enrollment(
+        self,
+        *,
+        enrollment_token: str,
+        public_key_b64: str,
+        public_key_thumbprint: str,
+        platform: str,
+        platform_version: str | None,
+        app_version: str | None,
+        credential_ttl_seconds: int,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Atomically consume an enrollment and bind one Ed25519 device."""
+
+        supplied_hash = hash_secret(enrollment_token)
+        now_datetime = datetime.now(UTC)
+        now = _format_utc(now_datetime)
+        credential_expires_at = _format_utc(
+            now_datetime + timedelta(seconds=credential_ttl_seconds)
+        )
+        device_id = f"device_{uuid.uuid4().hex}"
+        # Older SQLite files retain the original NOT NULL legacy-secret
+        # column.  This random preimage is immediately discarded, and
+        # credential_kind prevents the digest from authenticating anything.
+        unreachable_secret_hash = hash_secret(secrets.token_urlsafe(48))
+        metadata = {
+            "app_version": app_version,
+            "platform": platform,
+            "platform_version": platform_version,
+        }
+        try:
+            with self.database.transaction(immediate=True) as connection:
+                row = connection.execute(
+                    "SELECT * FROM device_enrollments WHERE token_hash = ?",
+                    (supplied_hash,),
+                ).fetchone()
+                if row is None or not hmac.compare_digest(
+                    str(row["token_hash"]), supplied_hash
+                ):
+                    raise EnrollmentNotRedeemable("enrollment_not_redeemable")
+                expires_at = _parse_utc(str(row["expires_at"]))
+                if (
+                    row["status"] != "pending"
+                    or expires_at is None
+                    or expires_at <= now_datetime
+                ):
+                    raise EnrollmentNotRedeemable("enrollment_not_redeemable")
+                access = self._account_store_access(
+                    connection,
+                    user_id=str(row["created_by_user_id"]),
+                    store_id=str(row["store_id"]),
+                )
+                if (
+                    access is None
+                    or access["membership_id"] != row["membership_id"]
+                    or access["tenant_id"] != row["tenant_id"]
+                ):
+                    raise EnrollmentNotRedeemable("enrollment_not_redeemable")
+                if row["device_class"] == "worker":
+                    if access["role"] not in {"owner", "operator"}:
+                        raise EnrollmentNotRedeemable("enrollment_not_redeemable")
+                    agent = connection.execute(
+                        """
+                        SELECT id FROM agents
+                        WHERE id = ? AND tenant_id = ? AND store_id = ?
+                          AND status = 'active' AND device_id IS NULL
+                        """,
+                        (row["agent_id"], row["tenant_id"], row["store_id"]),
+                    ).fetchone()
+                    if agent is None:
+                        raise EnrollmentNotRedeemable("enrollment_not_redeemable")
+                connection.execute(
+                    """
+                    INSERT INTO devices
+                        (id, tenant_id, store_id, name, secret_hash, device_class,
+                         credential_kind, public_key_b64, public_key_thumbprint,
+                         credential_version, credential_expires_at,
+                         enrolled_by_user_id, status, metadata_json,
+                         created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 'ed25519', ?, ?, 1, ?, ?,
+                            'active', ?, ?, ?)
+                    """,
+                    (
+                        device_id,
+                        row["tenant_id"],
+                        row["store_id"],
+                        row["device_name"],
+                        unreachable_secret_hash,
+                        row["device_class"],
+                        public_key_b64,
+                        public_key_thumbprint,
+                        credential_expires_at,
+                        row["created_by_user_id"],
+                        _json(metadata),
+                        now,
+                        now,
+                    ),
+                )
+                if row["device_class"] == "worker":
+                    bound = connection.execute(
+                        "UPDATE agents SET device_id = ?, updated_at = ? "
+                        "WHERE id = ? AND device_id IS NULL",
+                        (device_id, now, row["agent_id"]),
+                    )
+                    if bound.rowcount != 1:
+                        raise EnrollmentNotRedeemable("enrollment_not_redeemable")
+                redeemed = connection.execute(
+                    """
+                    UPDATE device_enrollments
+                    SET status = 'redeemed', redeemed_device_id = ?,
+                        redeemed_at = ?, updated_at = ?
+                    WHERE id = ? AND status = 'pending'
+                    """,
+                    (device_id, now, now, row["id"]),
+                )
+                if redeemed.rowcount != 1:
+                    raise EnrollmentNotRedeemable("enrollment_not_redeemable")
+                device_row = connection.execute(
+                    "SELECT * FROM devices WHERE id = ?", (device_id,)
+                ).fetchone()
+                enrollment_row = connection.execute(
+                    "SELECT * FROM device_enrollments WHERE id = ?", (row["id"],)
+                ).fetchone()
+        except sqlite3.IntegrityError as exc:
+            raise DeviceCredentialConflict("device_key_already_registered") from exc
+        device = _record(device_row, json_columns=("metadata_json",))
+        enrollment = _record(enrollment_row)
+        safe_device = _safe_device(device)
+        if safe_device is None or enrollment is None:
+            raise RuntimeError("redeemed device disappeared")
+        enrollment.pop("token_hash", None)
+        return safe_device, enrollment
+
+    def get_device_credential(self, device_id: str) -> dict[str, Any] | None:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM devices WHERE id = ?", (device_id,)
+            ).fetchone()
+        return _record(row, json_columns=("metadata_json",))
+
+    def authenticate_device_session(
+        self, *, device_id: str, credential_version: int
+    ) -> dict[str, Any] | None:
+        now = datetime.now(UTC)
+        device = self.get_device_credential(device_id)
+        credential_expiry = _parse_utc(
+            str(device.get("credential_expires_at") or "") if device else None
+        )
+        if (
+            not device
+            or device.get("status") != "active"
+            or device.get("credential_kind") != "ed25519"
+            or device.get("credential_revoked_at") is not None
+            or device.get("credential_version") != credential_version
+            or not device.get("public_key_b64")
+            or credential_expiry is None
+            or credential_expiry <= now
+        ):
+            return None
+        return _safe_device(device)
+
+    def consume_device_proof_nonce(
+        self,
+        *,
+        device_id: str,
+        credential_version: int,
+        public_key_thumbprint: str,
+        nonce: str,
+        purpose: str,
+        nonce_expires_at: str,
+    ) -> bool:
+        """Persist proof freshness only if the live device key is unchanged."""
+
+        now = utc_now()
+        try:
+            with self.database.transaction(immediate=True) as connection:
+                device = connection.execute(
+                    """
+                    SELECT status, credential_kind, credential_version,
+                           public_key_thumbprint, credential_expires_at,
+                           credential_revoked_at
+                    FROM devices WHERE id = ?
+                    """,
+                    (device_id,),
+                ).fetchone()
+                credential_expiry = _parse_utc(
+                    str(device["credential_expires_at"] or "") if device else None
+                )
+                if (
+                    device is None
+                    or device["status"] != "active"
+                    or device["credential_kind"] != "ed25519"
+                    or device["credential_version"] != credential_version
+                    or device["public_key_thumbprint"] != public_key_thumbprint
+                    or device["credential_revoked_at"] is not None
+                    or credential_expiry is None
+                    or credential_expiry <= datetime.now(UTC)
+                ):
+                    return False
+                connection.execute(
+                    "DELETE FROM device_proof_nonces WHERE expires_at <= ?", (now,)
+                )
+                connection.execute(
+                    """
+                    INSERT INTO device_proof_nonces
+                        (device_id, nonce, purpose, used_at, expires_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (device_id, nonce, purpose, now, nonce_expires_at),
+                )
+        except sqlite3.IntegrityError:
+            return False
+        return True
+
+    def rotate_device_credential(
+        self,
+        *,
+        device_id: str,
+        expected_version: int,
+        new_public_key_b64: str,
+        new_public_key_thumbprint: str,
+        nonce: str,
+        nonce_expires_at: str,
+        credential_expires_at: str,
+    ) -> dict[str, Any]:
+        """Atomically consume a proof and replace the device public key."""
+
+        now = utc_now()
+        try:
+            with self.database.transaction(immediate=True) as connection:
+                connection.execute(
+                    "DELETE FROM device_proof_nonces WHERE expires_at <= ?", (now,)
+                )
+                connection.execute(
+                    """
+                    INSERT INTO device_proof_nonces
+                        (device_id, nonce, purpose, used_at, expires_at)
+                    VALUES (?, ?, 'key_rotation', ?, ?)
+                    """,
+                    (device_id, nonce, now, nonce_expires_at),
+                )
+                updated = connection.execute(
+                    """
+                    UPDATE devices
+                    SET public_key_b64 = ?, public_key_thumbprint = ?,
+                        credential_version = credential_version + 1,
+                        credential_expires_at = ?, credential_revoked_at = NULL,
+                        updated_at = ?
+                    WHERE id = ? AND status = 'active'
+                      AND credential_kind = 'ed25519'
+                      AND credential_revoked_at IS NULL
+                      AND credential_version = ?
+                    """,
+                    (
+                        new_public_key_b64,
+                        new_public_key_thumbprint,
+                        credential_expires_at,
+                        now,
+                        device_id,
+                        expected_version,
+                    ),
+                )
+                if updated.rowcount != 1:
+                    raise DeviceCredentialConflict("device_credential_stale")
+                row = connection.execute(
+                    "SELECT * FROM devices WHERE id = ?", (device_id,)
+                ).fetchone()
+        except sqlite3.IntegrityError as exc:
+            raise DeviceCredentialConflict("device_credential_conflict") from exc
+        device = _record(row, json_columns=("metadata_json",))
+        safe = _safe_device(device)
+        if safe is None:
+            raise RuntimeError("rotated device disappeared")
+        return safe
+
+    def list_account_devices(
+        self, *, user_id: str, store_id: str
+    ) -> list[dict[str, Any]]:
+        with self.database.connect() as connection:
+            access = self._account_store_access(
+                connection, user_id=user_id, store_id=store_id
+            )
+            if access is None:
+                raise AccountAccessDenied("store_access_denied")
+            rows = connection.execute(
+                "SELECT * FROM devices WHERE tenant_id = ? AND store_id = ? "
+                "ORDER BY created_at DESC, id",
+                (access["tenant_id"], store_id),
+            ).fetchall()
+        output: list[dict[str, Any]] = []
+        for row in rows:
+            record = _safe_device(_record(row, json_columns=("metadata_json",)))
+            if record is not None:
+                output.append(record)
+        return output
+
+    def revoke_account_device(self, *, user_id: str, device_id: str) -> dict[str, Any]:
+        now = utc_now()
+        terminated_job_count = 0
+        with self.database.transaction(immediate=True) as connection:
+            device = connection.execute(
+                "SELECT * FROM devices WHERE id = ?", (device_id,)
+            ).fetchone()
+            if device is None:
+                raise AccountAccessDenied("device_not_found")
+            access = self._account_store_access(
+                connection,
+                user_id=user_id,
+                store_id=str(device["store_id"]),
+            )
+            if (
+                access is None
+                or access["tenant_id"] != device["tenant_id"]
+                or access["role"] not in {"owner", "operator"}
+            ):
+                raise AccountAccessDenied("device_not_found")
+            if device["status"] == "active":
+                connection.execute(
+                    """
+                    UPDATE devices
+                    SET status = 'disabled', credential_revoked_at = ?,
+                        credential_version = credential_version + 1,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, now, device_id),
+                )
+                terminated = connection.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'canceled', claimed_by_device_id = NULL,
+                        claim_token_hash = NULL, result_json = NULL,
+                        error = 'device_disabled', completed_at = ?, updated_at = ?
+                    WHERE status IN ('queued', 'running')
+                      AND (
+                        device_id = ? OR claimed_by_device_id = ? OR
+                        agent_id IN (
+                            SELECT id FROM agents WHERE device_id = ?
+                        )
+                      )
+                    """,
+                    (now, now, device_id, device_id, device_id),
+                )
+                terminated_job_count = terminated.rowcount
+                connection.execute(
+                    "UPDATE agents SET device_id = NULL, updated_at = ? "
+                    "WHERE device_id = ?",
+                    (now, device_id),
+                )
+            row = connection.execute(
+                "SELECT * FROM devices WHERE id = ?", (device_id,)
+            ).fetchone()
+        record = _safe_device(_record(row, json_columns=("metadata_json",)))
+        if record is None:
+            raise RuntimeError("revoked device disappeared")
+        record["terminated_job_count"] = terminated_job_count
+        return record
 
     def get_tenant(self, tenant_id: str) -> dict[str, Any] | None:
         return self._get("tenants", tenant_id)
@@ -270,9 +876,7 @@ class ControlPlaneRepository:
 
     def get_device(self, device_id: str) -> dict[str, Any] | None:
         record = self._get("devices", device_id, json_columns=("metadata_json",))
-        if record:
-            record.pop("secret_hash", None)
-        return record
+        return _safe_device(record)
 
     def get_agent(self, agent_id: str) -> dict[str, Any] | None:
         return self._get("agents", agent_id)
@@ -400,6 +1004,7 @@ class ControlPlaneRepository:
         if table == "devices":
             for item in output:
                 item.pop("secret_hash", None)
+                item.pop("public_key_b64", None)
         elif table == "jobs":
             for item in output:
                 item.pop("claim_token_hash", None)
@@ -926,6 +1531,16 @@ class ControlPlaneRepository:
                 (target, now, resource_id),
             )
             if resource == "devices" and target == inactive_status:
+                connection.execute(
+                    """
+                    UPDATE devices
+                    SET credential_revoked_at = ?,
+                        credential_version = credential_version + 1
+                    WHERE id = ? AND credential_kind = 'ed25519'
+                      AND credential_revoked_at IS NULL
+                    """,
+                    (now, resource_id),
+                )
                 terminated = connection.execute(
                     """
                     UPDATE jobs
@@ -943,6 +1558,11 @@ class ControlPlaneRepository:
                     (now, now, resource_id, resource_id, resource_id),
                 )
                 terminated_job_count = terminated.rowcount
+                connection.execute(
+                    "UPDATE agents SET device_id = NULL, updated_at = ? "
+                    "WHERE device_id = ?",
+                    (now, resource_id),
+                )
             updated = connection.execute(
                 f"SELECT * FROM {resource} WHERE id = ?", (resource_id,)
             ).fetchone()
@@ -952,6 +1572,7 @@ class ControlPlaneRepository:
             raise KeyError(resource_id)
         if resource == "devices":
             record.pop("secret_hash", None)
+            record.pop("public_key_b64", None)
             record["terminated_job_count"] = terminated_job_count
         return record
 
@@ -1116,9 +1737,11 @@ class ControlPlaneRepository:
         store_id: str | None = None,
         agent_id: str | None = None,
         device_id: str | None = None,
+        user_id: str | None = None,
         job_id: str | None = None,
         resource_type: str | None = None,
         resource_id: str | None = None,
+        correlation_id: str | None = None,
         details: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         audit_id = f"audit_{uuid.uuid4().hex}"
@@ -1127,10 +1750,10 @@ class ControlPlaneRepository:
             connection.execute(
                 """
                 INSERT INTO audit_logs
-                    (id, tenant_id, store_id, agent_id, device_id, job_id, actor_type,
-                     action, outcome, resource_type, resource_id, details_json,
-                     created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, tenant_id, store_id, agent_id, device_id, user_id,
+                     job_id, actor_type, action, outcome, resource_type,
+                     resource_id, correlation_id, details_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     audit_id,
@@ -1138,12 +1761,14 @@ class ControlPlaneRepository:
                     store_id,
                     agent_id,
                     device_id,
+                    user_id,
                     job_id,
                     actor_type,
                     action,
                     outcome,
                     resource_type,
                     resource_id,
+                    correlation_id,
                     _json(details or {}),
                     created_at,
                 ),

@@ -31,6 +31,7 @@ Highest-value assets are:
 - Dealership operational data
 - Cross-tenant isolation
 - Entitlement and billing state
+- Account identities, organization memberships, roles, and store grants
 - Workflow and skill intellectual property
 - Device identities and worker leases
 - Audit integrity
@@ -50,6 +51,25 @@ entitlement or borrow an unrelated capability from the lease.
 A valid device credential receives a scoped, expiring lease. Lease validation
 is not sufficient by itself: protected endpoints also recheck the live device
 and subscription state so a remote disable takes effect immediately.
+
+### Account and device enrollment
+
+The account API accepts a short-lived assertion from an injected identity
+verifier and maps its verified issuer/subject to server-owned users,
+memberships, roles, and store grants. Enrollment requests contain a store, not
+a tenant; the server derives tenant scope from the live grant. `owner` and
+`operator` roles may enroll workers and revoke devices. A live member may
+enroll a phone only for an explicitly granted store.
+
+Each enrollment token is random, stored only as a hash, expires after ten
+minutes by default, and is consumed in the same immediate transaction that
+creates the device. The device supplies a raw Ed25519 public key; the private
+key never crosses the device boundary. A signed timestamp and nonce are recorded
+once before the server issues a five-minute device session. Live device status,
+credential expiry, and credential version are checked again when the session is
+used. Rotation requires both the existing device session and proof of the new
+private key. Revocation increments the credential version and invalidates old
+sessions immediately.
 
 ### Process isolation target
 
@@ -79,6 +99,12 @@ The prototype uses stable, lower-case machine-readable outcomes such as:
 - `device_identity_invalid`
 - `device_inactive`
 - `device_context_mismatch`
+- `account_authentication_failed`
+- `store_access_denied`
+- `role_not_allowed`
+- `enrollment_not_redeemable`
+- `device_proof_invalid`
+- `device_session_required`
 - `subscription_inactive`
 - `store_inactive`
 - `lease_signature_invalid`
@@ -105,8 +131,11 @@ dealership payloads.
 | Threat | Prototype control | Production follow-up |
 |---|---|---|
 | Prompt asks worker to add a store | Server entitlement check | Stripe-backed upgrade workflow |
-| Local config claims another tenant/store | Tenant derived from device; relationship check | Signed asymmetric requests + nonce replay protection |
-| Customer copies install directory | No provider keys; revocable device credential | Device-bound key + attestation where practical |
+| Account request claims another tenant/store | Tenant derived from verified membership and store grant; request-body tenant rejected | Production OIDC issuer/audience/PKCE review |
+| Local config claims another tenant/store | Tenant derived from device; relationship check | Platform attestation where practical |
+| Customer copies install directory | No provider keys; Ed25519 private key remains device-side; revocable versioned credential | Hardware-backed non-exportable key + attestation where practical |
+| Enrollment token is stolen or replayed | Ten-minute expiry, hash-only storage, atomic single use, live membership recheck | Risk-based browser reauthentication and out-of-band confirmation |
+| Device proof is replayed | Signed timestamp, bounded skew, persisted per-device nonce | Distributed nonce store when the API is multi-instance |
 | Model calls provider directly | Atlas gateway profile; production network policy | Egress allowlist |
 | Policy service times out | Managed guard denies | Multi-region policy service and cached lease policy with bounded TTL |
 | Device is remotely disabled | Live device recheck on protected calls | Push invalidation and fleet alerting |
@@ -122,10 +151,15 @@ dealership payloads.
 
 The current prototype:
 
-- Uses a hashed bearer device secret instead of an asymmetric device key.
-- The prototype Hermes provider adapter receives that scoped device bearer in
-  its isolated process environment. Production should replace this with a
-  supervisor-local gateway or a short-lived proof-bound inference credential.
+- Implements provider-neutral user/membership/store authorization and
+  Ed25519 enrollment, proof, short-lived device sessions, rotation, and
+  revocation. Demo browser identity is a deterministic localhost-only adapter;
+  no production OIDC issuer, authorization-code/PKCE flow, recovery policy, or
+  platform attestation has been selected or claimed.
+- Retains the hashed bearer only for compatibility with the existing seeded
+  worker. The current Hermes provider adapter still receives that scoped bearer
+  in its isolated process environment. Desktop must adopt the new OS-vault key
+  and short-lived session flow before the compatibility path can be removed.
 - Uses a shared localhost development-admin bearer instead of operator identity
   and RBAC.
 - Uses a deterministic model provider.
@@ -159,8 +193,9 @@ provider keys into the prototype.
 ## Incident-ready logging
 
 Every security-relevant event includes a timestamp, event type, outcome,
-and available tenant/store/device/agent/job identifiers. The job ID is the
-prototype correlation key. Metadata must be allowlisted. Request bodies,
+and available tenant/store/user/device/agent/job identifiers. Enrollment create
+and redemption events share a server-generated correlation ID; the job ID
+remains the workflow correlation key. Metadata must be allowlisted. Request bodies,
 Authorization headers, lease and claim tokens, provider credentials, dealer
 credentials, cookies, and raw browser storage are never audit fields.
 

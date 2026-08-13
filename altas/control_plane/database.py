@@ -20,6 +20,18 @@ CREATE TABLE IF NOT EXISTS tenants (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    issuer TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    email TEXT,
+    display_name TEXT,
+    status TEXT NOT NULL CHECK (status IN ('active', 'revoked')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (issuer, subject)
+);
+
 CREATE TABLE IF NOT EXISTS stores (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES tenants(id),
@@ -29,6 +41,26 @@ CREATE TABLE IF NOT EXISTS stores (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE (tenant_id, external_ref)
+);
+
+CREATE TABLE IF NOT EXISTS memberships (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    role TEXT NOT NULL CHECK (role IN ('owner', 'operator', 'member')),
+    status TEXT NOT NULL CHECK (status IN ('active', 'revoked')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (user_id, tenant_id)
+);
+
+CREATE TABLE IF NOT EXISTS membership_store_grants (
+    membership_id TEXT NOT NULL REFERENCES memberships(id),
+    store_id TEXT NOT NULL REFERENCES stores(id),
+    status TEXT NOT NULL CHECK (status IN ('active', 'revoked')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (membership_id, store_id)
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (
@@ -49,6 +81,18 @@ CREATE TABLE IF NOT EXISTS devices (
     store_id TEXT NOT NULL REFERENCES stores(id),
     name TEXT NOT NULL,
     secret_hash TEXT NOT NULL UNIQUE,
+    device_class TEXT NOT NULL DEFAULT 'worker' CHECK (
+        device_class IN ('worker', 'phone')
+    ),
+    credential_kind TEXT NOT NULL DEFAULT 'legacy_bearer' CHECK (
+        credential_kind IN ('legacy_bearer', 'ed25519')
+    ),
+    public_key_b64 TEXT,
+    public_key_thumbprint TEXT,
+    credential_version INTEGER NOT NULL DEFAULT 1 CHECK (credential_version >= 1),
+    credential_expires_at TEXT,
+    credential_revoked_at TEXT,
+    enrolled_by_user_id TEXT REFERENCES users(id),
     status TEXT NOT NULL CHECK (status IN ('active', 'disabled')),
     worker_version TEXT,
     last_heartbeat_at TEXT,
@@ -67,6 +111,36 @@ CREATE TABLE IF NOT EXISTS agents (
     status TEXT NOT NULL CHECK (status IN ('active', 'disabled')),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS device_enrollments (
+    id TEXT PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    correlation_id TEXT NOT NULL UNIQUE,
+    created_by_user_id TEXT NOT NULL REFERENCES users(id),
+    membership_id TEXT NOT NULL REFERENCES memberships(id),
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    store_id TEXT NOT NULL REFERENCES stores(id),
+    agent_id TEXT REFERENCES agents(id),
+    device_class TEXT NOT NULL CHECK (device_class IN ('worker', 'phone')),
+    device_name TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (
+        status IN ('pending', 'redeemed', 'expired', 'revoked')
+    ),
+    expires_at TEXT NOT NULL,
+    redeemed_device_id TEXT REFERENCES devices(id),
+    redeemed_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS device_proof_nonces (
+    device_id TEXT NOT NULL REFERENCES devices(id),
+    nonce TEXT NOT NULL,
+    purpose TEXT NOT NULL CHECK (purpose IN ('session', 'key_rotation')),
+    used_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    PRIMARY KEY (device_id, nonce)
 );
 
 CREATE TABLE IF NOT EXISTS entitlements (
@@ -144,20 +218,30 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     store_id TEXT,
     agent_id TEXT,
     device_id TEXT,
+    user_id TEXT,
     job_id TEXT,
     actor_type TEXT NOT NULL,
     action TEXT NOT NULL,
     outcome TEXT NOT NULL,
     resource_type TEXT,
     resource_id TEXT,
+    correlation_id TEXT,
     details_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_stores_tenant ON stores(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_memberships_user
+    ON memberships(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_membership_store_grants
+    ON membership_store_grants(store_id, status);
 CREATE INDEX IF NOT EXISTS idx_subscriptions_tenant_status
     ON subscriptions(tenant_id, status);
 CREATE INDEX IF NOT EXISTS idx_devices_tenant_store ON devices(tenant_id, store_id);
+CREATE INDEX IF NOT EXISTS idx_device_enrollments_context
+    ON device_enrollments(tenant_id, store_id, status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_device_proof_nonce_expiry
+    ON device_proof_nonces(expires_at);
 CREATE INDEX IF NOT EXISTS idx_agents_tenant_store ON agents(tenant_id, store_id);
 CREATE INDEX IF NOT EXISTS idx_entitlements_lookup
     ON entitlements(tenant_id, store_id, capability, status);
@@ -210,6 +294,42 @@ class Database:
             for column, statement in migrations.items():
                 if column not in job_columns:
                     connection.execute(statement)
+            device_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(devices)").fetchall()
+            }
+            device_migrations = {
+                "device_class": (
+                    "ALTER TABLE devices ADD COLUMN device_class TEXT NOT NULL "
+                    "DEFAULT 'worker' CHECK (device_class IN ('worker','phone'))"
+                ),
+                "credential_kind": (
+                    "ALTER TABLE devices ADD COLUMN credential_kind TEXT NOT NULL "
+                    "DEFAULT 'legacy_bearer' CHECK "
+                    "(credential_kind IN ('legacy_bearer','ed25519'))"
+                ),
+                "public_key_b64": "ALTER TABLE devices ADD COLUMN public_key_b64 TEXT",
+                "public_key_thumbprint": (
+                    "ALTER TABLE devices ADD COLUMN public_key_thumbprint TEXT"
+                ),
+                "credential_version": (
+                    "ALTER TABLE devices ADD COLUMN credential_version INTEGER "
+                    "NOT NULL DEFAULT 1 CHECK (credential_version >= 1)"
+                ),
+                "credential_expires_at": (
+                    "ALTER TABLE devices ADD COLUMN credential_expires_at TEXT"
+                ),
+                "credential_revoked_at": (
+                    "ALTER TABLE devices ADD COLUMN credential_revoked_at TEXT"
+                ),
+                "enrolled_by_user_id": (
+                    "ALTER TABLE devices ADD COLUMN enrolled_by_user_id TEXT "
+                    "REFERENCES users(id)"
+                ),
+            }
+            for column, statement in device_migrations.items():
+                if column not in device_columns:
+                    connection.execute(statement)
             for table in ("usage_events", "audit_logs"):
                 columns = {
                     row["name"]
@@ -224,6 +344,20 @@ class Database:
                         "ALTER TABLE usage_events ADD COLUMN "
                         "requested_tokens INTEGER NOT NULL DEFAULT 0"
                     )
+                if table == "audit_logs":
+                    if "user_id" not in columns:
+                        connection.execute(
+                            "ALTER TABLE audit_logs ADD COLUMN user_id TEXT"
+                        )
+                    if "correlation_id" not in columns:
+                        connection.execute(
+                            "ALTER TABLE audit_logs ADD COLUMN correlation_id TEXT"
+                        )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_public_key "
+                "ON devices(public_key_thumbprint) "
+                "WHERE public_key_thumbprint IS NOT NULL"
+            )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_usage_job ON usage_events(job_id, created_at)"
             )

@@ -55,6 +55,11 @@ flowchart LR
 
 ## Runtime sequence
 
+The lease/job path below is the current worker runtime. The Ed25519 proof and
+device-session prelude is an implemented Control Plane/client contract exercised
+end to end by WS-05 tests; the existing Desktop supervisor still uses the
+compatibility bearer until its follow-up integration.
+
 ```mermaid
 sequenceDiagram
     participant W as Atlas Worker
@@ -63,7 +68,9 @@ sequenceDiagram
     participant F as Fixed-Ops Workflow
     participant MG as Model Gateway
 
-    W->>CP: Heartbeat (device bearer)
+    W->>CP: Signed nonce (enrolled Ed25519 key)
+    CP-->>W: Short-lived device session
+    W->>CP: Heartbeat (device session)
     CP->>CP: Recheck device + subscription
     CP-->>W: Short-lived signed lease + assignments
     W->>CP: Claim next job (lease)
@@ -84,6 +91,13 @@ sequenceDiagram
 
 ### Control Plane API
 
+- Verifies provider-neutral browser identity assertions through an injected
+  adapter, then reloads live user, membership, role, and store grants.
+- Creates short-lived, one-time enrollment transactions without accepting a
+  tenant from the client.
+- Registers Ed25519 public keys for phone or worker devices, rejects proof
+  replay, rotates keys, and revokes devices with a live credential-version
+  check.
 - Authenticates worker devices.
 - Issues and validates short-lived leases.
 - Derives tenant identity from the authenticated device.
@@ -100,8 +114,11 @@ sequenceDiagram
 
 ### Atlas Worker supervisor
 
-- Reads the prototype device bearer from `ATLAS_DEVICE_TOKEN`; moving device
-  identity into the OS vault is a production milestone.
+- The current compatibility worker reads the prototype bearer from
+  `ATLAS_DEVICE_TOKEN`. Newly enrolled workers instead generate an Ed25519 key,
+  retain the private key in the OS vault, sign a fresh session challenge, and
+  keep only the returned short-lived device session in process memory. Wiring
+  that client flow into Desktop is the integration step after WS-05.
 - Sends heartbeats and maintains the current lease.
 - Claims only jobs assigned by the control plane.
 - Builds immutable `ManagedContext` values.
@@ -268,6 +285,12 @@ the prototype. That token is not production identity. Production requires real
 operator authentication, tenant-aware RBAC, CSRF protection, rate limiting,
 and separate customer/operator applications.
 
+In demo mode only, the same localhost/admin boundary exposes
+`POST /api/v1/dev/identity/token`. It mints a short-lived deterministic identity
+assertion for an already seeded subject. The route is absent outside demo mode;
+production supplies an OIDC verifier through the provider-neutral identity
+boundary.
+
 ## Job state machine
 
 ```mermaid
@@ -300,7 +323,7 @@ The prototype contract should survive these replacements:
 |---|---|
 | SQLite | PostgreSQL with migrations and backups |
 | Database polling | Queue/Temporal after workflow requirements stabilize |
-| Hashed bearer device secret | Hardware/OS-bound asymmetric device identity |
+| Ed25519 enrollment and proof-bound sessions; legacy bearer-token compatibility | Hardware/OS-bound key plus platform attestation where justified |
 | Localhost admin | Authenticated, RBAC-protected operator console |
 | Deterministic model | Server-side OpenAI-compatible provider adapters |
 | Fixture connector | Authorized Tekion API/browser connectors |
