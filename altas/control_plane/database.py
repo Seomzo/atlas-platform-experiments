@@ -143,6 +143,90 @@ CREATE TABLE IF NOT EXISTS device_proof_nonces (
     PRIMARY KEY (device_id, nonce)
 );
 
+CREATE TABLE IF NOT EXISTS relay_pairings (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    store_id TEXT NOT NULL REFERENCES stores(id),
+    user_id TEXT NOT NULL REFERENCES users(id),
+    phone_device_id TEXT NOT NULL REFERENCES devices(id),
+    worker_device_id TEXT NOT NULL REFERENCES devices(id),
+    agent_id TEXT NOT NULL REFERENCES agents(id),
+    status TEXT NOT NULL CHECK (status IN ('active', 'revoked')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS relay_sessions (
+    id TEXT PRIMARY KEY,
+    pairing_id TEXT NOT NULL REFERENCES relay_pairings(id),
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    store_id TEXT NOT NULL REFERENCES stores(id),
+    phone_device_id TEXT NOT NULL REFERENCES devices(id),
+    worker_device_id TEXT NOT NULL REFERENCES devices(id),
+    agent_id TEXT NOT NULL REFERENCES agents(id),
+    gateway_session_id TEXT,
+    idempotency_key TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (
+        status IN ('pending', 'active', 'failed', 'closed')
+    ),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    closed_at TEXT,
+    UNIQUE (phone_device_id, idempotency_key)
+);
+
+CREATE TABLE IF NOT EXISTS relay_commands (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES relay_sessions(id),
+    worker_device_id TEXT NOT NULL REFERENCES devices(id),
+    worker_sequence INTEGER NOT NULL CHECK (worker_sequence > 0),
+    command_type TEXT NOT NULL CHECK (
+        command_type IN ('session.create', 'prompt.submit', 'session.interrupt')
+    ),
+    payload_nonce TEXT NOT NULL,
+    payload_ciphertext TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (
+        status IN (
+            'queued', 'dispatched', 'acked', 'succeeded', 'failed',
+            'expired', 'canceled'
+        )
+    ),
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    dispatched_at TEXT,
+    acked_at TEXT,
+    completed_at TEXT,
+    UNIQUE (session_id, idempotency_key),
+    UNIQUE (worker_device_id, worker_sequence)
+);
+
+CREATE TABLE IF NOT EXISTS relay_events (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES relay_sessions(id),
+    sequence INTEGER NOT NULL CHECK (sequence > 0),
+    source_event_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    command_id TEXT REFERENCES relay_commands(id),
+    payload_nonce TEXT NOT NULL,
+    payload_ciphertext TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (session_id, sequence),
+    UNIQUE (session_id, source_event_id)
+);
+
+CREATE TABLE IF NOT EXISTS relay_worker_connections (
+    id TEXT PRIMARY KEY,
+    worker_device_id TEXT NOT NULL REFERENCES devices(id),
+    connected_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    disconnected_at TEXT,
+    close_reason TEXT
+);
+
 CREATE TABLE IF NOT EXISTS entitlements (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES tenants(id),
@@ -242,6 +326,19 @@ CREATE INDEX IF NOT EXISTS idx_device_enrollments_context
     ON device_enrollments(tenant_id, store_id, status, expires_at);
 CREATE INDEX IF NOT EXISTS idx_device_proof_nonce_expiry
     ON device_proof_nonces(expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_relay_active_pairing
+    ON relay_pairings(phone_device_id, worker_device_id, store_id)
+    WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_relay_pairings_phone
+    ON relay_pairings(phone_device_id, status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_relay_sessions_phone
+    ON relay_sessions(phone_device_id, status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_relay_commands_delivery
+    ON relay_commands(worker_device_id, status, worker_sequence);
+CREATE INDEX IF NOT EXISTS idx_relay_events_cursor
+    ON relay_events(session_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_relay_worker_connections
+    ON relay_worker_connections(worker_device_id, connected_at);
 CREATE INDEX IF NOT EXISTS idx_agents_tenant_store ON agents(tenant_id, store_id);
 CREATE INDEX IF NOT EXISTS idx_entitlements_lookup
     ON entitlements(tenant_id, store_id, capability, status);

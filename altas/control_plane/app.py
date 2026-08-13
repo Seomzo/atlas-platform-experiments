@@ -38,6 +38,9 @@ from .identity import (
 )
 from .model_gateway import ModelGateway, ModelGatewayError
 from .policy import PolicyDecision, PolicyDenied, PolicyEngine, not_expired
+from .relay_api import build_relay_router
+from .relay_repository import RelayRepository
+from .relay_security import RelayCursorSigner, RelayPayloadCipher
 from .repository import (
     AccountAccessDenied,
     ControlPlaneRepository,
@@ -148,11 +151,14 @@ def create_app(
     database = Database(settings.database_path)
     database.initialize()
     repository = ControlPlaneRepository(database)
+    relay_payload_cipher = RelayPayloadCipher(settings.lease_signing_key)
+    relay_repository = RelayRepository(database, relay_payload_cipher)
     demo_seed: DemoSeed | None = (
         repository.seed_demo() if settings.seed_demo_data else None
     )
     lease_signer = LeaseSigner(settings.lease_signing_key)
     device_session_signer = DeviceSessionSigner(settings.lease_signing_key)
+    relay_cursor_signer = RelayCursorSigner(settings.lease_signing_key)
     if identity_verifier is None:
         identity_verifier = (
             DeterministicIdentityProvider(settings.lease_signing_key)
@@ -179,6 +185,8 @@ def create_app(
     app.state.repository = repository
     app.state.lease_signer = lease_signer
     app.state.device_session_signer = device_session_signer
+    app.state.relay_repository = relay_repository
+    app.state.relay_cursor_signer = relay_cursor_signer
     app.state.identity_verifier = identity_verifier
     app.state.policy = policy
     app.state.demo_seed = demo_seed
@@ -516,7 +524,7 @@ def create_app(
         return {"items": items, "count": len(items)}
 
     @account.post("/devices/{device_id}/revoke")
-    def revoke_account_device(
+    async def revoke_account_device(
         device_id: str,
         request: DeviceRevocationRequest,
         user: dict[str, Any] = Depends(require_account),
@@ -553,6 +561,8 @@ def create_app(
                 "terminated_job_count": device["terminated_job_count"],
             },
         )
+        relay_repository.revoke_device_scope(device["id"])
+        await relay_hub.disconnect_worker(device["id"], reason="device_revoked")
         return {"device": device}
 
     app.include_router(account)
@@ -809,6 +819,17 @@ def create_app(
         }
 
     app.include_router(device_api)
+
+    relay_router, relay_hub = build_relay_router(
+        settings=settings,
+        repository=repository,
+        relay_repository=relay_repository,
+        device_session_signer=device_session_signer,
+        cursor_signer=relay_cursor_signer,
+        require_account=require_account,
+    )
+    app.state.relay_hub = relay_hub
+    app.include_router(relay_router)
 
     worker = APIRouter(prefix="/api/v1/worker", tags=["worker"])
 
