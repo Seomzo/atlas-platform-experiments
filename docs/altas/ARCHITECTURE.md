@@ -37,6 +37,7 @@ flowchart LR
     end
 
     CP <-->|"outbound heartbeat, lease, jobs, results"| W
+    CP <-->|"outbound durable mobile text relay"| W
     T --> TK["Tekion API / browser"]
 ```
 
@@ -110,6 +111,8 @@ sequenceDiagram
 - Atomically reserves per-job model-request and requested-output-token budgets
   before a provider call.
 - Persists safe usage and audit records.
+- Pairs one enrolled phone with one exact worker/store/agent boundary and
+  persists encrypted, idempotent text commands plus ordered replay events.
 - Serves the localhost Control Center in the prototype.
 
 ### Atlas Worker supervisor
@@ -132,6 +135,10 @@ sequenceDiagram
 - Reports job transitions and safe diagnostics.
 - Runs the fixture-backed fixed-ops workflow and native Cortex maintenance
   directly in this walking skeleton.
+- The M02 relay connector proves its enrolled Ed25519 key, opens an outbound
+  WebSocket, durably stores commands before acknowledgement, and translates
+  only three command types through a loopback-only gateway adapter. It does not
+  expose the Desktop JSON-RPC registry to a phone.
 
 ### Cortex memory lifecycle
 

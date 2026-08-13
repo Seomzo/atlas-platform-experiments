@@ -71,6 +71,25 @@ used. Rotation requires both the existing device session and proof of the new
 private key. Revocation increments the credential version and invalidates old
 sessions immediately.
 
+### Mobile text relay
+
+Mobile relay HTTP calls require both the verified account assertion and the
+short-lived session for the exact phone enrolled by that user. The Control
+Plane derives tenant/store scope and accepts no tenant field. A pairing is one
+phone, one active Ed25519 worker, and the worker's exact active agent binding.
+
+The worker connects outbound with a short-lived device session. Browser
+origins and query credentials are rejected. Its local adapter is syntactically
+restricted to loopback and hard-codes only session creation, text submission,
+and interruption; mobile input cannot select an arbitrary gateway method,
+workspace, profile, model, or tool.
+
+Relay payloads are AES-GCM encrypted before Control Plane and worker SQLite
+writes. Durable command/event identities and signed cursors provide replay and
+deduplication. Audit metadata excludes content. Queue and event sizes are
+bounded. Device revocation closes active relay scope and cancels nonterminal
+commands. See [`mobile/M02_TEXT_RELAY.md`](mobile/M02_TEXT_RELAY.md).
+
 ### Process isolation target
 
 Production uses one Hermes engine process/profile per store or credential
@@ -139,6 +158,9 @@ dealership payloads.
 | Model calls provider directly | Atlas gateway profile; production network policy | Egress allowlist |
 | Policy service times out | Managed guard denies | Multi-region policy service and cached lease policy with bounded TTL |
 | Device is remotely disabled | Live device recheck on protected calls | Push invalidation and fleet alerting |
+| Phone calls broad Desktop control methods | Phone can call only narrow Control Plane relay endpoints; worker adapter hard-allowlists three loopback RPCs | Separate supported Task Thread service process |
+| Relay reconnect duplicates a prompt | Server and worker durable idempotency; ambiguous non-idempotent local RPC fails closed instead of replaying | Promote durable Task Thread turns end to end |
+| Relay database exposes chat text | AES-GCM payload encryption on both persistence planes; content-free audit | KMS envelope keys and retention/deletion policy |
 | Job is abandoned or completed by an old attempt | One active claim per device, visibility timeout, one-time hashed claim token | Durable queue with lease renewal and dead-letter policy |
 | Model loops or races exceed expected spend | Atomic per-job request and requested-token reservations | Tenant billing ledger, provider hard caps, and anomaly alerts |
 | Model request multiplies spend through payload extensions | Strict field allowlist, one completion, and bounded messages/request size | Model-specific tokenization plus tenant/provider hard caps |

@@ -33,6 +33,10 @@ class ControlPlaneSettings:
     device_session_ttl_seconds: int = 300
     device_proof_max_skew_seconds: int = 60
     device_credential_ttl_seconds: int = 31_536_000
+    relay_command_ttl_seconds: int = 300
+    relay_max_pending_commands: int = 32
+    relay_max_inflight_commands: int = 8
+    relay_max_event_bytes: int = 131_072
     job_visibility_timeout_seconds: int = 900
     # A claimed Cortex batch can make at most 20 sequential 30-second model
     # requests. Give that exact job a longer signed lease while keeping it
@@ -74,6 +78,14 @@ class ControlPlaneSettings:
             )
         if self.device_credential_ttl_seconds < 86_400:
             raise ValueError("device_credential_ttl_seconds must be at least one day")
+        if self.relay_command_ttl_seconds < 30:
+            raise ValueError("relay_command_ttl_seconds must be at least 30 seconds")
+        if not 1 <= self.relay_max_inflight_commands <= self.relay_max_pending_commands:
+            raise ValueError(
+                "relay inflight commands must be between one and the pending limit"
+            )
+        if not 4096 <= self.relay_max_event_bytes <= 1_048_576:
+            raise ValueError("relay_max_event_bytes must be between 4 KiB and 1 MiB")
         if self.job_visibility_timeout_seconds < 15:
             raise ValueError(
                 "job_visibility_timeout_seconds must be at least 15 seconds"
@@ -148,6 +160,18 @@ class ControlPlaneSettings:
             lease_ttl_seconds=int(os.getenv("ATLAS_LEASE_TTL_SECONDS", "300")),
             job_visibility_timeout_seconds=int(
                 os.getenv("ATLAS_JOB_VISIBILITY_TIMEOUT_SECONDS", "900")
+            ),
+            relay_command_ttl_seconds=int(
+                os.getenv("ATLAS_RELAY_COMMAND_TTL_SECONDS", "300")
+            ),
+            relay_max_pending_commands=int(
+                os.getenv("ATLAS_RELAY_MAX_PENDING_COMMANDS", "32")
+            ),
+            relay_max_inflight_commands=int(
+                os.getenv("ATLAS_RELAY_MAX_INFLIGHT_COMMANDS", "8")
+            ),
+            relay_max_event_bytes=int(
+                os.getenv("ATLAS_RELAY_MAX_EVENT_BYTES", "131072")
             ),
             cortex_job_lease_ttl_seconds=int(
                 os.getenv("ATLAS_CORTEX_JOB_LEASE_TTL_SECONDS", "840")
