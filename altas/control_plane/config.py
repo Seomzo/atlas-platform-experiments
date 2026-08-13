@@ -28,6 +28,11 @@ class ControlPlaneSettings:
     seed_demo_data: bool = False
     mock_model: bool = True
     lease_ttl_seconds: int = 300
+    account_session_ttl_seconds: int = 600
+    enrollment_ttl_seconds: int = 600
+    device_session_ttl_seconds: int = 300
+    device_proof_max_skew_seconds: int = 60
+    device_credential_ttl_seconds: int = 31_536_000
     job_visibility_timeout_seconds: int = 900
     # A claimed Cortex batch can make at most 20 sequential 30-second model
     # requests. Give that exact job a longer signed lease while keeping it
@@ -57,6 +62,18 @@ class ControlPlaneSettings:
             raise ValueError("admin_token must not be empty")
         if self.lease_ttl_seconds < 15:
             raise ValueError("lease_ttl_seconds must be at least 15 seconds")
+        if self.account_session_ttl_seconds < 15:
+            raise ValueError("account_session_ttl_seconds must be at least 15 seconds")
+        if self.enrollment_ttl_seconds < 30:
+            raise ValueError("enrollment_ttl_seconds must be at least 30 seconds")
+        if self.device_session_ttl_seconds < 15:
+            raise ValueError("device_session_ttl_seconds must be at least 15 seconds")
+        if not 15 <= self.device_proof_max_skew_seconds <= 300:
+            raise ValueError(
+                "device_proof_max_skew_seconds must be between 15 and 300 seconds"
+            )
+        if self.device_credential_ttl_seconds < 86_400:
+            raise ValueError("device_credential_ttl_seconds must be at least one day")
         if self.job_visibility_timeout_seconds < 15:
             raise ValueError(
                 "job_visibility_timeout_seconds must be at least 15 seconds"
