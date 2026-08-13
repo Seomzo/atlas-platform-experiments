@@ -3,7 +3,7 @@
 ## Status
 
 - Branch: `codex/ws-09-managed-approvals`
-- Draft PR: pending
+- Draft PR: [#9](https://github.com/Seomzo/atlas-platform-experiments/pull/9)
 - Baseline: M02 tip `4fe762d71f8a2dff66d1156dfcb80bb01d4a221d`
 - Last validated: 2026-08-12 America/Los_Angeles
 - Overall: exact, expiring, single-use approval contract and one synthetic
@@ -171,11 +171,10 @@ encrypted relay events, or the mandatory managed guard.
 
 ## Exact next actions
 
-1. Run the full Atlas suite, Ruff check/format, and `git diff --check`.
-2. Commit and push this branch.
-3. Open a draft PR with base `codex/mobile-m02-text-relay`; do not merge it.
-4. Review the action vocabulary and phone response contract before freezing
+1. Review draft PR #9 only after its WS-05 and M02 bases are accepted; do not
+   merge the stack out of order.
+2. Review the action vocabulary and phone response contract before freezing
    the first iOS API models.
-5. In the next iOS workstream, implement account/device bootstrap, relay text,
+3. In the next iOS workstream, implement account/device bootstrap, relay text,
    durable event replay, and exact approval presentation/response in that
    order; keep APNs and voice behind explicit follow-up acceptance criteria.
