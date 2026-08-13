@@ -227,6 +227,55 @@ CREATE TABLE IF NOT EXISTS relay_worker_connections (
     close_reason TEXT
 );
 
+CREATE TABLE IF NOT EXISTS managed_approvals (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    store_id TEXT NOT NULL REFERENCES stores(id),
+    user_id TEXT NOT NULL REFERENCES users(id),
+    phone_device_id TEXT NOT NULL REFERENCES devices(id),
+    worker_device_id TEXT NOT NULL REFERENCES devices(id),
+    agent_id TEXT NOT NULL REFERENCES agents(id),
+    job_id TEXT NOT NULL REFERENCES jobs(id),
+    relay_session_id TEXT NOT NULL REFERENCES relay_sessions(id),
+    job_attempt INTEGER NOT NULL CHECK (job_attempt > 0),
+    workflow TEXT NOT NULL,
+    capability TEXT NOT NULL,
+    action_kind TEXT NOT NULL CHECK (
+        action_kind IN (
+            'read', 'navigate', 'analyze', 'draft', 'download_export',
+            'send_message', 'submit', 'mutate', 'credential', 'administrative'
+        )
+    ),
+    operation TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    action_digest TEXT NOT NULL,
+    display_nonce TEXT NOT NULL,
+    display_ciphertext TEXT NOT NULL,
+    display_digest TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    correlation_id TEXT NOT NULL UNIQUE,
+    lease_nonce TEXT NOT NULL,
+    lease_expires_at INTEGER NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (
+        status IN (
+            'pending', 'approved', 'denied', 'expired', 'canceled', 'consumed'
+        )
+    ),
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+    decision TEXT CHECK (decision IN ('approve', 'deny')),
+    decision_reason TEXT,
+    decided_by_user_id TEXT REFERENCES users(id),
+    decided_by_device_id TEXT REFERENCES devices(id),
+    decision_idempotency_key TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    decided_at TEXT,
+    consumed_at TEXT,
+    UNIQUE (worker_device_id, idempotency_key)
+);
+
 CREATE TABLE IF NOT EXISTS entitlements (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES tenants(id),
@@ -339,6 +388,12 @@ CREATE INDEX IF NOT EXISTS idx_relay_events_cursor
     ON relay_events(session_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_relay_worker_connections
     ON relay_worker_connections(worker_device_id, connected_at);
+CREATE INDEX IF NOT EXISTS idx_managed_approvals_phone
+    ON managed_approvals(phone_device_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_managed_approvals_job_attempt
+    ON managed_approvals(job_id, job_attempt, status);
+CREATE INDEX IF NOT EXISTS idx_managed_approvals_expiry
+    ON managed_approvals(status, expires_at);
 CREATE INDEX IF NOT EXISTS idx_agents_tenant_store ON agents(tenant_id, store_id);
 CREATE INDEX IF NOT EXISTS idx_entitlements_lookup
     ON entitlements(tenant_id, store_id, capability, status);

@@ -37,6 +37,7 @@ class ControlPlaneSettings:
     relay_max_pending_commands: int = 32
     relay_max_inflight_commands: int = 8
     relay_max_event_bytes: int = 131_072
+    managed_approval_ttl_seconds: int = 120
     job_visibility_timeout_seconds: int = 900
     # A claimed Cortex batch can make at most 20 sequential 30-second model
     # requests. Give that exact job a longer signed lease while keeping it
@@ -86,6 +87,10 @@ class ControlPlaneSettings:
             )
         if not 4096 <= self.relay_max_event_bytes <= 1_048_576:
             raise ValueError("relay_max_event_bytes must be between 4 KiB and 1 MiB")
+        if not 30 <= self.managed_approval_ttl_seconds <= self.lease_ttl_seconds:
+            raise ValueError(
+                "managed approval TTL must be between 30 seconds and the lease TTL"
+            )
         if self.job_visibility_timeout_seconds < 15:
             raise ValueError(
                 "job_visibility_timeout_seconds must be at least 15 seconds"
@@ -172,6 +177,9 @@ class ControlPlaneSettings:
             ),
             relay_max_event_bytes=int(
                 os.getenv("ATLAS_RELAY_MAX_EVENT_BYTES", "131072")
+            ),
+            managed_approval_ttl_seconds=int(
+                os.getenv("ATLAS_MANAGED_APPROVAL_TTL_SECONDS", "120")
             ),
             cortex_job_lease_ttl_seconds=int(
                 os.getenv("ATLAS_CORTEX_JOB_LEASE_TTL_SECONDS", "840")

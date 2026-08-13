@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from altas.credentials import SecretHandle, SystemKeyringVault
+from altas.managed.actions import classify_tool_action
 from altas.managed.client import AltasControlPlaneClient
 from altas.managed.context import ManagedContext
 
@@ -26,6 +27,7 @@ _TOOL_CAPABILITIES = {
     "pull_advisor_metrics": "fixed_ops.advisor_metrics",
     "pull_parts_summary": "fixed_ops.parts_summary",
     "draft_service_manager_email": "communications.manager_draft",
+    "export_synthetic_fixed_ops_report": "fixed_ops.synthetic_export",
 }
 
 
@@ -150,6 +152,18 @@ def guard_tool_call(
             )
 
         capability = _TOOL_CAPABILITIES.get(tool_name, f"tool.{tool_name}")
+        try:
+            action = classify_tool_action(
+                tool_name,
+                arguments,
+                store_id=context.store_id,
+            )
+        except ValueError:
+            return GuardResult(
+                False,
+                "ACTION_UNCLASSIFIED",
+                "Atlas has no reviewed managed-action contract for this tool.",
+            )
         with AltasControlPlaneClient(
             base_url=_required(env, "ATLAS_CONTROL_PLANE_URL"),
             device_token=_device_token(env),
@@ -162,6 +176,31 @@ def guard_tool_call(
                 capability=capability,
                 tool_name=tool_name,
             )
+            if decision.allowed and action.requires_approval:
+                approval_id = env.get("ATLAS_ACTION_APPROVAL_ID", "").strip()
+                approval_version = env.get("ATLAS_ACTION_APPROVAL_VERSION", "").strip()
+                if not approval_id or not approval_version:
+                    return GuardResult(
+                        False,
+                        "APPROVAL_REQUIRED",
+                        "Atlas requires an exact approval for this action.",
+                    )
+                try:
+                    expected_version = int(approval_version)
+                except ValueError:
+                    return GuardResult(
+                        False,
+                        "APPROVAL_INVALID",
+                        "Atlas could not validate the supplied action approval.",
+                    )
+                client.consume_managed_approval(
+                    approval_id=approval_id,
+                    lease=_lease_token(env),
+                    context=context,
+                    claim_token=_required(env, "ATLAS_CLAIM_TOKEN"),
+                    action=action,
+                    expected_version=expected_version,
+                )
         if decision.allowed:
             return GuardResult(True, decision.reason_code, "Allowed by Atlas policy")
         return GuardResult(

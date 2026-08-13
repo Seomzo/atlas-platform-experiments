@@ -113,6 +113,10 @@ sequenceDiagram
 - Persists safe usage and audit records.
 - Pairs one enrolled phone with one exact worker/store/agent boundary and
   persists encrypted, idempotent text commands plus ordered replay events.
+- Persists exact managed-action approvals, delivers their encrypted lifecycle
+  through the mobile relay, and atomically consumes an approved action only
+  while its original lease, job attempt, claim, capability, and live identity
+  scope still match.
 - Serves the localhost Control Center in the prototype.
 
 ### Atlas Worker supervisor
@@ -139,6 +143,10 @@ sequenceDiagram
   WebSocket, durably stores commands before acknowledgement, and translates
   only three command types through a loopback-only gateway adapter. It does not
   expose the Desktop JSON-RPC registry to a phone.
+- For a consequential managed action, requests one bounded approval, waits for
+  its exact terminal state, consumes it once under the claimed job, and verifies
+  the returned action receipt before local dispatch. The implemented synthetic
+  export creates no file and performs no external write.
 
 ### Cortex memory lifecycle
 
@@ -172,6 +180,13 @@ The current adapter surface contains:
   enter process-global environment or the profile `.env`.
 - Focused tests proving managed mode cannot bypass that guard through skip
   flags or alternate dispatch paths.
+- A canonical action classifier. Read, navigate, analyze, and unsent draft
+  actions remain under ordinary policy; export, send, submit, mutate,
+  credential, and administrative actions require exact approval. Unknown
+  managed tools are denied until an explicit target projection is reviewed.
+- A second fail-closed guard condition for consequential tools: normal policy
+  must allow first, then the exact approval digest/version is consumed before
+  dispatch. Approval never widens the policy decision.
 
 The native Cortex runtime starts one profile-local managed maintenance
 supervisor whenever a complete device/store/agent binding is present. It keeps
@@ -234,6 +249,10 @@ Core records:
 - `jobs`
 - `usage_events`
 - `audit_logs`
+- `users`, `memberships`, and `membership_store_grants`
+- `device_enrollments` and `device_proof_nonces`
+- `relay_pairings`, `relay_sessions`, `relay_commands`, and `relay_events`
+- `managed_approvals`
 
 Prototype schema and migrations live with `altas/control_plane`. SQLite is
 selected for zero-friction testing, not as a statement about production
@@ -248,6 +267,9 @@ POST /api/v1/worker/heartbeat
 POST /api/v1/worker/policy/evaluate
 GET  /api/v1/worker/jobs/next
 POST /api/v1/worker/jobs/{job_id}/complete
+POST /api/v1/worker/approvals
+GET  /api/v1/worker/approvals/{approval_id}
+POST /api/v1/worker/approvals/{approval_id}/consume
 ```
 
 Worker calls use `Authorization: Bearer <device-secret>`. Lease-protected
@@ -257,6 +279,21 @@ must return it, preventing another attempt from completing the job. Policy and
 model calls also carry it as `X-Atlas-Claim-Token`, binding all paid execution
 to the exact active attempt. Scoped calls carry tenant, store, agent, and job
 headers derived from `ManagedContext`.
+
+### Mobile approval surface
+
+```text
+GET  /api/v1/mobile/relay/approvals
+GET  /api/v1/mobile/relay/approvals/{approval_id}
+POST /api/v1/mobile/relay/approvals/{approval_id}/responses
+```
+
+These routes require both the verified account assertion and the short-lived
+session for the exact enrolled phone. They expose only that phone's live
+pairing scope. A response names one approval ID, expected version, canonical
+action digest, fixed decision, fixed reason, and idempotency key; there is no
+wildcard or approve-all operation. See
+[`MANAGED_APPROVALS.md`](MANAGED_APPROVALS.md).
 
 ### Model gateway
 
@@ -322,6 +359,26 @@ When the visibility timeout expires, the old token is invalidated before the
 job can be reclaimed. Disabling a device atomically cancels its queued and
 running work.
 
+## Managed approval state machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending
+    pending --> approved: exact phone decision
+    pending --> denied: exact phone decision
+    pending --> expired: bounded deadline
+    pending --> canceled: bound state changed
+    approved --> consumed: exact worker consume
+    approved --> expired: bounded deadline
+    approved --> canceled: bound state changed
+```
+
+An approval binds the user/phone/worker/agent, tenant/store, relay session,
+workflow/capability, job attempt and claim, original lease nonce/expiry,
+canonical human-display action and target, policy version, expiry, and audit
+correlation. Only `pending` may be decided and only `approved` may be consumed.
+The versioned consume is single use and repeats every live policy/scope check.
+
 ## Production evolution
 
 The prototype contract should survive these replacements:
@@ -346,3 +403,5 @@ The prototype contract should survive these replacements:
 5. No managed tool executes when policy is unreachable.
 6. No generic engine updater runs on a customer deployment.
 7. No customer-facing Atlas capability depends on a mutable upstream name.
+8. An approval can narrow an already-authorized job action but can never widen
+   its capability, identity, store, target, lease, or attempt.

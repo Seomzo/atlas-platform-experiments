@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from altas.managed.client import Lease, PolicyDecision
+from altas.managed.context import ManagedActionAuthorization
 from altas.managed.worker import AltasWorker, WorkerSettings
 
 
@@ -42,6 +43,7 @@ class RecordingClient:
         self.job_capability = "fixed_ops.daily_report"
         self.claimed_by_device_id: str | None = "device-1"
         self.job_authorization_lease: Lease | None = None
+        self.approval_calls: list[dict[str, Any]] = []
 
     def heartbeat(self, **_kwargs: Any) -> Lease:
         self.heartbeat_calls += 1
@@ -60,6 +62,7 @@ class RecordingClient:
             "claimed_by_device_id": self.claimed_by_device_id,
             "capability": self.job_capability,
             "claim_token": "claim-token-with-more-than-thirty-two-characters",
+            "attempt_count": 1,
             "payload": {"report_date": "2026-07-08"},
         }
 
@@ -87,6 +90,31 @@ class RecordingClient:
     def complete_job(self, **kwargs: Any) -> dict[str, Any]:
         self.completions.append(kwargs)
         return {"job": {"status": kwargs["status"]}}
+
+    def request_managed_approval(self, **kwargs: Any) -> dict[str, Any]:
+        self.approval_calls.append({"kind": "request", **kwargs})
+        action = kwargs["action"]
+        return {
+            "id": "managed_approval_worker_test",
+            "status": "approved",
+            "version": 2,
+            "action_digest": action.digest(),
+        }
+
+    def get_managed_approval(self, **kwargs: Any) -> dict[str, Any]:
+        self.approval_calls.append({"kind": "get", **kwargs})
+        raise AssertionError("already-approved fixture must not poll")
+
+    def consume_managed_approval(self, **kwargs: Any) -> ManagedActionAuthorization:
+        self.approval_calls.append({"kind": "consume", **kwargs})
+        return ManagedActionAuthorization(
+            approval_id=kwargs["approval_id"],
+            action_digest=kwargs["action"].digest(),
+            job_id=kwargs["context"].job_id,
+            job_attempt=1,
+            policy_version="atlas.managed-action-policy.v1",
+            consumed_at="2026-08-12T00:00:00Z",
+        )
 
 
 @pytest.mark.parametrize("execution_fails", [False, True])
@@ -174,6 +202,59 @@ def test_worker_uses_claim_bound_job_lease_for_policy_and_execution() -> None:
     assert result.status == "succeeded"
     assert client.policy_calls[0]["lease"] == "longer-job-bound-lease"
     assert client.completions[0]["result"] == {"lease": "longer-job-bound-lease"}
+
+
+def test_worker_runs_synthetic_export_only_after_exact_consumed_approval() -> None:
+    from altas.fixed_ops import (
+        SYNTHETIC_EXPORT_CAPABILITY,
+        SYNTHETIC_EXPORT_WORKFLOW,
+    )
+
+    client = RecordingClient()
+    client.job_capability = SYNTHETIC_EXPORT_CAPABILITY
+    client.capabilities = (SYNTHETIC_EXPORT_CAPABILITY,)
+
+    def next_job(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "id": "job-worker-renewal",
+            "tenant_id": "tenant-1",
+            "store_id": "store-sunrise-vw",
+            "agent_id": "agent-1",
+            "claimed_by_device_id": "device-1",
+            "capability": SYNTHETIC_EXPORT_CAPABILITY,
+            "claim_token": "claim-token-with-more-than-thirty-two-characters",
+            "attempt_count": 1,
+            "payload": {
+                "workflow": SYNTHETIC_EXPORT_WORKFLOW,
+                "report_id": "report-demo-1",
+                "relay_session_id": "relay-session-1",
+            },
+        }
+
+    client.next_job = next_job  # type: ignore[method-assign]
+    worker = AltasWorker(
+        WorkerSettings(
+            control_plane_url="http://control-plane.invalid",
+            device_token="device-token",
+            device_id="device-1",
+            tenant_id="tenant-1",
+            store_id="store-sunrise-vw",
+            agent_id="agent-1",
+        ),
+        client=client,  # type: ignore[arg-type]
+    )
+
+    result = worker.run_once()
+
+    assert result.status == "succeeded"
+    assert [call["kind"] for call in client.approval_calls] == [
+        "request",
+        "consume",
+    ]
+    exported = client.completions[0]["result"]
+    assert exported["approval_id"] == "managed_approval_worker_test"
+    assert exported["artifact_created"] is False
+    assert exported["external_write"] is False
 
 
 @pytest.mark.parametrize(

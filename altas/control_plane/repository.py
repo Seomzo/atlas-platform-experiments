@@ -35,6 +35,7 @@ DEMO_CAPABILITIES = (
     "jobs.poll",
     "model.chat",
     "fixed_ops.daily_report",
+    "fixed_ops.synthetic_export",
     "cortex.memory_maintenance",
 )
 

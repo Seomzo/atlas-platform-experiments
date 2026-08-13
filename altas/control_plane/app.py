@@ -30,6 +30,8 @@ from altas.cortex.managed_dispatch import (
 
 from .config import ControlPlaneSettings
 from .database import Database
+from .approval_api import build_approval_routers
+from .approval_repository import ApprovalRepository
 from .identity import (
     DeterministicIdentityProvider,
     IdentityVerificationError,
@@ -153,6 +155,11 @@ def create_app(
     repository = ControlPlaneRepository(database)
     relay_payload_cipher = RelayPayloadCipher(settings.lease_signing_key)
     relay_repository = RelayRepository(database, relay_payload_cipher)
+    approval_repository = ApprovalRepository(
+        database,
+        cipher=relay_payload_cipher,
+        relay_repository=relay_repository,
+    )
     demo_seed: DemoSeed | None = (
         repository.seed_demo() if settings.seed_demo_data else None
     )
@@ -187,6 +194,7 @@ def create_app(
     app.state.device_session_signer = device_session_signer
     app.state.relay_repository = relay_repository
     app.state.relay_cursor_signer = relay_cursor_signer
+    app.state.approval_repository = approval_repository
     app.state.identity_verifier = identity_verifier
     app.state.policy = policy
     app.state.demo_seed = demo_seed
@@ -561,6 +569,7 @@ def create_app(
                 "terminated_job_count": device["terminated_job_count"],
             },
         )
+        approval_repository.cancel_device(device["id"])
         relay_repository.revoke_device_scope(device["id"])
         await relay_hub.disconnect_worker(device["id"], reason="device_revoked")
         return {"device": device}
@@ -830,6 +839,18 @@ def create_app(
     )
     app.state.relay_hub = relay_hub
     app.include_router(relay_router)
+
+    approval_worker_router, approval_mobile_router = build_approval_routers(
+        settings=settings,
+        repository=repository,
+        approval_repository=approval_repository,
+        policy=policy,
+        device_session_signer=device_session_signer,
+        require_account=require_account,
+        require_worker_device=require_worker_device,
+    )
+    app.include_router(approval_worker_router)
+    app.include_router(approval_mobile_router)
 
     worker = APIRouter(prefix="/api/v1/worker", tags=["worker"])
 
@@ -1289,6 +1310,7 @@ def create_app(
             resource_id=job_id,
             details={"capability": job["capability"]},
         )
+        approval_repository.cancel_job(job_id, reason="job_completed")
         return {"job": completed}
 
     app.include_router(worker)
@@ -1441,10 +1463,11 @@ def create_app(
             resource_id=job_id,
             details={"reason": request.reason, "prior_status": existing["status"]},
         )
+        approval_repository.cancel_job(job_id, reason="job_requeued")
         return {"job": job}
 
     @admin.post("/{resource}/{resource_id}/toggle")
-    def toggle_resource(
+    async def toggle_resource(
         resource: ToggleResource,
         resource_id: str,
         request: ToggleRequest,
@@ -1471,6 +1494,26 @@ def create_app(
                 "terminated_job_count": updated.get("terminated_job_count", 0),
             },
         )
+        if updated["status"] != "active":
+            if resource == "devices":
+                approval_repository.cancel_device(resource_id)
+                relay_repository.revoke_device_scope(resource_id)
+                await relay_hub.disconnect_worker(
+                    resource_id,
+                    reason="device_disabled",
+                )
+            elif resource == "agents":
+                approval_repository.cancel_agent(resource_id)
+            elif resource == "stores":
+                approval_repository.cancel_store(resource_id)
+            elif resource == "subscriptions":
+                approval_repository.cancel_tenant(str(updated["tenant_id"]))
+            elif resource == "entitlements":
+                approval_repository.cancel_entitlement(
+                    tenant_id=str(updated["tenant_id"]),
+                    store_id=str(updated["store_id"]),
+                    capability=str(updated["capability"]),
+                )
         return {"resource": updated}
 
     @admin.get("/{resource}")

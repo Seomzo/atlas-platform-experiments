@@ -170,3 +170,98 @@ def test_control_plane_exception_fails_closed(monkeypatch: Any) -> None:
     assert result.allowed is False
     assert result.reason_code == "POLICY_UNAVAILABLE"
     assert "sensitive" not in result.message
+
+
+def test_unclassified_managed_tool_denies_before_network(monkeypatch: Any) -> None:
+    class UnexpectedClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            raise AssertionError("unclassified tool must not reach policy")
+
+    monkeypatch.setattr(
+        "altas.managed.policy_guard.AltasControlPlaneClient",
+        UnexpectedClient,
+    )
+    result = guard_tool_call(
+        "terminal",
+        {"command": "ignored"},
+        environ=_managed_env(),
+    )
+
+    assert result.allowed is False
+    assert result.reason_code == "ACTION_UNCLASSIFIED"
+
+
+def test_consequential_tool_requires_exact_consumed_approval(
+    monkeypatch: Any,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    class FakeClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def __enter__(self) -> "FakeClient":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def evaluate_policy(self, **_kwargs: Any) -> PolicyDecision:
+            return PolicyDecision(True, "allowed")
+
+        def consume_managed_approval(self, **kwargs: Any) -> object:
+            seen.update(kwargs)
+            return object()
+
+    monkeypatch.setattr(
+        "altas.managed.policy_guard.AltasControlPlaneClient",
+        FakeClient,
+    )
+    environment = {
+        **_managed_env(),
+        "ATLAS_ACTION_APPROVAL_ID": "managed_approval_exact",
+        "ATLAS_ACTION_APPROVAL_VERSION": "2",
+    }
+    result = guard_tool_call(
+        "export_synthetic_fixed_ops_report",
+        {"report_id": "report-demo-1"},
+        environ=environment,
+    )
+
+    assert result.allowed is True
+    assert seen["approval_id"] == "managed_approval_exact"
+    assert seen["expected_version"] == 2
+    assert seen["action"].target_id == "report-demo-1"
+
+
+def test_consequential_tool_without_exact_approval_fails_before_execution(
+    monkeypatch: Any,
+) -> None:
+    class FakeClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def __enter__(self) -> "FakeClient":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def evaluate_policy(self, **_kwargs: Any) -> PolicyDecision:
+            return PolicyDecision(True, "allowed")
+
+        def consume_managed_approval(self, **_kwargs: Any) -> object:
+            raise AssertionError("approval must not be guessed")
+
+    monkeypatch.setattr(
+        "altas.managed.policy_guard.AltasControlPlaneClient",
+        FakeClient,
+    )
+    result = guard_tool_call(
+        "export_synthetic_fixed_ops_report",
+        {"report_id": "report-demo-1"},
+        environ=_managed_env(),
+    )
+
+    assert result.allowed is False
+    assert result.reason_code == "APPROVAL_REQUIRED"

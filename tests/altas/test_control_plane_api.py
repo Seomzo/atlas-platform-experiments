@@ -15,6 +15,7 @@ from altas.control_plane import ControlPlaneSettings, create_app
 from altas.control_plane.repository import (
     CortexDispatchLimitExceeded,
     DEMO_AGENT_ID,
+    DEMO_CAPABILITIES,
     DEMO_DEVICE_ID,
     DEMO_DEVICE_SECRET,
     DEMO_STORE_ID,
@@ -159,13 +160,16 @@ def test_demo_seed_is_idempotent_and_stores_only_device_hash(
         device_row = connection.execute(
             "SELECT secret_hash FROM devices WHERE id = ?", (DEMO_DEVICE_ID,)
         ).fetchone()
-        entitlement_count = connection.execute(
-            "SELECT COUNT(*) FROM entitlements"
-        ).fetchone()[0]
+        entitlement_capabilities = {
+            row[0]
+            for row in connection.execute(
+                "SELECT capability FROM entitlements"
+            ).fetchall()
+        }
 
     assert tenant_count == 1
     assert store_count == 2
-    assert entitlement_count == 5
+    assert entitlement_capabilities == set(DEMO_CAPABILITIES)
     assert device_row[0] == hash_secret(DEMO_DEVICE_SECRET)
     assert device_row[0] != DEMO_DEVICE_SECRET
     assert DEMO_DEVICE_SECRET.encode() not in database_path.read_bytes()
