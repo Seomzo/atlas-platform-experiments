@@ -4,7 +4,7 @@
 
 - Branch: `codex/ws-09-managed-approvals`
 - Draft PR: [#9](https://github.com/Seomzo/atlas-platform-experiments/pull/9)
-- Baseline: M02 tip `4fe762d71f8a2dff66d1156dfcb80bb01d4a221d`
+- Baseline: M02 tip `cf7bec22bf231c3629d2ab7890ed60e6477e38b7`
 - Last validated: 2026-08-12 America/Los_Angeles
 - Overall: exact, expiring, single-use approval contract and one synthetic
   approval-gated workflow implemented; final mobile/React UI and live actions
