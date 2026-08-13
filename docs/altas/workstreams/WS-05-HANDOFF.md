@@ -103,7 +103,7 @@ thumbprint index. The original `devices.secret_hash NOT NULL` constraint cannot
 be relaxed additively in SQLite without rebuilding all referencing tables; an
 asymmetric device therefore receives a random discarded preimage digest in
 that legacy column. `credential_kind='ed25519'` prevents the digest from ever
-entering bearer authentication. A future PostgreSQL migration should make the
+entering bearer-token authentication. A future PostgreSQL migration should make the
 legacy column nullable and remove this compatibility artifact.
 
 No enrollment token, identity assertion, device session, signature, or private

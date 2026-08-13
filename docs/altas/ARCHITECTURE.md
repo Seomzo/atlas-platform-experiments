@@ -323,7 +323,7 @@ The prototype contract should survive these replacements:
 |---|---|
 | SQLite | PostgreSQL with migrations and backups |
 | Database polling | Queue/Temporal after workflow requirements stabilize |
-| Ed25519 enrollment and proof-bound sessions; legacy bearer compatibility | Hardware/OS-bound key plus platform attestation where justified |
+| Ed25519 enrollment and proof-bound sessions; legacy bearer-token compatibility | Hardware/OS-bound key plus platform attestation where justified |
 | Localhost admin | Authenticated, RBAC-protected operator console |
 | Deterministic model | Server-side OpenAI-compatible provider adapters |
 | Fixture connector | Authorized Tekion API/browser connectors |

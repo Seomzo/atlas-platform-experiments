@@ -198,7 +198,7 @@ class LeaseSigner:
 
 
 class DeviceSessionSigner:
-    """Issue bearer sessions only after a device proves its private key.
+    """Issue signed sessions only after a device proves its private key.
 
     The underlying device credential is never transmitted.  The signed session
     is deliberately short-lived and carries a credential version so key
