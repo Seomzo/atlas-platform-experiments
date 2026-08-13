@@ -136,4 +136,8 @@ Draft PR 8 already contains `docs/altas/workstreams/M02-HANDOFF.md` for the back
 
 ## Publication
 
-Commit and draft-PR details are filled in after final validation. This workstream never merges automatically.
+- Artifact commit: `2e45a4a8d` (`docs: specify native iPhone architecture`)
+- Draft PR: [10](https://github.com/Seomzo/atlas-platform-experiments/pull/10)
+- PR base: `codex/mobile-m01-discovery` (draft PR 6), so the review diff is M02-only
+- PR head: `codex/mobile-m02-product-architecture`
+- Merge status: not merged; this workstream never merges automatically
