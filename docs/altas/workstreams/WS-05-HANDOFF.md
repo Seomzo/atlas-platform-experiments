@@ -3,7 +3,7 @@
 ## Status
 
 - Branch: `codex/ws-05-device-enrollment`
-- Draft PR: pending
+- Draft PR: <https://github.com/Seomzo/atlas-platform-experiments/pull/7>
 - Baseline: `4934f94eae2d02e039a8bb430f0cfb27075cc40e`
 - Last validated: 2026-08-12 America/Los_Angeles
 - Overall: provider-neutral identity/membership and Ed25519 device-enrollment
