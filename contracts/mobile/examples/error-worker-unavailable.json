@@ -1,0 +1,13 @@
+{
+  "schema_version": "atlas.mobile.error.v1",
+  "code": "WORKER_UNAVAILABLE",
+  "message": "The selected Atlas worker is unavailable.",
+  "correlation_id": "corr_worker_status_01",
+  "retryable": true,
+  "retry_after_seconds": 10,
+  "details": {
+    "resource_type": "worker",
+    "resource_id": "device_worker",
+    "last_seen_at": "2026-08-12T23:40:00Z"
+  }
+}

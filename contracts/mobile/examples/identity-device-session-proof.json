@@ -1,0 +1,8 @@
+{
+  "schema_version": "atlas.mobile.identity.v1",
+  "message_type": "device_session_proof",
+  "device_id": "device_phone",
+  "timestamp": 1786579200,
+  "nonce": "YWJjZGVmZ2hpamtsbW5vcA",
+  "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+}

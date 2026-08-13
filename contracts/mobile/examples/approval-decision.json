@@ -1,0 +1,9 @@
+{
+  "schema_version": "atlas.mobile.approval.v1",
+  "message_type": "decision",
+  "approval_id": "managed_approval_01",
+  "decision": "approve",
+  "reason": "user_approved",
+  "expected_version": 1,
+  "action_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}

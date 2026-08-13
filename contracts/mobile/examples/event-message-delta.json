@@ -1,0 +1,27 @@
+{
+  "schema_version": "atlas.mobile.event.v1",
+  "event_id": "evt_018fabc",
+  "sequence": 42,
+  "occurred_at": "2026-08-12T23:42:10.123Z",
+  "type": "message.delta",
+  "classification": "private_content",
+  "scope": {
+    "organization_id": "org_synthetic",
+    "store_id": "store_sunrise",
+    "phone_device_id": "device_phone",
+    "worker_device_id": "device_worker",
+    "agent_id": "agent_fixed_ops",
+    "profile_id": "profile_daily_report",
+    "relay_session_id": "relay_session_01",
+    "thread_id": "thread_01",
+    "turn_id": "turn_01",
+    "job_id": "job_01",
+    "attempt": 1
+  },
+  "correlation_id": "corr_vertical_slice_01",
+  "payload": {
+    "message_id": "message_01",
+    "delta_index": 3,
+    "text": "The approved source reports"
+  }
+}

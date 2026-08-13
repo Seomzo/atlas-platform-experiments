@@ -1,0 +1,350 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:atlas:mobile:event:v1",
+  "title": "Atlas Mobile Event v1",
+  "description": "Ordered, mobile-safe Atlas event. Raw gateway/provider/tool payloads are prohibited.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "sequence",
+    "occurred_at",
+    "type",
+    "classification",
+    "scope",
+    "correlation_id",
+    "payload"
+  ],
+  "properties": {
+    "schema_version": { "const": "atlas.mobile.event.v1" },
+    "event_id": { "$ref": "#/$defs/opaqueId" },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "type": { "$ref": "#/$defs/eventType" },
+    "classification": {
+      "enum": ["public_metadata", "private_content", "restricted_action"]
+    },
+    "scope": { "$ref": "#/$defs/scope" },
+    "correlation_id": { "$ref": "#/$defs/opaqueId" },
+    "source_digest": {
+      "description": "Optional domain-separated digest for audit correlation; never source content.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{32,128}$"
+    },
+    "payload": { "type": "object" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "connection.ready" } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/connectionPayload" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "worker.status" } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/workerPayload" } } }
+    },
+    {
+      "if": { "properties": { "type": { "enum": ["thread.snapshot", "thread.created", "thread.updated"] } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/threadPayload" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "message.accepted" } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/commandPayload" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "message.started" } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/messageStarted" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "message.delta" } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/messageDelta" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "message.completed" } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/messageCompleted" } } }
+    },
+    {
+      "if": { "properties": { "type": { "enum": ["tool.requested", "tool.started", "tool.progress", "tool.completed", "tool.failed"] } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/toolPayload" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "clarification.requested" } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/clarificationPayload" } } }
+    },
+    {
+      "if": { "properties": { "type": { "enum": ["voice.transcript.partial", "voice.transcript.final"] } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/transcriptPayload" } } }
+    },
+    {
+      "if": { "properties": { "type": { "enum": ["audio.started", "audio.completed"] } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/audioPayload" } } }
+    },
+    {
+      "if": { "properties": { "type": { "enum": ["approval.requested", "approval.resolved", "approval.expired", "approval.canceled", "approval.consumed"] } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/approvalPayload" } } }
+    },
+    {
+      "if": { "properties": { "type": { "enum": ["command.delivered", "command.uncertain"] } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/commandPayload" } } }
+    },
+    {
+      "if": { "properties": { "type": { "enum": ["turn.interrupted", "background.completed", "job.failed", "policy.denied", "report.available", "access.revoked"] } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/lifecyclePayload" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "error" } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/errorPayload" } } }
+    }
+  ],
+  "$defs": {
+    "opaqueId": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "safeText": {
+      "type": "string",
+      "maxLength": 16000,
+      "pattern": "^[^\\u0000]*$"
+    },
+    "shortText": {
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^[^\\u0000]*$"
+    },
+    "eventType": {
+      "enum": [
+        "connection.ready",
+        "worker.status",
+        "thread.snapshot",
+        "thread.created",
+        "thread.updated",
+        "message.accepted",
+        "message.started",
+        "message.delta",
+        "message.completed",
+        "clarification.requested",
+        "tool.requested",
+        "tool.started",
+        "tool.progress",
+        "tool.completed",
+        "tool.failed",
+        "turn.interrupted",
+        "command.delivered",
+        "command.uncertain",
+        "approval.requested",
+        "approval.resolved",
+        "approval.expired",
+        "approval.canceled",
+        "approval.consumed",
+        "voice.transcript.partial",
+        "voice.transcript.final",
+        "audio.started",
+        "audio.completed",
+        "background.completed",
+        "job.failed",
+        "policy.denied",
+        "report.available",
+        "access.revoked",
+        "error"
+      ]
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["organization_id", "phone_device_id"],
+      "properties": {
+        "organization_id": { "$ref": "#/$defs/opaqueId" },
+        "store_id": { "$ref": "#/$defs/opaqueId" },
+        "phone_device_id": { "$ref": "#/$defs/opaqueId" },
+        "worker_device_id": { "$ref": "#/$defs/opaqueId" },
+        "agent_id": { "$ref": "#/$defs/opaqueId" },
+        "profile_id": { "$ref": "#/$defs/opaqueId" },
+        "relay_session_id": { "$ref": "#/$defs/opaqueId" },
+        "thread_id": { "$ref": "#/$defs/opaqueId" },
+        "turn_id": { "$ref": "#/$defs/opaqueId" },
+        "job_id": { "$ref": "#/$defs/opaqueId" },
+        "attempt_id": { "$ref": "#/$defs/opaqueId" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "claim_id": { "$ref": "#/$defs/opaqueId" },
+        "pairing_id": { "$ref": "#/$defs/opaqueId" },
+        "workflow_id": { "$ref": "#/$defs/opaqueId" }
+      }
+    },
+    "messageStarted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message_id", "role"],
+      "properties": {
+        "message_id": { "$ref": "#/$defs/opaqueId" },
+        "role": { "enum": ["user", "atlas", "system"] }
+      }
+    },
+    "messageDelta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message_id", "delta_index", "text"],
+      "properties": {
+        "message_id": { "$ref": "#/$defs/opaqueId" },
+        "delta_index": { "type": "integer", "minimum": 0 },
+        "text": { "$ref": "#/$defs/safeText" }
+      }
+    },
+    "messageCompleted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message_id", "content", "content_digest"],
+      "properties": {
+        "message_id": { "$ref": "#/$defs/opaqueId" },
+        "content": { "$ref": "#/$defs/safeText" },
+        "content_digest": { "type": "string", "pattern": "^[A-Za-z0-9_-]{32,128}$" },
+        "finish_reason": { "enum": ["complete", "interrupted", "limit", "error"] }
+      }
+    },
+    "toolPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool_call_id", "kind", "label"],
+      "properties": {
+        "tool_call_id": { "$ref": "#/$defs/opaqueId" },
+        "kind": { "enum": ["read", "navigate", "analyze", "draft", "download_export", "send_message", "submit", "mutate", "credential", "administrative", "synthetic"] },
+        "label": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "summary": { "$ref": "#/$defs/shortText" },
+        "progress": { "type": "number", "minimum": 0, "maximum": 1 },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "error_code": { "$ref": "#/$defs/opaqueId" }
+      }
+    },
+    "connectionPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connection_id", "selected_contract_version", "heartbeat_interval_seconds", "heartbeat_timeout_seconds", "maximum_event_bytes", "maximum_subscriptions", "server_time", "replay_available_from"],
+      "properties": {
+        "connection_id": { "$ref": "#/$defs/opaqueId" },
+        "selected_contract_version": { "const": "atlas.mobile.v1" },
+        "heartbeat_interval_seconds": { "type": "integer", "minimum": 5, "maximum": 300 },
+        "heartbeat_timeout_seconds": { "type": "integer", "minimum": 10, "maximum": 900 },
+        "maximum_event_bytes": { "type": "integer", "minimum": 1024, "maximum": 131072 },
+        "maximum_subscriptions": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "server_time": { "type": "string", "format": "date-time" },
+        "replay_available_from": { "type": "string", "format": "date-time" }
+      }
+    },
+    "workerPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["worker_device_id", "state", "observed_at"],
+      "properties": {
+        "worker_device_id": { "$ref": "#/$defs/opaqueId" },
+        "state": { "enum": ["connected", "degraded", "unavailable", "revoked"] },
+        "observed_at": { "type": "string", "format": "date-time" },
+        "reason": { "enum": ["connected", "heartbeat_timeout", "graceful_close", "superseded", "session_expired", "revoked", "unknown"] }
+      }
+    },
+    "threadPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["thread_id", "state", "title", "updated_at"],
+      "properties": {
+        "thread_id": { "$ref": "#/$defs/opaqueId" },
+        "state": { "enum": ["new", "running", "waiting_for_user", "approval_required", "completed", "failed", "interrupted", "uncertain", "archived"] },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "unread": { "type": "boolean" },
+        "parent_thread_id": { "$ref": "#/$defs/opaqueId" },
+        "summary": { "$ref": "#/$defs/shortText" },
+        "snapshot_cursor": { "type": "string", "minLength": 16, "maxLength": 2048 }
+      }
+    },
+    "clarificationPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["clarification_id", "prompt"],
+      "properties": {
+        "clarification_id": { "$ref": "#/$defs/opaqueId" },
+        "prompt": { "$ref": "#/$defs/shortText" },
+        "choices": {
+          "type": "array",
+          "maxItems": 12,
+          "items": { "type": "string", "minLength": 1, "maxLength": 160 }
+        },
+        "expires_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "approvalPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approval_id", "version", "state", "action_digest"],
+      "properties": {
+        "approval_id": { "$ref": "#/$defs/opaqueId" },
+        "version": { "type": "integer", "minimum": 1 },
+        "state": { "enum": ["pending", "approved", "denied", "expired", "canceled", "consumed"] },
+        "action_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "action_kind": { "enum": ["download_export", "send_message", "submit", "mutate", "credential", "administrative"] },
+        "label": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "effect_summary": { "$ref": "#/$defs/shortText" },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "resolved_at": { "type": "string", "format": "date-time" },
+        "reason": { "$ref": "#/$defs/shortText" }
+      }
+    },
+    "commandPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command_id", "state"],
+      "properties": {
+        "command_id": { "$ref": "#/$defs/opaqueId" },
+        "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "state": { "enum": ["accepted", "delivered", "uncertain"] },
+        "summary": { "$ref": "#/$defs/shortText" }
+      }
+    },
+    "transcriptPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["voice_turn_id", "transcript", "is_final"],
+      "properties": {
+        "voice_turn_id": { "$ref": "#/$defs/opaqueId" },
+        "transcript": { "$ref": "#/$defs/safeText" },
+        "is_final": { "type": "boolean" },
+        "locale": { "type": "string", "minLength": 2, "maxLength": 35 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "audioPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["audio_id", "state"],
+      "properties": {
+        "audio_id": { "$ref": "#/$defs/opaqueId" },
+        "state": { "enum": ["started", "completed", "interrupted", "failed"] },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "route": { "enum": ["receiver", "speaker", "wired", "bluetooth", "unknown"] }
+      }
+    },
+    "lifecyclePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code"],
+      "properties": {
+        "code": { "$ref": "#/$defs/opaqueId" },
+        "label": { "type": "string", "maxLength": 160 },
+        "summary": { "$ref": "#/$defs/shortText" },
+        "resource_id": { "$ref": "#/$defs/opaqueId" },
+        "resource_type": { "enum": ["thread", "turn", "job", "policy", "report", "access"] }
+      }
+    },
+    "errorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": { "$ref": "#/$defs/opaqueId" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 300, "pattern": "^[^\\u0000-\\u001f]*$" },
+        "retryable": { "type": "boolean" },
+        "retry_after_seconds": { "type": "integer", "minimum": 1, "maximum": 86400 }
+      }
+    }
+  }
+}
