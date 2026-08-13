@@ -6,13 +6,18 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from altas import __version__
 from altas.cortex.managed_dispatch import CortexDispatchAdmission
 from altas.cortex.dream import MANAGED_CORTEX_CAPABILITY
-from altas.fixed_ops import DailyFixedOpsReport
+from altas.fixed_ops import (
+    SYNTHETIC_EXPORT_CAPABILITY,
+    SyntheticApprovedExport,
+    DailyFixedOpsReport,
+)
 from altas.managed.client import AltasControlPlaneClient, Lease
 from altas.managed.context import ManagedContext, ManagedRequestAuthorization
 from altas.managed.errors import AltasWorkerError, PolicyDenied
@@ -29,6 +34,7 @@ class WorkerSettings:
     model_id: str = "altas-fixed-ops"
     profile_home: Path | None = None
     poll_interval_seconds: float = 3.0
+    approval_poll_interval_seconds: float = 1.0
     request_timeout_seconds: float = 8.0
 
     @classmethod
@@ -55,6 +61,9 @@ class WorkerSettings:
                 or "~/.atlas"
             ).expanduser(),
             poll_interval_seconds=float(os.getenv("ATLAS_POLL_INTERVAL_SECONDS", "3")),
+            approval_poll_interval_seconds=float(
+                os.getenv("ATLAS_APPROVAL_POLL_INTERVAL_SECONDS", "1")
+            ),
             request_timeout_seconds=float(
                 os.getenv("ATLAS_REQUEST_TIMEOUT_SECONDS", "8")
             ),
@@ -291,6 +300,11 @@ class AltasWorker:
         capability = str(job["capability"])
         if capability == MANAGED_CORTEX_CAPABILITY:
             return self._execute_cortex_maintenance(authorization)
+        if capability == SYNTHETIC_EXPORT_CAPABILITY:
+            return self._execute_synthetic_export(
+                job=job,
+                authorization=authorization,
+            )
         if capability != "fixed_ops.daily_report":
             raise LookupError("CapabilityNotRegistered")
 
@@ -325,6 +339,60 @@ class AltasWorker:
         return workflow.run(
             store_id=context.store_id,
             business_date=payload.get("report_date"),
+        )
+
+    def _execute_synthetic_export(
+        self,
+        *,
+        job: dict[str, Any],
+        authorization: ManagedRequestAuthorization,
+    ) -> dict[str, Any]:
+        workflow = SyntheticApprovedExport.from_job(job)
+        payload = job["payload"]
+        relay_session_id = str(payload["relay_session_id"])
+        action = workflow.action()
+        attempt = int(job.get("attempt_count") or 0)
+        if attempt < 1:
+            raise ValueError("SyntheticExportAttemptInvalid")
+        idempotency_key = (
+            f"managed-action:{authorization.context.job_id}:{attempt}:{action.digest()}"
+        )
+        approval = self.client.request_managed_approval(
+            lease=authorization.lease_token,
+            context=authorization.context,
+            claim_token=authorization.claim_token,
+            relay_session_id=relay_session_id,
+            action=action,
+            idempotency_key=idempotency_key,
+        )
+        while approval.get("status") == "pending":
+            expires_at = datetime.fromisoformat(
+                str(approval["expires_at"]).replace("Z", "+00:00")
+            ).astimezone(UTC)
+            if expires_at <= datetime.now(UTC):
+                raise PolicyDenied("APPROVAL_EXPIRED")
+            time.sleep(self.settings.approval_poll_interval_seconds)
+            approval = self.client.get_managed_approval(
+                approval_id=str(approval["id"]),
+                lease=authorization.lease_token,
+                context=authorization.context,
+                claim_token=authorization.claim_token,
+            )
+        if approval.get("status") != "approved":
+            raise PolicyDenied(
+                f"APPROVAL_{str(approval.get('status') or 'INVALID').upper()}"
+            )
+        action_authorization = self.client.consume_managed_approval(
+            approval_id=str(approval["id"]),
+            lease=authorization.lease_token,
+            context=authorization.context,
+            claim_token=authorization.claim_token,
+            action=action,
+            expected_version=int(approval["version"]),
+        )
+        return workflow.execute(
+            context=authorization.context,
+            authorization=action_authorization,
         )
 
     def _profile_home(self) -> Path:

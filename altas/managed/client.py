@@ -8,6 +8,8 @@ from typing import Any
 import httpx
 
 from altas.managed.context import ManagedContext
+from altas.managed.actions import ManagedAction
+from altas.managed.context import ManagedActionAuthorization
 from altas.cortex.managed_dispatch import CortexDispatchAdmission
 from altas.managed.errors import (
     ControlPlaneUnavailable,
@@ -187,6 +189,95 @@ class AltasControlPlaneClient:
             ),
             decision_id=payload.get("decision_id"),
         )
+
+    def request_managed_approval(
+        self,
+        *,
+        lease: str,
+        context: ManagedContext,
+        claim_token: str,
+        relay_session_id: str,
+        action: ManagedAction,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        response = self._request(
+            "POST",
+            "/api/v1/worker/approvals",
+            headers={
+                **self._headers(
+                    lease=lease,
+                    claim_token=claim_token,
+                    context=context,
+                ),
+                "Idempotency-Key": idempotency_key,
+            },
+            json={
+                "relay_session_id": relay_session_id,
+                "action": action.to_mapping(),
+            },
+        )
+        response.raise_for_status()
+        approval = self._json(response).get("approval")
+        if not isinstance(approval, dict):
+            raise ControlPlaneUnavailable("Control Plane returned an invalid approval")
+        return approval
+
+    def get_managed_approval(
+        self,
+        *,
+        approval_id: str,
+        lease: str,
+        context: ManagedContext,
+        claim_token: str,
+    ) -> dict[str, Any]:
+        response = self._request(
+            "GET",
+            f"/api/v1/worker/approvals/{approval_id}",
+            headers=self._headers(
+                lease=lease,
+                claim_token=claim_token,
+                context=context,
+            ),
+        )
+        response.raise_for_status()
+        approval = self._json(response).get("approval")
+        if not isinstance(approval, dict):
+            raise ControlPlaneUnavailable("Control Plane returned an invalid approval")
+        return approval
+
+    def consume_managed_approval(
+        self,
+        *,
+        approval_id: str,
+        lease: str,
+        context: ManagedContext,
+        claim_token: str,
+        action: ManagedAction,
+        expected_version: int,
+    ) -> ManagedActionAuthorization:
+        response = self._request(
+            "POST",
+            f"/api/v1/worker/approvals/{approval_id}/consume",
+            headers=self._headers(
+                lease=lease,
+                claim_token=claim_token,
+                context=context,
+            ),
+            json={
+                "action": action.to_mapping(),
+                "action_digest": action.digest(),
+                "expected_version": expected_version,
+            },
+        )
+        response.raise_for_status()
+        authorization = self._json(response).get("authorization")
+        if not isinstance(authorization, dict):
+            raise ControlPlaneUnavailable(
+                "Control Plane returned an invalid action authorization"
+            )
+        receipt = ManagedActionAuthorization.from_mapping(authorization)
+        receipt.authorize(action=action, context=context)
+        return receipt
 
     def next_job(
         self,

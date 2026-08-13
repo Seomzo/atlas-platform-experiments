@@ -90,6 +90,34 @@ deduplication. Audit metadata excludes content. Queue and event sizes are
 bounded. Device revocation closes active relay scope and cancels nonterminal
 commands. See [`mobile/M02_TEXT_RELAY.md`](mobile/M02_TEXT_RELAY.md).
 
+### Managed action approvals
+
+Consequential managed actions require two independent allows: the ordinary
+server policy decision for the exact running job, followed by atomic consume of
+one exact human approval. The approval service cannot issue an entitlement or
+lease and cannot replace a job claim.
+
+Each decision binds tenant/store, approving user and phone, worker and agent,
+relay session, workflow/capability, exact job and attempt, original lease nonce
+and expiry, action classification and bounded target, canonical action digest,
+policy version, expiry, and audit correlation. Approval expiry cannot outlive
+the original lease. Phone decisions use an expected version and idempotency key
+under an immediate transaction; one race can have only one winner. Worker
+consume is deliberately single use.
+
+Consumption reloads the live job/claim, device/agent, relay pairing/session,
+membership/role/store grant, store, subscription, entitlement, lease, and
+action digest. Device revocation, job terminal/requeue, and disabling a bound
+agent, store, entitlement, or subscription durably cancel nonterminal
+approvals. Other live-policy failures deny before consumption. No prompt,
+skill, prior approval, or model argument can change that context.
+
+Human-readable action fields are allowlisted and bounded, then AES-GCM
+encrypted at rest. Request and response idempotency keys and job claim tokens
+are hash-only. Audit contains IDs, classifications, digests, policy versions,
+fixed decision reasons, and outcomes—not raw credentials or arbitrary customer
+payloads. See [`MANAGED_APPROVALS.md`](MANAGED_APPROVALS.md).
+
 ### Process isolation target
 
 Production uses one Hermes engine process/profile per store or credential
@@ -137,6 +165,10 @@ The prototype uses stable, lower-case machine-readable outcomes such as:
 - `job_capability_mismatch`
 - `model_request_limit_exceeded`
 - `model_requested_token_limit_exceeded`
+- `managed_approval_action_modified`
+- `managed_approval_expired`
+- `managed_approval_context_changed`
+- `managed_approval_already_consumed`
 
 The local managed guard uses `POLICY_UNAVAILABLE` when it cannot obtain a
 server decision at all; that fail-closed transport outcome is distinct from a
@@ -161,6 +193,9 @@ dealership payloads.
 | Phone calls broad Desktop control methods | Phone can call only narrow Control Plane relay endpoints; worker adapter hard-allowlists three loopback RPCs | Separate supported Task Thread service process |
 | Relay reconnect duplicates a prompt | Server and worker durable idempotency; ambiguous non-idempotent local RPC fails closed instead of replaying | Promote durable Task Thread turns end to end |
 | Relay database exposes chat text | AES-GCM payload encryption on both persistence planes; content-free audit | KMS envelope keys and retention/deletion policy |
+| Approval is replayed or raced | Exact digest/version, hashed idempotency, immediate transaction, one-time consume | PostgreSQL row locks and distributed abuse monitoring |
+| Approval is reused after scope changes | Original lease/job attempt/claim plus live identity/policy recheck; scoped cancellation | Distributed invalidation and push reconciliation |
+| Approval display contains injected authority | Fixed action schema and allowlisted target projection; display is never executable authority | Per-connector UX/security review and localization |
 | Job is abandoned or completed by an old attempt | One active claim per device, visibility timeout, one-time hashed claim token | Durable queue with lease renewal and dead-letter policy |
 | Model loops or races exceed expected spend | Atomic per-job request and requested-token reservations | Tenant billing ledger, provider hard caps, and anomaly alerts |
 | Model request multiplies spend through payload extensions | Strict field allowlist, one completion, and bounded messages/request size | Model-specific tokenization plus tenant/provider hard caps |
@@ -188,6 +223,10 @@ The current prototype:
 - Uses fixture data, not a live Tekion connector.
 - Runs the fixture workflow directly; it does not yet launch or supervise a
   Hermes engine process.
+- Implements exact managed approvals and a no-side-effect synthetic export,
+  but no final phone/React approval UI or live consequential connector action.
+  Generic managed tool dispatch has the mandatory consume boundary; only the
+  synthetic workflow currently orchestrates request/wait/consume end to end.
 - Enables the Hermes dispatch guard only inside an authenticated, context-local
   managed request scope. The Atlas provider does not toggle managed mode
   process-wide. The upstream developer CLI remains intentionally unmanaged and

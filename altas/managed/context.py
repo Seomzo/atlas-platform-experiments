@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from altas.cortex.managed_dispatch import CortexDispatchAdmission
+from altas.managed.actions import ACTION_POLICY_VERSION, ManagedAction
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,3 +133,61 @@ class ManagedRequestAuthorization:
                 "ATLAS_CORTEX_DISPATCH_KEY": self.cortex_dispatch_key or "",
             })
         return overlay
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedActionAuthorization:
+    """Receipt proving one exact managed action was atomically consumed."""
+
+    approval_id: str
+    action_digest: str
+    job_id: str
+    job_attempt: int
+    policy_version: str
+    consumed_at: str
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "approval_id",
+            "action_digest",
+            "job_id",
+            "policy_version",
+            "consumed_at",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} is required")
+        if len(self.action_digest) != 64 or any(
+            char not in "0123456789abcdef" for char in self.action_digest
+        ):
+            raise ValueError("action_digest is invalid")
+        if self.job_attempt < 1:
+            raise ValueError("job_attempt is invalid")
+        if self.policy_version != ACTION_POLICY_VERSION:
+            raise ValueError("action policy version is unsupported")
+
+    @classmethod
+    def from_mapping(cls, value: dict[str, Any]) -> "ManagedActionAuthorization":
+        if set(value) != {
+            "approval_id",
+            "action_digest",
+            "job_id",
+            "job_attempt",
+            "policy_version",
+            "consumed_at",
+        }:
+            raise ValueError("managed action authorization fields are invalid")
+        return cls(
+            approval_id=str(value["approval_id"]),
+            action_digest=str(value["action_digest"]),
+            job_id=str(value["job_id"]),
+            job_attempt=int(value["job_attempt"]),
+            policy_version=str(value["policy_version"]),
+            consumed_at=str(value["consumed_at"]),
+        )
+
+    def authorize(self, *, action: ManagedAction, context: ManagedContext) -> None:
+        if self.job_id != context.job_id:
+            raise PermissionError("managed approval job mismatch")
+        if self.action_digest != action.digest():
+            raise PermissionError("managed approval action mismatch")

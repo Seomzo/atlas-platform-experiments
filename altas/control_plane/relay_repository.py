@@ -352,7 +352,7 @@ class RelayRepository:
                     now,
                 ),
             )
-            self._insert_control_event(
+            self.insert_control_event(
                 connection,
                 session_id=session_id,
                 source_event_id=f"control-plane:{command_id}:accepted",
@@ -451,7 +451,7 @@ class RelayRepository:
                 if command_type == "prompt.submit"
                 else "session.interrupt.accepted"
             )
-            self._insert_control_event(
+            self.insert_control_event(
                 connection,
                 session_id=session_id,
                 source_event_id=f"control-plane:{command_id}:accepted",
@@ -530,7 +530,7 @@ class RelayRepository:
         if int(count["count"]) >= max_pending_commands:
             raise RelayBackpressure("relay_worker_queue_full")
 
-    def _insert_control_event(
+    def insert_control_event(
         self,
         connection: sqlite3.Connection,
         *,

@@ -29,12 +29,20 @@ before adding live Tekion, billing, Slack, or installer complexity.
 14. Policy and model calls from a superseded claim attempt are denied.
 15. Model requests cannot multiply completions or forward unreviewed provider
     extensions, and prompt/tool payloads have deterministic size ceilings.
+16. A consequential synthetic action displays one bounded target, accepts only
+    one exact phone decision, and executes only after a single-use consume bound
+    to its original lease, claim, and job attempt.
+17. Cross-store/job, stale-lease, superseded-attempt, modified-action,
+    expired-approval, disabled-device, and unavailable-policy paths execute no
+    consequential action.
 
 ## Quality gates
 
 - Python tests cover authentication, lease validation, scope isolation, policy,
   job transitions, model usage, and device revocation.
 - Managed-mode engine policy fails closed when the Control Plane is unavailable.
+- Consequential managed dispatch fails closed when exact approval is missing,
+  unavailable, modified, expired, already used, or outside live policy scope.
 - Static product surfaces consistently spell the name “Atlas.”
 - A local quickstart works without external accounts.
 - The dashboard is usable at desktop and narrow viewport sizes.
