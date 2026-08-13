@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:atlas:mobile:error:v1",
+  "title": "Atlas Mobile Error v1",
+  "description": "Stable, safe error envelope for mobile HTTP and stream control frames.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "code", "message", "correlation_id", "retryable"],
+  "properties": {
+    "schema_version": { "const": "atlas.mobile.error.v1" },
+    "code": {
+      "enum": [
+        "AUTH_REQUIRED",
+        "SESSION_EXPIRED",
+        "DEVICE_REVOKED",
+        "MEMBERSHIP_REVOKED",
+        "SCOPE_FORBIDDEN",
+        "PAIRING_REVOKED",
+        "WORKER_UNAVAILABLE",
+        "IDEMPOTENCY_CONFLICT",
+        "QUEUE_FULL",
+        "RATE_LIMITED",
+        "CURSOR_INVALID",
+        "CURSOR_EXPIRED",
+        "EVENT_GAP",
+        "ACTION_UNCLASSIFIED",
+        "APPROVAL_STALE",
+        "APPROVAL_EXPIRED",
+        "OUTCOME_UNCERTAIN",
+        "UNSUPPORTED_CONTRACT",
+        "PAYLOAD_TOO_LARGE",
+        "VALIDATION_FAILED",
+        "INTERNAL_UNAVAILABLE"
+      ]
+    },
+    "message": { "type": "string", "minLength": 1, "maxLength": 300, "pattern": "^[^\\u0000-\\u001f]*$" },
+    "correlation_id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "retryable": { "type": "boolean" },
+    "retry_after_seconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
+    "details": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "resource_type": { "enum": ["device", "membership", "pairing", "worker", "session", "command", "cursor", "approval", "contract"] },
+        "resource_id": { "type": "string", "minLength": 3, "maxLength": 160, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
+        "last_seen_at": { "type": "string", "format": "date-time" },
+        "replay_available_from": { "type": "string", "format": "date-time" },
+        "supported_versions": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^atlas\\.mobile\\.v[1-9][0-9]*$" }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "retryable": { "const": false } }, "required": ["retryable"] },
+      "then": { "not": { "required": ["retry_after_seconds"] } }
+    },
+    {
+      "if": { "required": ["retry_after_seconds"] },
+      "then": { "properties": { "retryable": { "const": true } } }
+    }
+  ]
+}

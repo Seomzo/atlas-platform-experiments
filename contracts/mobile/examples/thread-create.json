@@ -1,0 +1,7 @@
+{
+  "schema_version": "atlas.mobile.thread.v1",
+  "message_type": "create",
+  "worker_device_id": "device_worker",
+  "profile_id": "profile_daily_report",
+  "title": "Inventory review"
+}

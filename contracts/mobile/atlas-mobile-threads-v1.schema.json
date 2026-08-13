@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:atlas:mobile:thread:v1",
+  "title": "Atlas Mobile Thread v1",
+  "description": "Product thread resource and exact lifecycle mutations. Store scope is a server-authorized path/context, never body authority.",
+  "oneOf": [
+    { "$ref": "#/$defs/threadResource" },
+    { "$ref": "#/$defs/create" },
+    { "$ref": "#/$defs/rename" },
+    { "$ref": "#/$defs/archive" },
+    { "$ref": "#/$defs/resume" },
+    { "$ref": "#/$defs/fork" }
+  ],
+  "$defs": {
+    "opaqueId": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[^\\u0000-\\u001f]*$"
+    },
+    "threadResource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "message_type", "thread_id", "version", "state", "title", "store_id", "worker_device_id", "profile_id", "relay_session_id", "updated_at", "unread", "cursor"],
+      "properties": {
+        "schema_version": { "const": "atlas.mobile.thread.v1" },
+        "message_type": { "const": "resource" },
+        "thread_id": { "$ref": "#/$defs/opaqueId" },
+        "version": { "type": "integer", "minimum": 1 },
+        "state": { "enum": ["new", "running", "waiting_for_user", "approval_required", "completed", "failed", "interrupted", "uncertain", "archived"] },
+        "title": { "$ref": "#/$defs/title" },
+        "store_id": { "$ref": "#/$defs/opaqueId" },
+        "worker_device_id": { "$ref": "#/$defs/opaqueId" },
+        "profile_id": { "$ref": "#/$defs/opaqueId" },
+        "relay_session_id": { "$ref": "#/$defs/opaqueId" },
+        "parent_thread_id": { "$ref": "#/$defs/opaqueId" },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "unread": { "type": "boolean" },
+        "safe_summary": { "type": "string", "maxLength": 512, "pattern": "^[^\\u0000]*$" },
+        "cursor": { "type": "string", "minLength": 16, "maxLength": 2048 }
+      }
+    },
+    "create": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "message_type", "worker_device_id", "profile_id"],
+      "properties": {
+        "schema_version": { "const": "atlas.mobile.thread.v1" },
+        "message_type": { "const": "create" },
+        "worker_device_id": { "$ref": "#/$defs/opaqueId" },
+        "profile_id": { "$ref": "#/$defs/opaqueId" },
+        "title": { "$ref": "#/$defs/title" }
+      }
+    },
+    "rename": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "message_type", "expected_version", "title"],
+      "properties": {
+        "schema_version": { "const": "atlas.mobile.thread.v1" },
+        "message_type": { "const": "rename" },
+        "expected_version": { "type": "integer", "minimum": 1 },
+        "title": { "$ref": "#/$defs/title" }
+      }
+    },
+    "archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "message_type", "expected_version"],
+      "properties": {
+        "schema_version": { "const": "atlas.mobile.thread.v1" },
+        "message_type": { "const": "archive" },
+        "expected_version": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "resume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "message_type", "expected_version"],
+      "properties": {
+        "schema_version": { "const": "atlas.mobile.thread.v1" },
+        "message_type": { "const": "resume" },
+        "expected_version": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "fork": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "message_type", "expected_version"],
+      "properties": {
+        "schema_version": { "const": "atlas.mobile.thread.v1" },
+        "message_type": { "const": "fork" },
+        "expected_version": { "type": "integer", "minimum": 1 },
+        "source_event_id": { "$ref": "#/$defs/opaqueId" },
+        "title": { "$ref": "#/$defs/title" }
+      }
+    }
+  }
+}

@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:atlas:mobile:identity:v1",
+  "title": "Atlas Mobile Identity v1",
+  "description": "Versioned phone enrollment, proof, renewal, and access bundle messages. No tenant field is accepted.",
+  "oneOf": [
+    { "$ref": "#/$defs/authTransaction" },
+    { "$ref": "#/$defs/authTransactionResult" },
+    { "$ref": "#/$defs/authExchange" },
+    { "$ref": "#/$defs/accountAccess" },
+    { "$ref": "#/$defs/enrollmentRedemption" },
+    { "$ref": "#/$defs/deviceSessionProof" },
+    { "$ref": "#/$defs/accountRenewal" },
+    { "$ref": "#/$defs/accessBundle" }
+  ],
+  "$defs": {
+    "opaqueId": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "nonce": {
+      "type": "string",
+      "minLength": 22,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "signature": {
+      "type": "string",
+      "minLength": 80,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "authTransaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "message_type", "code_challenge", "code_challenge_method", "redirect_uri", "client_nonce"],
+      "properties": {
+        "schema_version": { "const": "atlas.mobile.identity.v1" },
+        "message_type": { "const": "auth_transaction" },
+        "code_challenge": { "type": "string", "minLength": 43, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$" },
+        "code_challenge_method": { "const": "S256" },
+        "redirect_uri": { "type": "string", "format": "uri", "maxLength": 1024 },
+        "client_nonce": { "$ref": "#/$defs/nonce" }
+      }
+    },
+    "authTransactionResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "message_type", "transaction_id", "authorization_url", "state", "expires_at"],
+      "properties": {
+        "schema_version": { "const": "atlas.mobile.identity.v1" },
+        "message_type": { "const": "auth_transaction_result" },
+        "transaction_id": { "$ref": "#/$defs/opaqueId" },
+        "authorization_url": { "type": "string", "format": "uri", "maxLength": 4096 },
+        "state": { "type": "string", "minLength": 22, "maxLength": 256, "pattern": "^[A-Za-z0-9_-]+$" },
+        "expires_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "authExchange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "message_type", "transaction_id", "authorization_code", "state", "code_verifier", "redirect_uri"],
+      "properties": {
+        "schema_version": { "const": "atlas.mobile.identity.v1" },
+        "message_type": { "const": "auth_exchange" },
+        "transaction_id": { "$ref": "#/$defs/opaqueId" },
+        "authorization_code": { "type": "string", "minLength": 8, "maxLength": 4096 },
+        "state": { "type": "string", "minLength": 22, "maxLength": 256, "pattern": "^[A-Za-z0-9_-]+$" },
+        "code_verifier": { "type": "string", "minLength": 43, "maxLength": 128, "pattern": "^[A-Za-z0-9._~-]+$" },
+        "redirect_uri": { "type": "string", "format": "uri", "maxLength": 1024 }
+      }
+    },
+    "accountAccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "message_type", "account_access_token", "account_access_expires_at", "user_id"],
+      "properties": {
+        "schema_version": { "const": "atlas.mobile.identity.v1" },
+        "message_type": { "const": "account_access" },
+        "account_access_token": { "type": "string", "minLength": 32, "maxLength": 4096 },
+        "account_access_expires_at": { "type": "string", "format": "date-time" },
+        "user_id": { "$ref": "#/$defs/opaqueId" }
+      }
+    },
+    "enrollmentRedemption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "message_type", "enrollment_token", "algorithm", "public_key", "platform", "platform_version", "app_version"],
+      "properties": {
+        "schema_version": { "const": "atlas.mobile.identity.v1" },
+        "message_type": { "const": "enrollment_redemption" },
+        "enrollment_token": { "type": "string", "minLength": 22, "maxLength": 256, "pattern": "^[A-Za-z0-9_-]+$" },
+        "algorithm": { "enum": ["Ed25519", "P-256"] },
+        "public_key": { "type": "string", "minLength": 43, "maxLength": 256, "pattern": "^[A-Za-z0-9_-]+$" },
+        "platform": { "const": "ios" },
+        "platform_version": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "app_version": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "deviceSessionProof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "message_type", "device_id", "timestamp", "nonce", "signature"],
+      "properties": {
+        "schema_version": { "const": "atlas.mobile.identity.v1" },
+        "message_type": { "const": "device_session_proof" },
+        "device_id": { "$ref": "#/$defs/opaqueId" },
+        "timestamp": { "type": "integer", "minimum": 1 },
+        "nonce": { "$ref": "#/$defs/nonce" },
+        "signature": { "$ref": "#/$defs/signature" }
+      }
+    },
+    "accountRenewal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "message_type", "device_id", "renewal_handle", "timestamp", "nonce", "signature"],
+      "properties": {
+        "schema_version": { "const": "atlas.mobile.identity.v1" },
+        "message_type": { "const": "account_renewal" },
+        "device_id": { "$ref": "#/$defs/opaqueId" },
+        "renewal_handle": { "type": "string", "minLength": 32, "maxLength": 512, "pattern": "^[A-Za-z0-9_-]+$" },
+        "timestamp": { "type": "integer", "minimum": 1 },
+        "nonce": { "$ref": "#/$defs/nonce" },
+        "signature": { "$ref": "#/$defs/signature" }
+      }
+    },
+    "accessBundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "message_type", "account_access_token", "account_access_expires_at", "device_session", "device_session_expires_at", "renewal_handle"],
+      "properties": {
+        "schema_version": { "const": "atlas.mobile.identity.v1" },
+        "message_type": { "const": "access_bundle" },
+        "account_access_token": { "type": "string", "minLength": 32, "maxLength": 4096 },
+        "account_access_expires_at": { "type": "string", "format": "date-time" },
+        "device_session": { "type": "string", "minLength": 32, "maxLength": 4096 },
+        "device_session_expires_at": { "type": "string", "format": "date-time" },
+        "renewal_handle": { "type": "string", "minLength": 32, "maxLength": 512, "pattern": "^[A-Za-z0-9_-]+$" },
+        "renewal_family_expires_at": {
+          "description": "Server-configured; M02 does not choose the production lifetime.",
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  }
+}

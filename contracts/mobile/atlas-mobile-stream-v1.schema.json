@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:atlas:mobile:stream:v1",
+  "title": "Atlas Mobile Foreground Stream v1",
+  "description": "Control and event frames for the authenticated foreground phone WebSocket.",
+  "oneOf": [
+    { "$ref": "#/$defs/welcome" },
+    { "$ref": "#/$defs/subscribe" },
+    { "$ref": "#/$defs/subscribed" },
+    { "$ref": "#/$defs/event" },
+    { "$ref": "#/$defs/ack" },
+    { "$ref": "#/$defs/heartbeat" },
+    { "$ref": "#/$defs/replayBoundary" },
+    { "$ref": "#/$defs/authExpiring" },
+    { "$ref": "#/$defs/serverDrain" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "opaqueId": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "cursor": { "type": "string", "minLength": 16, "maxLength": 2048 },
+    "base": {
+      "type": "object",
+      "required": ["schema_version", "type"],
+      "properties": {
+        "schema_version": { "const": "atlas.mobile.stream.v1" },
+        "type": {
+          "enum": ["welcome", "subscribe", "subscribed", "event", "ack", "heartbeat", "replay.begin", "replay.complete", "auth.expiring", "server.drain", "error"]
+        }
+      }
+    },
+    "welcome": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_version", "type", "connection_id", "selected_contract_version", "heartbeat_interval_seconds", "heartbeat_timeout_seconds", "maximum_event_bytes", "maximum_subscriptions", "server_time", "replay_available_from"],
+          "properties": {
+            "schema_version": { "const": "atlas.mobile.stream.v1" },
+            "type": { "const": "welcome" },
+            "connection_id": { "$ref": "#/$defs/opaqueId" },
+            "selected_contract_version": { "const": "atlas.mobile.v1" },
+            "heartbeat_interval_seconds": { "type": "integer", "minimum": 5, "maximum": 300 },
+            "heartbeat_timeout_seconds": { "type": "integer", "minimum": 10, "maximum": 900 },
+            "maximum_event_bytes": { "type": "integer", "minimum": 1024, "maximum": 131072 },
+            "maximum_subscriptions": { "type": "integer", "minimum": 1, "maximum": 64 },
+            "server_time": { "type": "string", "format": "date-time" },
+            "replay_available_from": { "type": "string", "format": "date-time" }
+          }
+        }
+      ]
+    },
+    "subscribe": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_version", "type", "subscription_id", "relay_session_id"],
+          "properties": {
+            "schema_version": { "const": "atlas.mobile.stream.v1" },
+            "type": { "const": "subscribe" },
+            "subscription_id": { "$ref": "#/$defs/opaqueId" },
+            "relay_session_id": { "$ref": "#/$defs/opaqueId" },
+            "after_cursor": { "$ref": "#/$defs/cursor" }
+          }
+        }
+      ]
+    },
+    "subscribed": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_version", "type", "subscription_id", "worker_state", "replay_available_from"],
+          "properties": {
+            "schema_version": { "const": "atlas.mobile.stream.v1" },
+            "type": { "const": "subscribed" },
+            "subscription_id": { "$ref": "#/$defs/opaqueId" },
+            "worker_state": { "enum": ["connected", "degraded", "unavailable", "revoked"] },
+            "replay_available_from": { "type": "string", "format": "date-time" }
+          }
+        }
+      ]
+    },
+    "event": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_version", "type", "subscription_id", "cursor", "event"],
+          "properties": {
+            "schema_version": { "const": "atlas.mobile.stream.v1" },
+            "type": { "const": "event" },
+            "subscription_id": { "$ref": "#/$defs/opaqueId" },
+            "cursor": { "$ref": "#/$defs/cursor" },
+            "event": { "$ref": "urn:atlas:mobile:event:v1" }
+          }
+        }
+      ]
+    },
+    "ack": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_version", "type", "subscription_id", "cursor"],
+          "properties": {
+            "schema_version": { "const": "atlas.mobile.stream.v1" },
+            "type": { "const": "ack" },
+            "subscription_id": { "$ref": "#/$defs/opaqueId" },
+            "cursor": { "$ref": "#/$defs/cursor" }
+          }
+        }
+      ]
+    },
+    "heartbeat": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_version", "type", "sent_at"],
+          "properties": {
+            "schema_version": { "const": "atlas.mobile.stream.v1" },
+            "type": { "const": "heartbeat" },
+            "sent_at": { "type": "string", "format": "date-time" }
+          }
+        }
+      ]
+    },
+    "replayBoundary": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_version", "type", "subscription_id"],
+          "properties": {
+            "schema_version": { "const": "atlas.mobile.stream.v1" },
+            "type": { "enum": ["replay.begin", "replay.complete"] },
+            "subscription_id": { "$ref": "#/$defs/opaqueId" },
+            "cursor": { "$ref": "#/$defs/cursor" }
+          }
+        }
+      ]
+    },
+    "authExpiring": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_version", "type", "expires_at"],
+          "properties": {
+            "schema_version": { "const": "atlas.mobile.stream.v1" },
+            "type": { "const": "auth.expiring" },
+            "expires_at": { "type": "string", "format": "date-time" }
+          }
+        }
+      ]
+    },
+    "serverDrain": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_version", "type", "deadline", "reconnect_after_seconds"],
+          "properties": {
+            "schema_version": { "const": "atlas.mobile.stream.v1" },
+            "type": { "const": "server.drain" },
+            "deadline": { "type": "string", "format": "date-time" },
+            "reconnect_after_seconds": { "type": "integer", "minimum": 0, "maximum": 300 }
+          }
+        }
+      ]
+    },
+    "error": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_version", "type", "error"],
+          "properties": {
+            "schema_version": { "const": "atlas.mobile.stream.v1" },
+            "type": { "const": "error" },
+            "subscription_id": { "$ref": "#/$defs/opaqueId" },
+            "error": { "$ref": "urn:atlas:mobile:error:v1" }
+          }
+        }
+      ]
+    }
+  }
+}

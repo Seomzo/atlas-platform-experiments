@@ -1,0 +1,7 @@
+{
+  "schema_version": "atlas.mobile.stream.v1",
+  "type": "subscribe",
+  "subscription_id": "subscription_01",
+  "relay_session_id": "relay_session_01",
+  "after_cursor": "opaque-signed-cursor-0001"
+}

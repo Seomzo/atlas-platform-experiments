@@ -1,0 +1,9 @@
+{
+  "schema_version": "atlas.mobile.command.v1",
+  "command_id": "command_client_01",
+  "type": "prompt.submit",
+  "relay_session_id": "relay_session_01",
+  "payload": {
+    "text": "Check the latest inventory variance."
+  }
+}

@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:atlas:mobile:command:v1",
+  "title": "Atlas Mobile Command v1",
+  "description": "Narrow phone command. Idempotency-Key is also required as an HTTP header.",
+  "oneOf": [
+    { "$ref": "#/$defs/sessionCreate" },
+    { "$ref": "#/$defs/promptSubmit" },
+    { "$ref": "#/$defs/sessionInterrupt" }
+  ],
+  "$defs": {
+    "opaqueId": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "base": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command_id", "type", "payload"],
+      "properties": {
+        "schema_version": { "const": "atlas.mobile.command.v1" },
+        "command_id": { "$ref": "#/$defs/opaqueId" },
+        "type": { "enum": ["session.create", "prompt.submit", "session.interrupt"] },
+        "relay_session_id": { "$ref": "#/$defs/opaqueId" },
+        "payload": { "type": "object" }
+      }
+    },
+    "sessionCreatePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pairing_id", "profile_id"],
+      "properties": {
+        "pairing_id": { "$ref": "#/$defs/opaqueId" },
+        "profile_id": { "$ref": "#/$defs/opaqueId" },
+        "title": { "type": "string", "maxLength": 160 }
+      }
+    },
+    "promptPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text"],
+      "properties": {
+        "text": { "type": "string", "minLength": 1, "maxLength": 16000, "pattern": "^[^\\u0000]*$" }
+      }
+    },
+    "interruptPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "turn_id": { "$ref": "#/$defs/opaqueId" },
+        "reason": { "enum": ["user_requested"] }
+      }
+    },
+    "sessionCreate": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "properties": {
+            "type": { "const": "session.create" },
+            "payload": { "$ref": "#/$defs/sessionCreatePayload" }
+          }
+        }
+      ]
+    },
+    "promptSubmit": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["relay_session_id"],
+          "properties": {
+            "type": { "const": "prompt.submit" },
+            "payload": { "$ref": "#/$defs/promptPayload" }
+          }
+        }
+      ]
+    },
+    "sessionInterrupt": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["relay_session_id"],
+          "properties": {
+            "type": { "const": "session.interrupt" },
+            "payload": { "$ref": "#/$defs/interruptPayload" }
+          }
+        }
+      ]
+    }
+  }
+}

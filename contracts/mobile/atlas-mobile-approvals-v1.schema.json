@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:atlas:mobile:approval:v1",
+  "title": "Atlas Mobile Approval v1",
+  "description": "Phone-safe managed approval resource or exact decision request.",
+  "oneOf": [
+    { "$ref": "#/$defs/approvalResource" },
+    { "$ref": "#/$defs/approvalDecision" }
+  ],
+  "$defs": {
+    "opaqueId": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "managedAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "operation",
+        "summary",
+        "target_type",
+        "target_id",
+        "target_label"
+      ],
+      "properties": {
+        "schema_version": { "const": "atlas.managed-action.v1" },
+        "kind": {
+          "enum": [
+            "read",
+            "navigate",
+            "analyze",
+            "draft",
+            "download_export",
+            "send_message",
+            "submit",
+            "mutate",
+            "credential",
+            "administrative"
+          ]
+        },
+        "operation": { "$ref": "#/$defs/opaqueId" },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[^\\u0000-\\u001f]*$" },
+        "target_type": { "$ref": "#/$defs/opaqueId" },
+        "target_id": { "$ref": "#/$defs/opaqueId" },
+        "target_label": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[^\\u0000-\\u001f]*$" }
+      }
+    },
+    "approvalResource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "message_type",
+        "approval_id",
+        "store_id",
+        "phone_device_id",
+        "worker_device_id",
+        "agent_id",
+        "job_id",
+        "relay_session_id",
+        "job_attempt",
+        "workflow",
+        "capability",
+        "action",
+        "action_digest",
+        "policy_version",
+        "correlation_id",
+        "status",
+        "version",
+        "created_at",
+        "updated_at",
+        "expires_at"
+      ],
+      "properties": {
+        "schema_version": { "const": "atlas.mobile.approval.v1" },
+        "message_type": { "const": "resource" },
+        "approval_id": { "$ref": "#/$defs/opaqueId" },
+        "store_id": { "$ref": "#/$defs/opaqueId" },
+        "phone_device_id": { "$ref": "#/$defs/opaqueId" },
+        "worker_device_id": { "$ref": "#/$defs/opaqueId" },
+        "agent_id": { "$ref": "#/$defs/opaqueId" },
+        "job_id": { "$ref": "#/$defs/opaqueId" },
+        "relay_session_id": { "$ref": "#/$defs/opaqueId" },
+        "job_attempt": { "type": "integer", "minimum": 1 },
+        "workflow": { "$ref": "#/$defs/opaqueId" },
+        "capability": { "$ref": "#/$defs/opaqueId" },
+        "action": { "$ref": "#/$defs/managedAction" },
+        "action_digest": { "$ref": "#/$defs/sha256" },
+        "policy_version": { "$ref": "#/$defs/opaqueId" },
+        "correlation_id": { "$ref": "#/$defs/opaqueId" },
+        "status": { "enum": ["pending", "approved", "denied", "expired", "canceled", "consumed"] },
+        "version": { "type": "integer", "minimum": 1 },
+        "decision": { "enum": ["approve", "deny", null] },
+        "decision_reason": { "enum": ["user_approved", "user_denied", "not_recognized", "wrong_target", null] },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "decided_at": { "type": ["string", "null"], "format": "date-time" },
+        "consumed_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "approvalDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "message_type",
+        "approval_id",
+        "decision",
+        "reason",
+        "expected_version",
+        "action_digest"
+      ],
+      "properties": {
+        "schema_version": { "const": "atlas.mobile.approval.v1" },
+        "message_type": { "const": "decision" },
+        "approval_id": { "$ref": "#/$defs/opaqueId" },
+        "decision": { "enum": ["approve", "deny"] },
+        "reason": { "enum": ["user_approved", "user_denied", "not_recognized", "wrong_target"] },
+        "expected_version": { "type": "integer", "minimum": 1 },
+        "action_digest": { "$ref": "#/$defs/sha256" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "decision": { "const": "approve" } }, "required": ["decision"] },
+          "then": { "properties": { "reason": { "const": "user_approved" } } }
+        },
+        {
+          "if": { "properties": { "decision": { "const": "deny" } }, "required": ["decision"] },
+          "then": { "properties": { "reason": { "enum": ["user_denied", "not_recognized", "wrong_target"] } } }
+        }
+      ]
+    }
+  }
+}
